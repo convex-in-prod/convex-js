@@ -314,7 +314,10 @@ export interface ConvexReactClientOptions extends BaseConvexClientOptions {
   /**
    * An already-constructed {@link BaseConvexClient} to use instead of
    * constructing one internally. When provided, this client (and its
-   * derived {@link PaginatedQueryClient}) is used for all operations.
+   * derived {@link PaginatedQueryClient}) is used for all operations. Configure
+   * base client options, including `queryWorkloadClass` and `onServerPressure`,
+   * when constructing the supplied client; the other options in this object
+   * do not reconfigure it.
    *
    * @internal
    */
@@ -716,6 +719,21 @@ export class ConvexReactClient {
         }
       });
     });
+  }
+
+  /**
+   * Ask the backend to retry only the queries deferred in the current
+   * degradable-query pressure epoch.
+   *
+   * @returns `true` only when the current epoch accepted its first send.
+   * Inactive, stale, duplicate, and temporarily unsendable retries return
+   * `false`.
+   * @throws When `epoch` is not a positive unsigned 32-bit integer.
+   *
+   * @public
+   */
+  retryDegradableQueries(epoch: number): boolean {
+    return this.sync.retryDegradableQueries(epoch);
   }
 
   /**
