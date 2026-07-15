@@ -36,8 +36,10 @@ export function parseServerMessage(
       }
     }
     case "Transition": {
+      const serverPressure = parseServerPressure(encoded.serverPressure);
       return {
         ...encoded,
+        ...(serverPressure === undefined ? {} : { serverPressure }),
         startVersion: {
           ...encoded.startVersion,
           ts: u64ToLong(encoded.startVersion.ts),
@@ -53,6 +55,27 @@ export function parseServerMessage(
     }
   }
   return undefined as never;
+}
+
+function parseServerPressure(encoded: unknown): ServerPressure | undefined {
+  if (encoded === undefined) {
+    return undefined;
+  }
+  if (typeof encoded !== "object" || encoded === null) {
+    throw new Error("Invalid serverPressure in Transition");
+  }
+
+  const { kind, retryAfterMs } = encoded as Record<string, unknown>;
+  if (
+    kind !== "degradable_query_capacity" ||
+    typeof retryAfterMs !== "number" ||
+    !Number.isSafeInteger(retryAfterMs) ||
+    retryAfterMs <= 0 ||
+    retryAfterMs > 0xffff_ffff
+  ) {
+    throw new Error("Invalid serverPressure in Transition");
+  }
+  return { kind, retryAfterMs };
 }
 
 export function encodeClientMessage(
@@ -116,6 +139,14 @@ export type QueryJournal = string | null;
  * Client message schema
  */
 
+/**
+ * A query workload class that opts a client's root reactive queries into
+ * temporary degradation when the backend is under pressure.
+ *
+ * @public
+ */
+export type QueryWorkloadClass = "degradable";
+
 type Connect = {
   type: "Connect";
   sessionId: string;
@@ -123,6 +154,7 @@ type Connect = {
   lastCloseReason: string | null;
   maxObservedTimestamp?: TS | undefined;
   clientTs: number;
+  queryWorkloadClass?: QueryWorkloadClass | undefined;
 };
 
 export type AddQuery = {
@@ -226,6 +258,18 @@ export type TS = U64;
 type EncodedTS = EncodedU64;
 type LogLines = string[];
 
+/**
+ * Temporary server pressure reported for degradable reactive queries.
+ * `retryAfterMs` is a strictly positive unsigned 32-bit integer and is a
+ * lower bound; applications should add jitter before resubscribing.
+ *
+ * @public
+ */
+export type ServerPressure = {
+  kind: "degradable_query_capacity";
+  retryAfterMs: number;
+};
+
 export type StateVersion = {
   querySet: QuerySetVersion;
   ts: TS;
@@ -259,6 +303,7 @@ export type Transition = {
   startVersion: StateVersion;
   endVersion: StateVersion;
   modifications: StateModification[];
+  serverPressure?: ServerPressure;
   clientClockSkew?: number;
   serverTs?: number;
 };

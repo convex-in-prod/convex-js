@@ -36,13 +36,16 @@ import {
 import {
   ActionRequest,
   MutationRequest,
+  QueryWorkloadClass,
   QueryId,
   QueryJournal,
   ServerMessage,
+  ServerPressure,
   RequestId,
   TS,
   UserIdentityAttributes,
 } from "./protocol.js";
+export type { QueryWorkloadClass, ServerPressure } from "./protocol.js";
 import { RemoteQuerySet } from "./remote_query_set.js";
 import { QueryToken, serializePathAndArgs } from "./udf_path_utils.js";
 import { ReconnectMetadata, WebSocketManager } from "./web_socket_manager.js";
@@ -59,11 +62,48 @@ import { ConvexError } from "../../values/errors.js";
 import { jwtDecode } from "../../vendor/jwt-decode/index.js";
 
 /**
+ * A handler for temporary server pressure affecting degradable reactive
+ * queries.
+ *
+ * The transition carrying the pressure is applied before this handler runs.
+ * Existing transition listeners run first; if one of them throws, this handler
+ * is not reached and the listener's existing error behavior is unchanged.
+ * Applications should pause the affected query subscriptions while retaining
+ * their last successful values. Keep the socket connected: mutations and
+ * actions continue normally and are not degradable.
+ *
+ * This handler should update application state synchronously. Returned promises
+ * are not awaited, but rejections and synchronous errors are logged and do not
+ * interrupt synchronization.
+ *
+ * @public
+ */
+export type ServerPressureHandler = (
+  pressure: ServerPressure,
+) => void | Promise<void>;
+
+/**
  * Options for {@link BaseConvexClient}.
  *
  * @public
  */
 export interface BaseConvexClientOptions {
+  /**
+   * Opts this client's root reactive queries into temporary degradation when
+   * the backend is configured to limit degradable query capacity.
+   *
+   * Omit this option to preserve normal query behavior. This setting does not
+   * apply to mutations or actions.
+   */
+  queryWorkloadClass?: QueryWorkloadClass;
+  /**
+   * Called after a server transition reports temporary pressure for
+   * degradable reactive queries.
+   *
+   * Applications should pause query subscriptions instead of disconnecting
+   * the socket. Mutations and actions remain operational.
+   */
+  onServerPressure?: ServerPressureHandler;
   /**
    * Whether to prompt the user if they have unsaved changes pending
    * when navigating away or closing a web page.
@@ -310,6 +350,8 @@ export class BaseConvexClient {
       validateDeploymentUrl(address);
     }
     options = { ...options };
+    const queryWorkloadClass = options.queryWorkloadClass;
+    const onServerPressure = options.onServerPressure;
     const authRefreshTokenLeewaySeconds =
       options.authRefreshTokenLeewaySeconds ?? 10;
     let webSocketConstructor = options.webSocketConstructor;
@@ -432,6 +474,7 @@ export class BaseConvexClient {
             type: "Connect",
             sessionId: this._sessionId,
             maxObservedTimestamp: this.maxObservedTimestamp,
+            ...(queryWorkloadClass === undefined ? {} : { queryWorkloadClass }),
           });
 
           // Throw out our remote query, reissue queries
@@ -479,6 +522,28 @@ export class BaseConvexClient {
                 this.remoteQuerySet.timestamp(),
               );
               this.notifyOnQueryResultChanges(completedRequests);
+              if (serverMessage.serverPressure !== undefined) {
+                try {
+                  const result = onServerPressure?.(
+                    serverMessage.serverPressure,
+                  );
+                  if (result !== undefined) {
+                    void Promise.resolve(result).catch((error) => {
+                      this.logger.error(
+                        "onServerPressure callback rejected:",
+                        error,
+                      );
+                    });
+                  }
+                } catch (error) {
+                  // Application pressure policy must not interrupt WebSocket
+                  // receive bookkeeping after the transition has been applied.
+                  this.logger.error(
+                    "onServerPressure callback threw an error:",
+                    error,
+                  );
+                }
+              }
               break;
             }
             case "MutationResponse": {
