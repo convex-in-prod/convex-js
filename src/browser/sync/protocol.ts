@@ -36,8 +36,10 @@ export function parseServerMessage(
       }
     }
     case "Transition": {
+      const serverPressure = parseServerPressure(encoded.serverPressure);
       return {
         ...encoded,
+        ...(serverPressure === undefined ? {} : { serverPressure }),
         startVersion: {
           ...encoded.startVersion,
           ts: u64ToLong(encoded.startVersion.ts),
@@ -55,6 +57,60 @@ export function parseServerMessage(
   return undefined as never;
 }
 
+function parseServerPressure(encoded: unknown): ServerPressure | undefined {
+  if (encoded === undefined) {
+    return undefined;
+  }
+  if (typeof encoded !== "object" || encoded === null) {
+    throw new Error("Invalid serverPressure in Transition");
+  }
+
+  const { kind, state, epoch, retryAfterMs, pendingQueryCount } =
+    encoded as Record<string, unknown>;
+  if (kind !== "degradable_query_capacity") {
+    throw new Error("Invalid serverPressure in Transition");
+  }
+  const isU32 = (value: unknown): value is number =>
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= 0xffff_ffff;
+  const isPositiveU32 = (value: unknown): value is number =>
+    isU32(value) && value > 0;
+
+  if (state === undefined) {
+    if (
+      !isPositiveU32(retryAfterMs) ||
+      epoch !== undefined ||
+      pendingQueryCount !== undefined
+    ) {
+      throw new Error("Invalid serverPressure in Transition");
+    }
+    return { kind, retryAfterMs };
+  }
+  if (state === "active") {
+    if (
+      !isPositiveU32(epoch) ||
+      !isPositiveU32(retryAfterMs) ||
+      !isPositiveU32(pendingQueryCount)
+    ) {
+      throw new Error("Invalid serverPressure in Transition");
+    }
+    return { kind, state, epoch, retryAfterMs, pendingQueryCount };
+  }
+  if (state === "cleared") {
+    if (
+      !isPositiveU32(epoch) ||
+      retryAfterMs !== undefined ||
+      pendingQueryCount !== 0
+    ) {
+      throw new Error("Invalid serverPressure in Transition");
+    }
+    return { kind, state, epoch, pendingQueryCount };
+  }
+  throw new Error("Invalid serverPressure in Transition");
+}
+
 export function encodeClientMessage(
   message: ClientMessage,
 ): EncodedClientMessage {
@@ -63,6 +119,7 @@ export function encodeClientMessage(
     case "ModifyQuerySet":
     case "Mutation":
     case "Action":
+    case "RetryDegradableQueries":
     case "Event": {
       return { ...message };
     }
@@ -116,6 +173,14 @@ export type QueryJournal = string | null;
  * Client message schema
  */
 
+/**
+ * A query workload class that opts a client's root reactive queries into
+ * temporary degradation when the backend is under pressure.
+ *
+ * @public
+ */
+export type QueryWorkloadClass = "degradable";
+
 type Connect = {
   type: "Connect";
   sessionId: string;
@@ -123,6 +188,8 @@ type Connect = {
   lastCloseReason: string | null;
   maxObservedTimestamp?: TS | undefined;
   clientTs: number;
+  queryWorkloadClass?: QueryWorkloadClass | undefined;
+  degradableQueryPressureVersion?: 1 | undefined;
 };
 
 export type AddQuery = {
@@ -169,6 +236,11 @@ export type ActionRequest = {
   componentPath?: string | undefined;
 };
 
+export type RetryDegradableQueries = {
+  type: "RetryDegradableQueries";
+  epoch: number;
+};
+
 export type AdminAuthentication = {
   type: "Authenticate";
   tokenType: "Admin";
@@ -202,6 +274,7 @@ export type ClientMessage =
   | QuerySetModification
   | MutationRequest
   | ActionRequest
+  | RetryDegradableQueries
   | Event;
 
 type EncodedConnect = Omit<Connect, "maxObservedTimestamp"> & {
@@ -217,6 +290,7 @@ type EncodedClientMessage =
   | QuerySetModification
   | MutationRequest
   | ActionRequest
+  | RetryDegradableQueries
   | Event;
 
 /**
@@ -225,6 +299,37 @@ type EncodedClientMessage =
 export type TS = U64;
 type EncodedTS = EncodedU64;
 type LogLines = string[];
+
+/**
+ * Temporary server pressure reported for degradable reactive queries.
+ * `retryAfterMs` is a strictly positive unsigned 32-bit integer and is the
+ * backend's automatic retry delay. Lifecycle `epoch` values are also positive
+ * unsigned 32-bit integers; `pendingQueryCount` is positive for `active` and
+ * zero for `cleared`. Lifecycle-capable applications should keep successful
+ * subscriptions mounted until a matching `cleared` event. A transition with
+ * no pressure metadata does not clear an active epoch. The variant without a
+ * `state` field is legacy metadata and has no explicit clear event.
+ *
+ * @public
+ */
+export type ServerPressure =
+  | {
+      kind: "degradable_query_capacity";
+      retryAfterMs: number;
+    }
+  | {
+      kind: "degradable_query_capacity";
+      state: "active";
+      epoch: number;
+      retryAfterMs: number;
+      pendingQueryCount: number;
+    }
+  | {
+      kind: "degradable_query_capacity";
+      state: "cleared";
+      epoch: number;
+      pendingQueryCount: 0;
+    };
 
 export type StateVersion = {
   querySet: QuerySetVersion;
@@ -259,6 +364,7 @@ export type Transition = {
   startVersion: StateVersion;
   endVersion: StateVersion;
   modifications: StateModification[];
+  serverPressure?: ServerPressure;
   clientClockSkew?: number;
   serverTs?: number;
 };

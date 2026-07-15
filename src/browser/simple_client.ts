@@ -558,6 +558,23 @@ export class ConvexClient {
   }
 
   /**
+   * Ask the backend to retry only the queries deferred in the current
+   * degradable-query pressure epoch.
+   *
+   * @returns `true` only when the current epoch accepted its first send.
+   * Inactive, stale, duplicate, and temporarily unsendable retries return
+   * `false`.
+   * @throws When this client is enabled and `epoch` is not a positive unsigned
+   * 32-bit integer.
+   *
+   * @public
+   */
+  retryDegradableQueries(epoch: number): boolean {
+    if (this.disabled) return false;
+    return this.client.retryDegradableQueries(epoch);
+  }
+
+  /**
    * Subscribe to the {@link ConnectionState} between the client and the Convex
    * backend, calling a callback each time it changes.
    *
