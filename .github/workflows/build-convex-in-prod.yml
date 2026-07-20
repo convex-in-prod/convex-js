@@ -1,0 +1,152 @@
+name: Build convex-in-prod package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-convex-in-prod-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'convex-in-prod/convex-js'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Node setup
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: "20.20.2"
+
+      - name: NPM v10
+        run: npm install -g npm@10 --registry=https://registry.npmjs.org
+
+      - name: Install
+        # Upstream has no lockfile and intentionally retains @types/node 18 while
+        # current Vitest 4 declares an optional Node-types 20+ peer. Keep the
+        # source type baseline and verify it below instead of changing it here.
+        run: npm install --legacy-peer-deps
+
+      - name: Test
+        run: npm test -- --run
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Reject validation side effects
+        # Package the exact reviewed commit rather than silently restoring
+        # files if validation unexpectedly changes tracked source.
+        run: git diff --exit-code
+
+      - name: Check maintained source formatting
+        run: |
+          upstream_base_sha="$(tr -d '\n' < .convex-in-prod-upstream)"
+          git merge-base --is-ancestor "$upstream_base_sha" HEAD
+
+          mapfile -t format_files < <(
+            git diff --name-only --diff-filter=ACMR "$upstream_base_sha" HEAD -- \
+              '*.cjs' '*.css' '*.gql' '*.graphql' '*.html' '*.js' '*.json' \
+              '*.json5' '*.jsx' '*.md' '*.mdx' '*.mjs' '*.scss' '*.ts' \
+              '*.tsx' '*.yaml' '*.yml'
+          )
+          if (( ${#format_files[@]} > 0 )); then
+            # Upstream has no lockfile, so keep formatter upgrades from changing
+            # the publication gate after the reviewed source commit is fixed.
+            npx --yes prettier@3.8.1 --check "${format_files[@]}"
+          fi
+
+          mapfile -t lint_files < <(
+            git diff --name-only --diff-filter=ACMR "$upstream_base_sha" HEAD -- \
+              '*.cjs' '*.js' '*.jsx' '*.mjs' '*.ts' '*.tsx'
+          )
+          if (( ${#lint_files[@]} > 0 )); then
+            npx eslint --no-warn-ignored "${lint_files[@]}"
+          fi
+
+      - name: Set package provenance
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+
+          const packagePath = "package.json";
+          const indexPath = "src/index.ts";
+          const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+          const indexSource = fs.readFileSync(indexPath, "utf8");
+          const upstreamBaseSha = fs
+            .readFileSync(".convex-in-prod-upstream", "utf8")
+            .trim();
+          const sourceSha = process.env.SOURCE_SHA;
+          if (!/^[0-9a-f]{40}$/.test(sourceSha)) {
+            throw new Error(`Invalid source SHA: ${sourceSha}`);
+          }
+          if (!/^[0-9a-f]{40}$/.test(upstreamBaseSha)) {
+            throw new Error(`Invalid upstream base SHA: ${upstreamBaseSha}`);
+          }
+
+          // Build metadata identifies the fork without making the package a
+          // SemVer prerelease, which would fail ordinary convex@^1.x peers.
+          const baseVersionDeclaration = `export const version = "${packageJson.version}";`;
+          if (!indexSource.startsWith(`${baseVersionDeclaration}\n`)) {
+            throw new Error("src/index.ts version does not match package.json");
+          }
+          const packageVersion = `${packageJson.version}+convex-in-prod.${sourceSha.slice(0, 12)}`;
+          packageJson.version = packageVersion;
+          packageJson.convexInProd = {
+            sourceSha,
+            upstreamBaseSha,
+          };
+          fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+          fs.writeFileSync(
+            indexPath,
+            indexSource.replace(
+              baseVersionDeclaration,
+              `export const version = "${packageVersion}";`,
+            ),
+          );
+          NODE
+
+      - name: Pack
+        # Upstream's prepack hook performs the authoritative package build.
+        run: npm pack --silent
+
+      - name: Upload package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: convex-${{ github.sha }}
+          path: "*.tgz"
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Record artifact
+        run: |
+          node --input-type=module <<'NODE' >> "$GITHUB_STEP_SUMMARY"
+          import crypto from "node:crypto";
+          import fs from "node:fs";
+          const packageFiles = fs
+            .readdirSync(".")
+            .filter((file) => file.endsWith(".tgz"));
+          if (packageFiles.length !== 1) {
+            throw new Error(
+              `Expected one package tarball, found ${packageFiles.length}`,
+            );
+          }
+          const integrity = `sha512-${crypto
+            .createHash("sha512")
+            .update(fs.readFileSync(packageFiles[0]))
+            .digest("base64")}`;
+          const packageJson = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          process.stdout.write(`Source SHA: \`${packageJson.convexInProd.sourceSha}\`\n\n`);
+          process.stdout.write(`Upstream base: \`${packageJson.convexInProd.upstreamBaseSha}\`\n\n`);
+          process.stdout.write(`Package: \`${packageJson.name}@${packageJson.version}\`\n\n`);
+          process.stdout.write(`Integrity: \`${integrity}\`\n`);
+          NODE
