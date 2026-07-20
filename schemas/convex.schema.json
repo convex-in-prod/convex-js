@@ -174,6 +174,29 @@
           "description": "Whether to include original source code in source maps. Set to false to reduce bundle size.",
           "default": false,
           "deprecated": true
+        },
+        "experimentalContextReuse": {
+          "type": "object",
+          "description": "Make reusable contexts the default for root-application isolate entry modules by adding the upstream experimental_reuseContext export during bundling. Omit this setting to retain upstream explicit opt-in behavior.",
+          "properties": {
+            "default": {
+              "const": true
+            },
+            "exclusions": {
+              "type": "object",
+              "description": "Convex entry paths, relative to the functions directory, that must remain fresh, mapped to operator review reasons.",
+              "propertyNames": {
+                "pattern": "^(?!/)(?!\\.\\.?/)(?!.*\\\\).+"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 32
+              },
+              "default": {}
+            }
+          },
+          "required": ["default"],
+          "additionalProperties": false
         }
       }
     },
