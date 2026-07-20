@@ -95,6 +95,10 @@ export interface ProjectConfig {
 
   bundler?: {
     includeSourcesContent?: boolean;
+    experimentalContextReuse?: {
+      default: true;
+      exclusions: Record<string, string>;
+    };
   };
 
   typescriptCompiler?: TypescriptCompiler;
@@ -295,6 +299,35 @@ const BundlerSchema = z.object({
     .default(false)
     .describe(
       "Whether to include original source code in source maps. Set to false to reduce bundle size.",
+    ),
+  experimentalContextReuse: z
+    .object({
+      default: z.literal(true),
+      exclusions: z
+        .record(
+          z
+            .string()
+            .refine(
+              (entry) =>
+                entry !== "" &&
+                !entry.includes("\\") &&
+                !path.posix.isAbsolute(entry) &&
+                path.posix.normalize(entry) === entry &&
+                entry !== ".." &&
+                !entry.startsWith("../"),
+              "Context-reuse exclusion paths must be normalized POSIX paths relative to the functions directory.",
+            ),
+          z.string().min(32),
+        )
+        .default({})
+        .describe(
+          "Convex entry paths, relative to the functions directory, that must remain fresh, mapped to operator review reasons.",
+        ),
+    })
+    .strict()
+    .optional()
+    .describe(
+      "Make reusable contexts the default for root-application isolate entry modules by adding the upstream experimental_reuseContext export during bundling. Omit this setting to retain upstream explicit opt-in behavior.",
     ),
 });
 
@@ -635,6 +668,15 @@ export async function configFromProjectConfig(
     entryPoints: entryPoints.isolate,
     generateSourceMaps: true,
     platform: "browser",
+    ...(projectConfig.bundler?.experimentalContextReuse === undefined
+      ? {}
+      : {
+          experimentalContextReuse: {
+            rootDir: baseDir,
+            exclusions:
+              projectConfig.bundler.experimentalContextReuse.exclusions,
+          },
+        }),
   });
   if (verbose) {
     logMessage(
