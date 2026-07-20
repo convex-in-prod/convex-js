@@ -372,6 +372,12 @@ async function startComponentsPushAndCodegen(
         verbose: options.verbose,
         includeSourcesContent:
           projectConfig.bundler?.includeSourcesContent ?? false,
+        ...(projectConfig.bundler?.experimentalContextReuse === undefined
+          ? {}
+          : {
+              experimentalContextReuse:
+                projectConfig.bundler.experimentalContextReuse,
+            }),
       }),
     );
   if (options.debugBundlePath) {
