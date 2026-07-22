@@ -61,13 +61,20 @@ of fixed delays or access to internal client state.
 4. Push the maintained `main` branch to `convex-in-prod/convex-js`.
 5. Manually dispatch `Build convex-in-prod package` for that exact `main`
    commit.
+6. Verify the downloaded archive and add it under
+   `packages/convex/<full-source-sha>/` in a separate publication commit.
+7. Update the Pages repository to mirror `packages/convex/` from that exact
+   publication commit.
 
 The workflow appends source-derived SemVer build metadata to the upstream
 version, records full source and upstream SHAs in package metadata, and uploads
 the tarball for operator publication under the same full SHA at
-`https://convex-in-prod.github.io/packages/convex/`. GitHub's npm registry is
-not the application distribution boundary because even public packages require
-install-time authentication. No Git tag or GitHub Release is required.
+`https://convex-in-prod.github.io/packages/convex/`. The immutable archives and
+manifests are owned by this repository under
+[`packages/`](../packages/README.md); the Pages repository mirrors them from an
+exact convex-js publication commit. GitHub's npm registry is not the application
+distribution boundary because even public packages require install-time
+authentication. No Git tag or GitHub Release is required.
 
 Do not encode the fork identity as a SemVer prerelease. Packages that declare an
 ordinary `convex@^1.x` peer do not accept prerelease versions even when the fork
