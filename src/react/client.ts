@@ -192,9 +192,25 @@ export interface Watch<T> {
   localQueryResult(): T | undefined;
 
   /**
-   * @internal
+   * Return whether this query currently has a local success or error.
+   *
+   * Unlike {@link react.Watch.localQueryResult}, this method does not read or
+   * throw the stored result.
+   *
+   * @public
    */
-  localQueryLogs(): string[] | undefined;
+  hasLocalQueryResult(): boolean;
+
+  /**
+   * Invoke `callback` once after a currently present local success or error is
+   * removed. This method does not subscribe to or execute the query.
+   *
+   * If no local result is present when this method is called, `callback` is not
+   * invoked and the returned function is a no-op.
+   *
+   * @public
+   */
+  onLocalQueryResultRemoved(callback: () => void): () => void;
 
   /**
    * Get the current {@link browser.QueryJournal} for this query.
@@ -551,11 +567,36 @@ export class ConvexReactClient {
         return undefined;
       },
 
-      localQueryLogs: () => {
+      hasLocalQueryResult: () => {
         if (this.cachedSync) {
-          return this.cachedSync.localQueryLogs(name, args);
+          return this.cachedSync.localQueryLogs(name, args) !== undefined;
         }
-        return undefined;
+        return false;
+      },
+
+      onLocalQueryResultRemoved: (callback) => {
+        // Observe the same sync client whose result we inspect. The check and handler registration
+        // stay in one synchronous turn so a QueryRemoved transition cannot fall between them.
+        const sync = this.cachedSync;
+        if (!sync || sync.localQueryLogs(name, args) === undefined) {
+          return () => {};
+        }
+        let active = true;
+        const removeHandler = sync.addOnTransitionHandler(() => {
+          if (!active || sync.localQueryLogs(name, args) !== undefined) {
+            return;
+          }
+          active = false;
+          removeHandler();
+          callback();
+        });
+        return () => {
+          if (!active) {
+            return;
+          }
+          active = false;
+          removeHandler();
+        };
       },
 
       journal: () => {
