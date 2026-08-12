@@ -29,6 +29,11 @@ The first command records locally. The second also publishes the resulting
 fast-forward update to the remote `patch-history` branch. Use `--no-commit` only
 to inspect generated changes before recording them.
 
+Run the updater before rebasing or otherwise rewriting the source train, while
+the version being replaced is still checked out, and again after the rewrite.
+This makes both patch forms durable history. Also run it after adding or
+amending an ordinary downstream patch commit.
+
 To reconstruct the source commits on a clean checkout at `UPSTREAM`:
 
 ```sh
