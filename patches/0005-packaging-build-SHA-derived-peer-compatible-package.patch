@@ -1,0 +1,274 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Mon, 20 Jul 2026 16:27:40 +0800
+Subject: [PATCH 5/7] packaging: build SHA-derived peer-compatible package
+
+Record the exact upstream base and document the maintained patch stack. Add a manually dispatched workflow that verifies one exact source commit, appends source-derived SemVer build metadata, embeds full source and upstream provenance, and uploads the packed artifact.
+
+Keep the source package name and version unchanged in Git. Build metadata identifies the fork without turning it into a prerelease, so packages declaring an ordinary convex@^1.x peer remain compatible. The immutable full-SHA artifact URL remains the installation and provenance boundary.
+---
+ .convex-in-prod-upstream                   |   1 +
+ .github/workflows/build-convex-in-prod.yml | 160 +++++++++++++++++++++
+ patches/README.md                          |  78 ++++++++++
+ 3 files changed, 239 insertions(+)
+ create mode 100644 .convex-in-prod-upstream
+ create mode 100644 .github/workflows/build-convex-in-prod.yml
+ create mode 100644 patches/README.md
+
+diff --git a/.convex-in-prod-upstream b/.convex-in-prod-upstream
+new file mode 100644
+index 0000000000000000000000000000000000000000..0fc6e4bbe7d0579304f71096ede95d78abd3a29e
+--- /dev/null
++++ b/.convex-in-prod-upstream
+@@ -0,0 +1 @@
++b96ea1b0a5c6883351566db866edf682463bb088
+diff --git a/.github/workflows/build-convex-in-prod.yml b/.github/workflows/build-convex-in-prod.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb0b842f43072d84e3b8ebf9ebd94ec2d6570ba6
+--- /dev/null
++++ b/.github/workflows/build-convex-in-prod.yml
+@@ -0,0 +1,160 @@
++name: Build convex-in-prod package
++
++on:
++  workflow_dispatch:
++
++permissions:
++  contents: read
++
++concurrency:
++  group: build-convex-in-prod-${{ github.sha }}
++  cancel-in-progress: false
++
++jobs:
++  build:
++    if: github.repository == 'convex-in-prod/convex-js'
++    runs-on: ubuntu-latest
++    timeout-minutes: 30
++
++    steps:
++      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
++        with:
++          fetch-depth: 0
++
++      - name: Node setup
++        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
++        with:
++          node-version: "20.20.2"
++
++      - name: NPM v10
++        run: npm install -g npm@10 --registry=https://registry.npmjs.org
++
++      - name: Install
++        # Upstream has no lockfile and intentionally retains @types/node 18 while
++        # current Vitest 4 declares an optional Node-types 20+ peer. Keep the
++        # source type baseline and verify it below instead of changing it here.
++        run: npm install --legacy-peer-deps
++
++      - name: Restore checked-in source
++        # Installing the root package runs its prepare build, which rewrites
++        # tracked generated source. Validate the exact commit below; the
++        # provenance build regenerates package output after version stamping.
++        run: git restore --source=HEAD --worktree -- .
++
++      - name: Test
++        run: npm test -- --run
++
++      - name: Typecheck
++        run: npm run typecheck
++
++      - name: Restore checked-in source after validation
++        # Tests and typechecking may rebuild tracked generated source. Format
++        # and package the exact commit selected by this workflow.
++        run: git restore --source=HEAD --worktree -- .
++
++      - name: Check maintained source formatting
++        run: |
++          upstream_base_sha="$(tr -d '\n' < .convex-in-prod-upstream)"
++          git merge-base --is-ancestor "$upstream_base_sha" HEAD
++
++          mapfile -t format_files < <(
++            git diff --name-only --diff-filter=ACMR "$upstream_base_sha" HEAD -- \
++              '*.cjs' '*.css' '*.gql' '*.graphql' '*.html' '*.js' '*.json' \
++              '*.json5' '*.jsx' '*.md' '*.mdx' '*.mjs' '*.scss' '*.ts' \
++              '*.tsx' '*.yaml' '*.yml'
++          )
++          if (( ${#format_files[@]} > 0 )); then
++            # Upstream has no lockfile, so keep formatter upgrades from changing
++            # the publication gate after the reviewed source commit is fixed.
++            npx --yes prettier@3.8.1 --check "${format_files[@]}"
++          fi
++
++          mapfile -t lint_files < <(
++            git diff --name-only --diff-filter=ACMR "$upstream_base_sha" HEAD -- \
++              '*.cjs' '*.js' '*.jsx' '*.mjs' '*.ts' '*.tsx'
++          )
++          if (( ${#lint_files[@]} > 0 )); then
++            npx eslint --no-warn-ignored "${lint_files[@]}"
++          fi
++
++      - name: Set package provenance
++        env:
++          SOURCE_SHA: ${{ github.sha }}
++        run: |
++          node --input-type=module <<'NODE'
++          import fs from "node:fs";
++
++          const packagePath = "package.json";
++          const indexPath = "src/index.ts";
++          const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8"));
++          const indexSource = fs.readFileSync(indexPath, "utf8");
++          const upstreamBaseSha = fs
++            .readFileSync(".convex-in-prod-upstream", "utf8")
++            .trim();
++          const sourceSha = process.env.SOURCE_SHA;
++          if (!/^[0-9a-f]{40}$/.test(sourceSha)) {
++            throw new Error(`Invalid source SHA: ${sourceSha}`);
++          }
++          if (!/^[0-9a-f]{40}$/.test(upstreamBaseSha)) {
++            throw new Error(`Invalid upstream base SHA: ${upstreamBaseSha}`);
++          }
++
++          // Build metadata identifies the fork without making the package a
++          // SemVer prerelease, which would fail ordinary convex@^1.x peers.
++          const baseVersionDeclaration = `export const version = "${packageJson.version}";`;
++          if (!indexSource.startsWith(`${baseVersionDeclaration}\n`)) {
++            throw new Error("src/index.ts version does not match package.json");
++          }
++          const packageVersion = `${packageJson.version}+convex-in-prod.${sourceSha.slice(0, 12)}`;
++          packageJson.version = packageVersion;
++          packageJson.convexInProd = {
++            sourceSha,
++            upstreamBaseSha,
++          };
++          fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
++          fs.writeFileSync(
++            indexPath,
++            indexSource.replace(
++              baseVersionDeclaration,
++              `export const version = "${packageVersion}";`,
++            ),
++          );
++          NODE
++
++      - name: Build
++        run: npm run build
++
++      - name: Pack
++        run: npm pack --silent
++
++      - name: Upload package
++        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
++        with:
++          name: convex-${{ github.sha }}
++          path: "*.tgz"
++          if-no-files-found: error
++          retention-days: 30
++
++      - name: Record artifact
++        run: |
++          node --input-type=module <<'NODE' >> "$GITHUB_STEP_SUMMARY"
++          import crypto from "node:crypto";
++          import fs from "node:fs";
++          const packageFiles = fs
++            .readdirSync(".")
++            .filter((file) => file.endsWith(".tgz"));
++          if (packageFiles.length !== 1) {
++            throw new Error(
++              `Expected one package tarball, found ${packageFiles.length}`,
++            );
++          }
++          const integrity = `sha512-${crypto
++            .createHash("sha512")
++            .update(fs.readFileSync(packageFiles[0]))
++            .digest("base64")}`;
++          const packageJson = JSON.parse(fs.readFileSync("package.json", "utf8"));
++          process.stdout.write(`Source SHA: \`${packageJson.convexInProd.sourceSha}\`\n\n`);
++          process.stdout.write(`Upstream base: \`${packageJson.convexInProd.upstreamBaseSha}\`\n\n`);
++          process.stdout.write(`Package: \`${packageJson.name}@${packageJson.version}\`\n\n`);
++          process.stdout.write(`Integrity: \`${integrity}\`\n`);
++          NODE
+diff --git a/patches/README.md b/patches/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..3cb27a92c463364fab39deafacd59164c8895a29
+--- /dev/null
++++ b/patches/README.md
+@@ -0,0 +1,78 @@
++# Convex-In-Prod Patch Stack
++
++The fork's `main` branch carries a short generic patch stack over the exact
++upstream commit recorded in `/.convex-in-prod-upstream`.
++
++The stack keeps one commit for each maintained semantic change, followed by one
++release-infrastructure commit that owns the upstream marker, complete patch
++index, and immutable package workflow. Packaging corrections belong in that
++final commit rather than as additional history-only patches.
++
++The commits are the source authority. Applications consume an immutable package
++produced from one exact commit; they do not install this Git branch or rewrite
++installed Convex files.
++
++## Maintained changes
++
++### Default database-context reuse during bundling
++
++Applications that have reviewed their database-UDF graphs may make the upstream
++`experimental_reuseContext` export a bundle-time default and retain a small,
++reasoned exclusion map. The setting is disabled by default and does not place
++application module names in backend logic. See
++[`default_database_context_reuse/README.md`](default_database_context_reuse/README.md).
++
++### Terminal OCC mutation retry
++
++The client and action context retry a mutation once after a terminal
++optimistic-concurrency failure, waiting two seconds by default. Callers can
++change the count and delay or disable the outer retry. The matcher accepts both
++the internal error name and Convex's public terminal-conflict text.
++
++This change is derived from
++[get-convex/convex-js PR 170](https://github.com/get-convex/convex-js/pull/170).
++Remove the local commit when upstream contains equivalent behavior.
++
++### Degradable reactive-query pressure
++
++A sync client may opt its root reactive queries into the closed `"degradable"`
++workload class and receive bounded server-pressure metadata after applying a
++transition. Mutations and actions remain normal. Application callback failures
++are contained so they cannot interrupt synchronization.
++
++This wire extension requires matching backend support. It remains inert unless
++the application opts in and the backend enables degradable leader admission.
++
++### Local query-result removal observation
++
++`Watch.hasLocalQueryResult()` reports a retained local success or error without
++reading or throwing it. `Watch.onLocalQueryResultRemoved()` observes removal
++without subscribing to or executing the query. These APIs let applications gate
++one-shot retries and resumed subscriptions on the actual sync transition instead
++of fixed delays or access to internal client state.
++
++## Rebase and release
++
++1. Fetch `upstream` and select an exact reviewed upstream commit.
++2. Rebase the semantic commits and update `/.convex-in-prod-upstream` in the
++   packaging commit.
++3. Use `git range-diff` against the previous stack and run package tests,
++   typecheck, format check, and build.
++4. Push the maintained `main` branch to `convex-in-prod/convex-js`.
++5. Manually dispatch `Build convex-in-prod package` for that exact `main`
++   commit.
++
++The workflow appends source-derived SemVer build metadata to the upstream
++version, records full source and upstream SHAs in package metadata, and uploads
++the tarball for operator publication under the same full SHA at
++`https://convex-in-prod.github.io/packages/convex/`. GitHub's npm registry is
++not the application distribution boundary because even public packages require
++install-time authentication. No Git tag or GitHub Release is required.
++
++Do not encode the fork identity as a SemVer prerelease. Packages that declare an
++ordinary `convex@^1.x` peer do not accept prerelease versions even when the fork
++remains API-compatible. The immutable artifact URL and provenance fields provide
++the source identity without weakening peer-dependency checks.
++
++Applications should pin the exact public tarball URL and lockfile integrity and
++never depend on a mutable branch.

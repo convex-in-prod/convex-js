@@ -1,0 +1,633 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Mon, 20 Jul 2026 14:02:18 +0800
+Subject: [PATCH 4/7] bundler: support default database context reuse
+
+Add a disabled-by-default root-application bundling policy that emits Convex's existing experimental_reuseContext marker for isolate entries. Keep reviewed exceptions in a centralized reasoned map and fail when exclusions are stale or source output carries a competing marker.
+
+Leave imported components, Node modules, schema bundles, and auth configuration bundles unchanged. Document the operator contract and cover marker insertion, exclusions, conflicts, and stale exclusion paths.
+---
+ .../default_database_context_reuse/README.md  |  63 ++++++
+ schemas/convex.schema.json                    |  23 ++
+ src/bundler/contextReuse.test.ts              | 204 ++++++++++++++++++
+ src/bundler/index.ts                          | 139 +++++++++++-
+ src/cli/lib/components.ts                     |   6 +
+ src/cli/lib/components/definition/bundle.ts   |  13 ++
+ src/cli/lib/config.ts                         |  42 ++++
+ 7 files changed, 489 insertions(+), 1 deletion(-)
+ create mode 100644 patches/default_database_context_reuse/README.md
+ create mode 100644 src/bundler/contextReuse.test.ts
+
+diff --git a/patches/default_database_context_reuse/README.md b/patches/default_database_context_reuse/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..f2ba9602a29651b51b7be56dec8dc90d057ffd39
+--- /dev/null
++++ b/patches/default_database_context_reuse/README.md
+@@ -0,0 +1,63 @@
++# Default database-context reuse during bundling
++
++## Purpose
++
++Upstream Convex enables reusable database-UDF contexts one entry module at a
++time through `experimental_reuseContext = true`. That is a useful canary
++interface, but it becomes repetitive when an application has reviewed all of its
++query and mutation entry graphs and wants reuse to be the normal policy.
++
++This patch adds one disabled-by-default Convex CLI setting:
++
++```json
++{
++  "bundler": {
++    "experimentalContextReuse": {
++      "default": true,
++      "exclusions": {
++        "generated/auth.ts": "The generated authentication graph remains under separate review."
++      }
++    }
++  }
++}
++```
++
++When enabled, the isolate bundler adds the ordinary upstream
++`experimental_reuseContext = true` export to every root-application isolate
++entry output except the listed paths. Paths are relative to the configured
++functions directory. Imported Convex components retain their own source policy.
++The backend receives no application module allowlist and needs no new protocol
++field. Node entry modules, schema bundles, and auth configuration bundles are
++unchanged.
++
++The reason strings keep exceptional modules and their operator rationale
++together. Application tooling should verify that exclusions still name
++database-UDF entries; the CLI additionally rejects an exclusion that does not
++match a root isolate entry. Applications should review the full runtime import
++graph before enabling the default. The CLI setting is not a substitute for that
++source and emitted-bundle review.
++
++## Compatibility and safety
++
++The setting is absent by default, preserving upstream explicit opt-in behavior.
++When it is enabled, entry source files must not also export
++`experimental_reuseContext`; one authority owns the emitted marker so source and
++bundle policy cannot silently disagree.
++
++The patch changes only module analysis input. Reuse remains opportunistic and
++all backend eligibility, UDF-type, cancellation, read-set validation, cache, and
++memory-pressure rules continue to apply. An exclusion simply leaves the upstream
++export absent, so the entry executes fresh on both patched and ordinary
++backends.
++
++## Rollback
++
++For one entry, add a reviewed exclusion and redeploy the application. For a
++global rollback, remove `bundler.experimentalContextReuse` and every explicit
++source marker, perform one complete root-application deployment, and restart
++backend workers to clear saved contexts before traffic resumes.
++
++Current upstream has no backend-wide database-UDF context-reuse switch. An exact
++previous-image and configuration rollback restores that image's runtime
++contract, but does not prove a global disable unless the previous image,
++configuration, and complete application analysis establish that state.
+diff --git a/schemas/convex.schema.json b/schemas/convex.schema.json
+index 0acb473379e310693b20b7440135807bff754549..f7f980787d03d5fcbc713e2876a2125b292a88bc 100644
+--- a/schemas/convex.schema.json
++++ b/schemas/convex.schema.json
+@@ -174,6 +174,29 @@
+           "description": "Whether to include original source code in source maps. Set to false to reduce bundle size.",
+           "default": false,
+           "deprecated": true
++        },
++        "experimentalContextReuse": {
++          "type": "object",
++          "description": "Make reusable contexts the default for root-application isolate entry modules by adding the upstream experimental_reuseContext export during bundling. Omit this setting to retain upstream explicit opt-in behavior.",
++          "properties": {
++            "default": {
++              "const": true
++            },
++            "exclusions": {
++              "type": "object",
++              "description": "Convex entry paths, relative to the functions directory, that must remain fresh, mapped to operator review reasons.",
++              "propertyNames": {
++                "pattern": "^(?!/)(?!\\.\\.?/)(?!.*\\\\).+"
++              },
++              "additionalProperties": {
++                "type": "string",
++                "minLength": 32
++              },
++              "default": {}
++            }
++          },
++          "required": ["default"],
++          "additionalProperties": false
+         }
+       }
+     },
+diff --git a/src/bundler/contextReuse.test.ts b/src/bundler/contextReuse.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ed36f2cd5f0f98a682111374f27d7aa8b29b0a2e
+--- /dev/null
++++ b/src/bundler/contextReuse.test.ts
+@@ -0,0 +1,204 @@
++import { mkdtemp, rm, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import path from "node:path";
++import { describe, expect, test } from "vitest";
++import { hash, partitionModulesByChanges } from "../cli/lib/components.js";
++import type { Context } from "./context.js";
++import {
++  applyDefaultContextReusePolicy,
++  bundle,
++  type Bundle,
++  nodeFs,
++} from "./index.js";
++
++const testContext: Context = {
++  fs: nodeFs,
++  deprecationMessagePrinted: false,
++  async crash({ printedMessage }) {
++    throw new Error(printedMessage ?? "Bundling failed");
++  },
++  registerCleanup() {
++    return "unused";
++  },
++  removeCleanup() {
++    return async () => {};
++  },
++  bigBrainAuth() {
++    return null;
++  },
++  _updateBigBrainAuth() {},
++};
++
++describe("default context reuse export", () => {
++  test("adds the upstream marker before an external source map comment", async () => {
++    expect(
++      await applyDefaultContextReusePolicy(
++        testContext,
++        "const value = 1;\nexport { value };\n//# sourceMappingURL=entry.js.map\n",
++        true,
++        "included.ts",
++      ),
++    ).toBe(
++      "const value = 1;\nexport { value };\nexport const experimental_reuseContext = true;\n//# sourceMappingURL=entry.js.map\n",
++    );
++  });
++
++  test("leaves an excluded entry unchanged", async () => {
++    const source = "const value = 1;\nexport { value };\n";
++
++    expect(
++      await applyDefaultContextReusePolicy(
++        testContext,
++        source,
++        false,
++        "excluded.ts",
++      ),
++    ).toBe(source);
++  });
++
++  test("marker removal changes the entry hash without resending unchanged modules", async () => {
++    const source = "const value = 1;\nexport { value };\n";
++    const markedEntry: Bundle = {
++      path: "entry.js",
++      source: await applyDefaultContextReusePolicy(
++        testContext,
++        source,
++        true,
++        "entry.ts",
++      ),
++      environment: "isolate",
++    };
++    const freshEntry: Bundle = {
++      ...markedEntry,
++      source: await applyDefaultContextReusePolicy(
++        testContext,
++        source,
++        false,
++        "entry.ts",
++      ),
++    };
++    const sharedModule: Bundle = {
++      path: "_deps/shared.js",
++      source: "export const shared = true;\n",
++      environment: "isolate",
++    };
++    const remoteHashes = new Map([
++      [
++        markedEntry.path,
++        {
++          path: markedEntry.path,
++          hash: hash(markedEntry),
++          environment: markedEntry.environment,
++        },
++      ],
++      [
++        sharedModule.path,
++        {
++          path: sharedModule.path,
++          hash: hash(sharedModule),
++          environment: sharedModule.environment,
++        },
++      ],
++    ]);
++
++    const { changedModules, unchangedModuleHashes } = partitionModulesByChanges(
++      [freshEntry, sharedModule],
++      remoteHashes,
++    );
++
++    expect(changedModules).toEqual([freshEntry]);
++    expect(unchangedModuleHashes).toEqual([
++      {
++        path: sharedModule.path,
++        environment: sharedModule.environment,
++        sha256: hash(sharedModule),
++      },
++    ]);
++  });
++
++  test("rejects an entry that also owns the marker", async () => {
++    await expect(
++      applyDefaultContextReusePolicy(
++        testContext,
++        "const marker = true;\nexport { marker as experimental_reuseContext };\n",
++        false,
++        "marked.ts",
++      ),
++    ).rejects.toThrow(/marked\.ts.*must not export experimental_reuseContext/u);
++    await expect(
++      applyDefaultContextReusePolicy(
++        testContext,
++        "export const experimental_reuseContext = true;\n",
++        true,
++        "marked.ts",
++      ),
++    ).rejects.toThrow(/marked\.ts.*must not export experimental_reuseContext/u);
++  });
++
++  test("marks root entries and leaves configured exclusions fresh", async () => {
++    const rootDir = await mkdtemp(path.join(tmpdir(), "convex-context-reuse-"));
++    const included = path.join(rootDir, "included.ts");
++    const excluded = path.join(rootDir, "excluded.ts");
++    try {
++      await Promise.all([
++        writeFile(included, "export const included = 1;\n"),
++        writeFile(excluded, "export const excluded = 2;\n"),
++      ]);
++
++      const result = await bundle({
++        ctx: testContext,
++        dir: rootDir,
++        entryPoints: [included, excluded],
++        generateSourceMaps: true,
++        platform: "browser",
++        experimentalContextReuse: {
++          rootDir,
++          exclusions: {
++            "excluded.ts":
++              "This fixture entry remains fresh to verify the bundle-time exclusion path.",
++          },
++        },
++      });
++
++      const includedBundle = result.modules.find(
++        (module) => module.path === "included.js",
++      );
++      const excludedBundle = result.modules.find(
++        (module) => module.path === "excluded.js",
++      );
++      expect(includedBundle?.source).toContain(
++        "export const experimental_reuseContext = true;",
++      );
++      expect(excludedBundle?.source).not.toContain("experimental_reuseContext");
++    } finally {
++      await rm(rootDir, { force: true, recursive: true });
++    }
++  });
++
++  test("rejects an exclusion that does not name a root isolate entry", async () => {
++    const rootDir = await mkdtemp(path.join(tmpdir(), "convex-context-reuse-"));
++    const included = path.join(rootDir, "included.ts");
++    try {
++      await writeFile(included, "export const included = 1;\n");
++
++      await expect(
++        bundle({
++          ctx: testContext,
++          dir: rootDir,
++          entryPoints: [included],
++          generateSourceMaps: true,
++          platform: "browser",
++          experimentalContextReuse: {
++            rootDir,
++            exclusions: {
++              "stale.ts":
++                "This fixture path must fail because it is not a root isolate entry.",
++            },
++          },
++        }),
++      ).rejects.toThrow(/Unmatched exclusions: stale\.ts/u);
++    } finally {
++      await rm(rootDir, { force: true, recursive: true });
++    }
++  });
++});
+diff --git a/src/bundler/index.ts b/src/bundler/index.ts
+index 915c65a54f6f45f2b3ec459060ed60e3478684a8..cd99fb8d5533cb47afc2bf0feb674fad1cd348a3 100644
+--- a/src/bundler/index.ts
++++ b/src/bundler/index.ts
+@@ -69,6 +69,82 @@ type EsBuildResult = esbuild.BuildResult & {
+   bundledModuleNames: Set<string>;
+ };
+ 
++type ExperimentalContextReuse = {
++  rootDir: string;
++  exclusions: Record<string, string>;
++};
++
++const contextReuseExportName = "experimental_reuseContext";
++const defaultContextReuseExport =
++  "export const experimental_reuseContext = true;\n";
++
++function exportedName(identifier: Identifier | { value: string }): string {
++  return "name" in identifier ? identifier.name : identifier.value;
++}
++
++function exportsContextReuse(source: string): boolean {
++  const ast = parseAST(source, { sourceType: "module" });
++  return ast.program.body.some((statement) => {
++    if (statement.type !== "ExportNamedDeclaration") {
++      return false;
++    }
++    if (
++      statement.declaration?.type === "VariableDeclaration" &&
++      statement.declaration.declarations.some(
++        (declaration) =>
++          declaration.id.type === "Identifier" &&
++          declaration.id.name === contextReuseExportName,
++      )
++    ) {
++      return true;
++    }
++    if (
++      (statement.declaration?.type === "FunctionDeclaration" ||
++        statement.declaration?.type === "ClassDeclaration") &&
++      statement.declaration.id?.name === contextReuseExportName
++    ) {
++      return true;
++    }
++    return statement.specifiers.some(
++      (specifier) =>
++        specifier.type === "ExportSpecifier" &&
++        exportedName(specifier.exported) === contextReuseExportName,
++    );
++  });
++}
++
++export async function applyDefaultContextReusePolicy(
++  ctx: Context,
++  source: string,
++  enabled: boolean,
++  entry: string,
++): Promise<string> {
++  if (exportsContextReuse(source)) {
++    return await ctx.crash({
++      exitCode: 1,
++      errorType: "invalid filesystem data",
++      printedMessage: `Cannot apply the default context-reuse policy to ${entry}: Entry modules must not export ${contextReuseExportName} when bundler.experimentalContextReuse owns the default policy.`,
++    });
++  }
++
++  if (!enabled) {
++    return source;
++  }
++
++  const sourceMapComment = source.match(/\/\/# sourceMappingURL=[^\n]*\n?$/u);
++  if (sourceMapComment === null || sourceMapComment.index === undefined) {
++    return `${source.endsWith("\n") ? source : `${source}\n`}${defaultContextReuseExport}`;
++  }
++  return `${source.slice(0, sourceMapComment.index)}${defaultContextReuseExport}${source.slice(sourceMapComment.index)}`;
++}
++
++function normalizedEntryPath(rootDir: string, entryPoint: string): string {
++  return path
++    .relative(rootDir, entryPoint)
++    .split(path.sep)
++    .join(path.posix.sep);
++}
++
+ async function doEsbuild({
+   ctx,
+   dir,
+@@ -190,6 +266,7 @@ export async function bundle({
+   extraConditions = [],
+   includeSourcesContent = false,
+   splitting,
++  experimentalContextReuse,
+ }: {
+   ctx: Context;
+   dir: string;
+@@ -201,6 +278,7 @@ export async function bundle({
+   extraConditions?: string[];
+   includeSourcesContent?: boolean;
+   splitting?: boolean;
++  experimentalContextReuse?: ExperimentalContextReuse;
+ }): Promise<{
+   modules: Bundle[];
+   externalDependencies: Map<string, string>;
+@@ -239,6 +317,53 @@ export async function bundle({
+   const sourceMaps = new Map();
+   const modules: Bundle[] = [];
+   const environment = platform === "node" ? "node" : "isolate";
++  const contextReuseOutputPolicy = new Map<
++    string,
++    { enabled: boolean; entry: string }
++  >();
++  if (experimentalContextReuse !== undefined) {
++    const unmatchedExcludedEntries = new Set(
++      Object.keys(experimentalContextReuse.exclusions).map((entry) =>
++        entry.split(path.win32.sep).join(path.posix.sep),
++      ),
++    );
++    const reuseByEntryPoint = new Map(
++      entryPoints.map((entryPoint) => {
++        const resolvedEntryPoint = path.resolve(entryPoint);
++        const entry = normalizedEntryPath(
++          experimentalContextReuse.rootDir,
++          resolvedEntryPoint,
++        );
++        const excluded = unmatchedExcludedEntries.delete(entry);
++        return [resolvedEntryPoint, !excluded];
++      }),
++    );
++    if (unmatchedExcludedEntries.size > 0) {
++      return await ctx.crash({
++        exitCode: 1,
++        errorType: "invalid filesystem data",
++        printedMessage: `Context-reuse exclusions must name root isolate entries. Unmatched exclusions: ${[...unmatchedExcludedEntries].sort().join(", ")}`,
++      });
++    }
++    for (const [outputPath, output] of Object.entries(
++      result.metafile!.outputs,
++    )) {
++      if (output.entryPoint !== undefined) {
++        const entryPoint = path.resolve(output.entryPoint);
++        const enabled = reuseByEntryPoint.get(entryPoint);
++        if (enabled === undefined) {
++          continue;
++        }
++        contextReuseOutputPolicy.set(path.resolve(outputPath), {
++          enabled,
++          entry: normalizedEntryPath(
++            experimentalContextReuse.rootDir,
++            entryPoint,
++          ),
++        });
++      }
++    }
++  }
+   for (const outputFile of result.outputFiles) {
+     const relPath = path.relative(path.normalize("out"), outputFile.path);
+     if (path.extname(relPath) === ".map") {
+@@ -246,7 +371,19 @@ export async function bundle({
+       continue;
+     }
+     const posixRelPath = relPath.split(path.sep).join(path.posix.sep);
+-    modules.push({ path: posixRelPath, source: outputFile.text, environment });
++    let source = outputFile.text;
++    const contextReusePolicy = contextReuseOutputPolicy.get(
++      path.resolve(outputFile.path),
++    );
++    if (contextReusePolicy !== undefined) {
++      source = await applyDefaultContextReusePolicy(
++        ctx,
++        source,
++        contextReusePolicy.enabled,
++        contextReusePolicy.entry,
++      );
++    }
++    modules.push({ path: posixRelPath, source, environment });
+   }
+   for (const module of modules) {
+     const sourceMapPath = module.path + ".map";
+diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
+index 0d2b7ecf277d376f3d68f807be1d38149af06a24..0545b41c491bc6ba17e2f649a7dc3123804607b1 100644
+--- a/src/cli/lib/components.ts
++++ b/src/cli/lib/components.ts
+@@ -366,6 +366,12 @@ async function startComponentsPushAndCodegen(
+         verbose: options.verbose,
+         includeSourcesContent:
+           projectConfig.bundler?.includeSourcesContent ?? false,
++        ...(projectConfig.bundler?.experimentalContextReuse === undefined
++          ? {}
++          : {
++              experimentalContextReuse:
++                projectConfig.bundler.experimentalContextReuse,
++            }),
+       }),
+     );
+   if (options.debugBundlePath) {
+diff --git a/src/cli/lib/components/definition/bundle.ts b/src/cli/lib/components/definition/bundle.ts
+index 31ea965da98b8586f230e2be7caf6a78354468c5..064002b675f6caf51986bffde1c3889c1c4ceb9d 100644
+--- a/src/cli/lib/components/definition/bundle.ts
++++ b/src/cli/lib/components/definition/bundle.ts
+@@ -626,6 +626,7 @@ export async function bundleImplementations({
+   extraConditions,
+   verbose = false,
+   includeSourcesContent = false,
++  experimentalContextReuse,
+ }: {
+   ctx: Context;
+   rootComponentDirectory: ComponentDirectory;
+@@ -634,6 +635,10 @@ export async function bundleImplementations({
+   extraConditions: string[];
+   verbose: boolean;
+   includeSourcesContent?: boolean;
++  experimentalContextReuse?: {
++    default: true;
++    exclusions: Record<string, string>;
++  };
+ }): Promise<{
+   appImplementation: {
+     schema: Bundle | null;
+@@ -684,6 +689,14 @@ export async function bundleImplementations({
+       platform: "browser",
+       extraConditions,
+       includeSourcesContent,
++      ...(!isRoot || experimentalContextReuse === undefined
++        ? {}
++        : {
++            experimentalContextReuse: {
++              rootDir: path.resolve(rootComponentDirectory.path),
++              exclusions: experimentalContextReuse.exclusions,
++            },
++          }),
+     });
+ 
+     if (convexResult.externalDependencies.size !== 0) {
+diff --git a/src/cli/lib/config.ts b/src/cli/lib/config.ts
+index e8346558630246b45a16d673f9be9785e08d33f0..678f3657be23458ae523a4e52ca59b2cb1cfdcb4 100644
+--- a/src/cli/lib/config.ts
++++ b/src/cli/lib/config.ts
+@@ -95,6 +95,10 @@ export interface ProjectConfig {
+ 
+   bundler?: {
+     includeSourcesContent?: boolean;
++    experimentalContextReuse?: {
++      default: true;
++      exclusions: Record<string, string>;
++    };
+   };
+ 
+   typescriptCompiler?: TypescriptCompiler;
+@@ -296,6 +300,35 @@ const BundlerSchema = z.object({
+     .describe(
+       "Whether to include original source code in source maps. Set to false to reduce bundle size.",
+     ),
++  experimentalContextReuse: z
++    .object({
++      default: z.literal(true),
++      exclusions: z
++        .record(
++          z
++            .string()
++            .refine(
++              (entry) =>
++                entry !== "" &&
++                !entry.includes("\\") &&
++                !path.posix.isAbsolute(entry) &&
++                path.posix.normalize(entry) === entry &&
++                entry !== ".." &&
++                !entry.startsWith("../"),
++              "Context-reuse exclusion paths must be normalized POSIX paths relative to the functions directory.",
++            ),
++          z.string().min(32),
++        )
++        .default({})
++        .describe(
++          "Convex entry paths, relative to the functions directory, that must remain fresh, mapped to operator review reasons.",
++        ),
++    })
++    .strict()
++    .optional()
++    .describe(
++      "Make reusable contexts the default for root-application isolate entry modules by adding the upstream experimental_reuseContext export during bundling. Omit this setting to retain upstream explicit opt-in behavior.",
++    ),
+ });
+ 
+ const AiFilesSchema = z.object({
+@@ -635,6 +668,15 @@ export async function configFromProjectConfig(
+     entryPoints: entryPoints.isolate,
+     generateSourceMaps: true,
+     platform: "browser",
++    ...(projectConfig.bundler?.experimentalContextReuse === undefined
++      ? {}
++      : {
++          experimentalContextReuse: {
++            rootDir: baseDir,
++            exclusions:
++              projectConfig.bundler.experimentalContextReuse.exclusions,
++          },
++        }),
+   });
+   if (verbose) {
+     logMessage(

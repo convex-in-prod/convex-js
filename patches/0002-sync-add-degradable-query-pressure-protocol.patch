@@ -1,0 +1,1826 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Wed, 15 Jul 2026 19:45:08 +0800
+Subject: [PATCH 2/7] sync: add degradable query pressure protocol
+
+Add an optional connection-level degradable root-query class and lifecycle-version capability. Preserve the legacy Connect and pressure shapes when omitted, validate all bounded lifecycle fields strictly, and serialize both declarations on reconnect.
+
+Track active, updated, and cleared pressure epochs after applying each transition. Expose one locally deduplicated retry request for the current epoch through the base, browser, and React clients while keeping successful subscriptions, mutations, and actions unchanged.
+
+Cover strict protocol parsing, transition and chunk ordering, reconnects, epoch replacement and clearing, retry acceptance and rejection, callback isolation, and continued non-query operation. Backend admission and application stale-state presentation remain explicit companion patches.
+---
+ src/browser/index.ts              |   3 +
+ src/browser/simple_client.ts      |  17 +
+ src/browser/sync/client.test.ts   | 876 ++++++++++++++++++++++++++++++
+ src/browser/sync/client.ts        | 159 ++++++
+ src/browser/sync/protocol.test.ts | 397 ++++++++++++++
+ src/browser/sync/protocol.ts      | 106 ++++
+ src/react/client.ts               |  20 +-
+ src/react/index.ts                |   7 +-
+ 8 files changed, 1583 insertions(+), 2 deletions(-)
+ create mode 100644 src/browser/sync/client.test.ts
+ create mode 100644 src/browser/sync/protocol.test.ts
+
+diff --git a/src/browser/index.ts b/src/browser/index.ts
+index 4b9d7946d68a9fe1b5875ccd451f6997efaf023e..6d8046dd45117f540f77b42ba2d8b54a6eea8d46 100644
+--- a/src/browser/index.ts
++++ b/src/browser/index.ts
+@@ -23,6 +23,9 @@ export type {
+   SubscribeOptions,
+   ConnectionState,
+   AuthTokenFetcher,
++  QueryWorkloadClass,
++  ServerPressure,
++  ServerPressureHandler,
+ } from "./sync/client.js";
+ /** @internal */
+ export type { BaseConvexClientInterface } from "./sync/client.js";
+diff --git a/src/browser/simple_client.ts b/src/browser/simple_client.ts
+index 23cd1ee1aa976370481fb5bf6ffd467ab8d0481a..6e528e2217da66a5c79e202e4f990a03724ea704 100644
+--- a/src/browser/simple_client.ts
++++ b/src/browser/simple_client.ts
+@@ -557,6 +557,23 @@ export class ConvexClient {
+     return this.client.connectionState();
+   }
+ 
++  /**
++   * Ask the backend to retry only the queries deferred in the current
++   * degradable-query pressure epoch.
++   *
++   * @returns `true` only when the current epoch accepted its first send.
++   * Inactive, stale, duplicate, and temporarily unsendable retries return
++   * `false`.
++   * @throws When this client is enabled and `epoch` is not a positive unsigned
++   * 32-bit integer.
++   *
++   * @public
++   */
++  retryDegradableQueries(epoch: number): boolean {
++    if (this.disabled) return false;
++    return this.client.retryDegradableQueries(epoch);
++  }
++
+   /**
+    * Subscribe to the {@link ConnectionState} between the client and the Convex
+    * backend, calling a callback each time it changes.
+diff --git a/src/browser/sync/client.test.ts b/src/browser/sync/client.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3f4c637656f3e7969a67eaa8e22bb2b1de305ae9
+--- /dev/null
++++ b/src/browser/sync/client.test.ts
+@@ -0,0 +1,876 @@
++import { describe, expect, test, vi } from "vitest";
++import { Long } from "../../vendor/long.js";
++import {
++  BaseConvexClient,
++  type BaseConvexClientInterface,
++  type BaseConvexClientOptions,
++} from "./client.js";
++import { ConvexClient } from "../simple_client.js";
++import { ConvexReactClient } from "../../react/client.js";
++import {
++  encodeServerMessage,
++  nodeWebSocket,
++  withInMemoryWebSocket,
++} from "./client_node_test_helpers.js";
++import type { ServerPressure, Transition } from "./protocol.js";
++
++type ClientWrapper = {
++  connectionState(): unknown;
++  retryDegradableQueries(epoch: number): boolean;
++  close(): Promise<void> | void;
++};
++
++const clientWrappers: Array<
++  [string, (address: string, options: BaseConvexClientOptions) => ClientWrapper]
++> = [
++  ["ConvexClient", (address, options) => new ConvexClient(address, options)],
++  [
++    "ConvexReactClient",
++    (address, options) => new ConvexReactClient(address, options),
++  ],
++];
++
++test("React forwards the exact retry result from a supplied base client", async () => {
++  const retryDegradableQueries = vi
++    .fn((_epoch: number): boolean => false)
++    .mockReturnValueOnce(false)
++    .mockReturnValueOnce(true);
++  const baseClient = {
++    addOnTransitionHandler: () => () => {},
++    retryDegradableQueries,
++    close: async () => {},
++  } as unknown as BaseConvexClientInterface;
++  const client = new ConvexReactClient("https://custom.example.com", {
++    baseClient,
++  });
++
++  try {
++    expect(client.retryDegradableQueries(3)).toBe(false);
++    expect(client.retryDegradableQueries(3)).toBe(true);
++    expect(retryDegradableQueries).toHaveBeenNthCalledWith(1, 3);
++    expect(retryDegradableQueries).toHaveBeenNthCalledWith(2, 3);
++  } finally {
++    await client.close();
++  }
++});
++describe("degradable BaseConvexClient", () => {
++  test("serializes the workload class on the initial Connect and reconnect", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, close }) => {
++      const client = new BaseConvexClient(address, () => {}, {
++        webSocketConstructor: nodeWebSocket,
++        logger: false,
++        unsavedChangesWarning: false,
++        skipConvexDeploymentUrlCheck: true,
++        queryWorkloadClass: "degradable",
++      });
++
++      try {
++        const initialConnect = await receive();
++        expect(initialConnect).toMatchObject({
++          type: "Connect",
++          connectionCount: 0,
++          queryWorkloadClass: "degradable",
++          degradableQueryPressureVersion: 1,
++        });
++        expect((await receive()).type).toBe("ModifyQuerySet");
++
++        close();
++
++        const reconnect = await receive();
++        expect(reconnect).toMatchObject({
++          type: "Connect",
++          connectionCount: 1,
++          queryWorkloadClass: "degradable",
++          degradableQueryPressureVersion: 1,
++        });
++      } finally {
++        await client.close();
++      }
++    });
++  }, 10_000);
++
++  test("sends at most one retry for the connection's current active epoch", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send, close }) => {
++      const pressureWaiters: Array<(pressure: ServerPressure) => void> = [];
++      const nextPressure = () =>
++        new Promise<ServerPressure>((resolve) => {
++          pressureWaiters.push(resolve);
++        });
++      const client = new BaseConvexClient(address, () => {}, {
++        webSocketConstructor: nodeWebSocket,
++        logger: false,
++        unsavedChangesWarning: false,
++        skipConvexDeploymentUrlCheck: true,
++        queryWorkloadClass: "degradable",
++        onServerPressure: (pressure) => pressureWaiters.shift()?.(pressure),
++      });
++      const sendPressure = (
++        pressure: ServerPressure | undefined,
++        endQuerySet = 0,
++        endIdentity = 0,
++      ) => {
++        send({
++          type: "Transition",
++          startVersion: {
++            querySet: 0,
++            ts: Long.fromNumber(0),
++            identity: 0,
++          },
++          endVersion: {
++            querySet: endQuerySet,
++            ts: Long.fromNumber(0),
++            identity: endIdentity,
++          },
++          modifications: [],
++          ...(pressure === undefined ? {} : { serverPressure: pressure }),
++        });
++      };
++
++      try {
++        expect(await receive()).toMatchObject({
++          type: "Connect",
++          degradableQueryPressureVersion: 1,
++        });
++        expect((await receive()).type).toBe("ModifyQuerySet");
++        const activePressure = nextPressure();
++        sendPressure({
++          kind: "degradable_query_capacity",
++          state: "active",
++          epoch: 5,
++          retryAfterMs: 250,
++          pendingQueryCount: 2,
++        });
++        await expect(activePressure).resolves.toMatchObject({
++          state: "active",
++          epoch: 5,
++        });
++
++        let resolvePressureFreeTransition!: () => void;
++        const pressureFreeTransition = new Promise<void>((resolve) => {
++          resolvePressureFreeTransition = resolve;
++        });
++        const removeTransitionHandler = client.addOnTransitionHandler(() => {
++          resolvePressureFreeTransition();
++        });
++        sendPressure(undefined);
++        await pressureFreeTransition;
++        removeTransitionHandler();
++
++        const staleClear = nextPressure();
++        sendPressure({
++          kind: "degradable_query_capacity",
++          state: "cleared",
++          epoch: 4,
++          pendingQueryCount: 0,
++        });
++        await staleClear;
++
++        expect(client.retryDegradableQueries(4)).toBe(false);
++        expect(client.retryDegradableQueries(5)).toBe(true);
++        expect(await receive()).toEqual({
++          type: "RetryDegradableQueries",
++          epoch: 5,
++        });
++        expect(client.retryDegradableQueries(5)).toBe(false);
++
++        const repeatedActive = nextPressure();
++        sendPressure({
++          kind: "degradable_query_capacity",
++          state: "active",
++          epoch: 5,
++          retryAfterMs: 250,
++          pendingQueryCount: 1,
++        });
++        await repeatedActive;
++        expect(client.retryDegradableQueries(5)).toBe(false);
++
++        for (const invalidEpoch of [0, -1, 1.5, Number.NaN, 0x1_0000_0000]) {
++          expect(() => client.retryDegradableQueries(invalidEpoch)).toThrow(
++            "positive unsigned 32-bit integer",
++          );
++        }
++
++        const matchingClear = nextPressure();
++        sendPressure({
++          kind: "degradable_query_capacity",
++          state: "cleared",
++          epoch: 5,
++          pendingQueryCount: 0,
++        });
++        await matchingClear;
++        expect(client.retryDegradableQueries(5)).toBe(false);
++
++        const nextEpoch = nextPressure();
++        sendPressure({
++          kind: "degradable_query_capacity",
++          state: "active",
++          epoch: 6,
++          retryAfterMs: 250,
++          pendingQueryCount: 1,
++        });
++        await nextEpoch;
++
++        let resolveToken!: (token: string) => void;
++        client.setAuth(
++          () =>
++            new Promise<string>((resolve) => {
++              resolveToken = resolve;
++            }),
++          () => {},
++        );
++        expect(client.retryDegradableQueries(6)).toBe(false);
++        resolveToken("test.header.signature");
++        expect(await receive()).toMatchObject({
++          type: "Authenticate",
++          tokenType: "User",
++        });
++        expect(client.retryDegradableQueries(6)).toBe(true);
++        expect(await receive()).toEqual({
++          type: "RetryDegradableQueries",
++          epoch: 6,
++        });
++
++        close();
++        expect(await receive()).toMatchObject({
++          type: "Connect",
++          connectionCount: 1,
++          degradableQueryPressureVersion: 1,
++        });
++        expect((await receive()).type).toBe("Authenticate");
++        expect((await receive()).type).toBe("ModifyQuerySet");
++        expect(client.retryDegradableQueries(5)).toBe(false);
++        expect(client.retryDegradableQueries(6)).toBe(false);
++
++        const replacementWorkerPressure = nextPressure();
++        sendPressure(
++          {
++            kind: "degradable_query_capacity",
++            state: "active",
++            epoch: 5,
++            retryAfterMs: 250,
++            pendingQueryCount: 1,
++          },
++          1,
++          1,
++        );
++        await replacementWorkerPressure;
++        expect(client.retryDegradableQueries(5)).toBe(true);
++        expect(await receive()).toEqual({
++          type: "RetryDegradableQueries",
++          epoch: 5,
++        });
++      } finally {
++        await client.close();
++      }
++    });
++  }, 10_000);
++
++  test("invalidates the old epoch before a reconnect Connect send", async () => {
++    let client!: BaseConvexClient;
++    let retryDuringReconnect: boolean | undefined;
++    class ReentrantConnectWebSocket extends nodeWebSocket {
++      override send(
++        data: string | ArrayBufferLike | Blob | ArrayBufferView,
++      ): void {
++        super.send(data);
++        if (
++          typeof data === "string" &&
++          data.includes('"type":"Connect"') &&
++          data.includes('"connectionCount":1')
++        ) {
++          retryDuringReconnect = client.retryDegradableQueries(5);
++        }
++      }
++    }
++
++    await withInMemoryWebSocket(async ({ address, receive, send, close }) => {
++      let resolvePressure!: () => void;
++      const pressureReceived = new Promise<void>((resolve) => {
++        resolvePressure = resolve;
++      });
++      client = new BaseConvexClient(address, () => {}, {
++        webSocketConstructor: ReentrantConnectWebSocket,
++        logger: false,
++        unsavedChangesWarning: false,
++        skipConvexDeploymentUrlCheck: true,
++        queryWorkloadClass: "degradable",
++        onServerPressure: resolvePressure,
++      });
++
++      try {
++        expect((await receive()).type).toBe("Connect");
++        expect((await receive()).type).toBe("ModifyQuerySet");
++        send({
++          type: "Transition",
++          startVersion: {
++            querySet: 0,
++            ts: Long.fromNumber(0),
++            identity: 0,
++          },
++          endVersion: {
++            querySet: 0,
++            ts: Long.fromNumber(0),
++            identity: 0,
++          },
++          modifications: [],
++          serverPressure: {
++            kind: "degradable_query_capacity",
++            state: "active",
++            epoch: 5,
++            retryAfterMs: 250,
++            pendingQueryCount: 1,
++          },
++        });
++        await pressureReceived;
++
++        close();
++        expect(await receive()).toMatchObject({
++          type: "Connect",
++          connectionCount: 1,
++        });
++        expect(retryDuringReconnect).toBe(false);
++        expect((await receive()).type).toBe("ModifyQuerySet");
++      } finally {
++        await client.close();
++      }
++    });
++  }, 10_000);
++
++  test("installs active pressure before transition listeners run", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      let client!: BaseConvexClient;
++      let resolveRetryResult!: (accepted: boolean) => void;
++      const retryResult = new Promise<boolean>((resolve) => {
++        resolveRetryResult = resolve;
++      });
++      client = new BaseConvexClient(
++        address,
++        () => resolveRetryResult(client.retryDegradableQueries(8)),
++        {
++          webSocketConstructor: nodeWebSocket,
++          logger: false,
++          unsavedChangesWarning: false,
++          skipConvexDeploymentUrlCheck: true,
++          queryWorkloadClass: "degradable",
++        },
++      );
++
++      try {
++        expect((await receive()).type).toBe("Connect");
++        expect((await receive()).type).toBe("ModifyQuerySet");
++        send({
++          type: "Transition",
++          startVersion: {
++            querySet: 0,
++            ts: Long.fromNumber(0),
++            identity: 0,
++          },
++          endVersion: {
++            querySet: 0,
++            ts: Long.fromNumber(0),
++            identity: 0,
++          },
++          modifications: [],
++          serverPressure: {
++            kind: "degradable_query_capacity",
++            state: "active",
++            epoch: 8,
++            retryAfterMs: 250,
++            pendingQueryCount: 1,
++          },
++        });
++
++        await expect(retryResult).resolves.toBe(true);
++        expect(await receive()).toEqual({
++          type: "RetryDegradableQueries",
++          epoch: 8,
++        });
++      } finally {
++        await client.close();
++      }
++    });
++  });
++
++  test("does not accept a retry when WebSocket.send throws", async () => {
++    let failRetrySend = true;
++    class RetryFailingWebSocket extends nodeWebSocket {
++      override send(
++        data: string | ArrayBufferLike | Blob | ArrayBufferView,
++      ): void {
++        if (
++          failRetrySend &&
++          typeof data === "string" &&
++          data.includes('"type":"RetryDegradableQueries"')
++        ) {
++          failRetrySend = false;
++          throw new Error("test retry send failure");
++        }
++        super.send(data);
++      }
++    }
++
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      let resolvePressure!: () => void;
++      const pressureReceived = new Promise<void>((resolve) => {
++        resolvePressure = resolve;
++      });
++      const client = new BaseConvexClient(address, () => {}, {
++        webSocketConstructor: RetryFailingWebSocket,
++        logger: false,
++        unsavedChangesWarning: false,
++        skipConvexDeploymentUrlCheck: true,
++        queryWorkloadClass: "degradable",
++        onServerPressure: resolvePressure,
++      });
++
++      try {
++        expect((await receive()).type).toBe("Connect");
++        expect((await receive()).type).toBe("ModifyQuerySet");
++        send({
++          type: "Transition",
++          startVersion: {
++            querySet: 0,
++            ts: Long.fromNumber(0),
++            identity: 0,
++          },
++          endVersion: {
++            querySet: 0,
++            ts: Long.fromNumber(0),
++            identity: 0,
++          },
++          modifications: [],
++          serverPressure: {
++            kind: "degradable_query_capacity",
++            state: "active",
++            epoch: 9,
++            retryAfterMs: 250,
++            pendingQueryCount: 1,
++          },
++        });
++        await pressureReceived;
++
++        expect(client.retryDegradableQueries(9)).toBe(false);
++        expect(failRetrySend).toBe(false);
++      } finally {
++        await client.close();
++      }
++    });
++  });
++
++  test("applies a chunked pressure transition before invoking the callback", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      const events: string[] = [];
++      let resolvePressure!: (pressure: ServerPressure) => void;
++      const pressureReceived = new Promise<ServerPressure>((resolve) => {
++        resolvePressure = resolve;
++      });
++      const client = new BaseConvexClient(
++        address,
++        (updatedQueries) => {
++          if (updatedQueries.length > 0) {
++            events.push("transition");
++          }
++        },
++        {
++          webSocketConstructor: nodeWebSocket,
++          logger: false,
++          unsavedChangesWarning: false,
++          skipConvexDeploymentUrlCheck: true,
++          queryWorkloadClass: "degradable",
++          onServerPressure: (pressure) => {
++            events.push("pressure");
++            resolvePressure(pressure);
++          },
++        },
++      );
++      const { queryToken } = client.subscribe("messages:list", {});
++
++      try {
++        expect((await receive()).type).toBe("Connect");
++        const querySetMessage = await receive();
++        if (querySetMessage.type !== "ModifyQuerySet") {
++          throw new Error("Expected a ModifyQuerySet message");
++        }
++        const add = querySetMessage.modifications[0];
++        if (add?.type !== "Add") {
++          throw new Error("Expected an Add query modification");
++        }
++
++        const transition: Transition = {
++          type: "Transition",
++          startVersion: {
++            querySet: 0,
++            ts: Long.fromNumber(0),
++            identity: 0,
++          },
++          endVersion: {
++            querySet: 1,
++            ts: Long.fromNumber(1),
++            identity: 0,
++          },
++          modifications: [
++            {
++              type: "QueryUpdated",
++              queryId: add.queryId,
++              value: "current value",
++              logLines: [],
++              journal: null,
++            },
++          ],
++          serverPressure: {
++            kind: "degradable_query_capacity",
++            retryAfterMs: 250,
++          },
++        };
++        const encodedTransition = encodeServerMessage(transition);
++        const splitAt = Math.floor(encodedTransition.length / 2);
++        send({
++          type: "TransitionChunk",
++          chunk: encodedTransition.slice(0, splitAt),
++          partNumber: 0,
++          totalParts: 2,
++          transitionId: "pressure-transition",
++        });
++        send({
++          type: "TransitionChunk",
++          chunk: encodedTransition.slice(splitAt),
++          partNumber: 1,
++          totalParts: 2,
++          transitionId: "pressure-transition",
++        });
++
++        await expect(pressureReceived).resolves.toEqual({
++          kind: "degradable_query_capacity",
++          retryAfterMs: 250,
++        });
++        expect(events).toEqual(["transition", "pressure"]);
++        expect(client.localQueryResultByToken(queryToken)).toBe(
++          "current value",
++        );
++
++        const mutationPromise = client.mutation("messages:create", {});
++        const mutation = await receive();
++        expect(mutation.type).toBe("Mutation");
++        if (mutation.type !== "Mutation") {
++          throw new Error("Expected a Mutation request");
++        }
++        send({
++          type: "MutationResponse",
++          requestId: mutation.requestId,
++          success: false,
++          result: "mutation test response",
++          logLines: [],
++        });
++        await expect(mutationPromise).rejects.toThrow("mutation test response");
++
++        const actionPromise = client.action("messages:refresh", {});
++        const action = await receive();
++        expect(action.type).toBe("Action");
++        if (action.type !== "Action") {
++          throw new Error("Expected an Action request");
++        }
++        send({
++          type: "ActionResponse",
++          requestId: action.requestId,
++          success: false,
++          result: "action test response",
++          logLines: [],
++        });
++        await expect(actionPromise).rejects.toThrow("action test response");
++      } finally {
++        await client.close();
++      }
++    });
++  });
++
++  test("isolates callback failures after direct transitions", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      const events: string[] = [];
++      let didUnsubscribe = false;
++      let unsubscribe: (() => void) | undefined;
++      let pressureCallCount = 0;
++      let resolveFirstPressure!: () => void;
++      let resolveSecondPressure!: () => void;
++      const firstPressure = new Promise<void>((resolve) => {
++        resolveFirstPressure = resolve;
++      });
++      const secondPressure = new Promise<void>((resolve) => {
++        resolveSecondPressure = resolve;
++      });
++      let client!: BaseConvexClient;
++      client = new BaseConvexClient(
++        address,
++        (updatedQueries) => {
++          if (updatedQueries.length > 0 && !didUnsubscribe) {
++            events.push("transition");
++            didUnsubscribe = true;
++            unsubscribe!();
++          }
++        },
++        {
++          webSocketConstructor: nodeWebSocket,
++          logger: {
++            logVerbose: () => {},
++            log: () => {},
++            warn: () => {},
++            error: (message) => {
++              if (message === "onServerPressure callback threw an error:") {
++                events.push("pressure error logged");
++              }
++            },
++          },
++          unsavedChangesWarning: false,
++          skipConvexDeploymentUrlCheck: true,
++          queryWorkloadClass: "degradable",
++          onServerPressure: () => {
++            pressureCallCount += 1;
++            events.push(`pressure ${pressureCallCount}`);
++            events.push(
++              `${client.connectionState().inflightMutations} inflight mutations`,
++            );
++            if (pressureCallCount === 1) {
++              resolveFirstPressure();
++              throw new Error("application pressure callback failed");
++            }
++            resolveSecondPressure();
++          },
++        },
++      );
++      const subscription = client.subscribe("messages:list", {});
++      unsubscribe = subscription.unsubscribe;
++
++      try {
++        expect((await receive()).type).toBe("Connect");
++        const querySetMessage = await receive();
++        if (querySetMessage.type !== "ModifyQuerySet") {
++          throw new Error("Expected a ModifyQuerySet message");
++        }
++        const add = querySetMessage.modifications[0];
++        if (add?.type !== "Add") {
++          throw new Error("Expected an Add query modification");
++        }
++        client.addOnTransitionHandler((transition) => {
++          if (transition.reflectedMutations.length > 0) {
++            events.push("mutation reflected");
++          }
++        });
++
++        const mutationPromise = client.mutation("messages:create", {});
++        const mutationMessage = await receive();
++        if (mutationMessage.type !== "Mutation") {
++          throw new Error("Expected a Mutation request");
++        }
++        send({
++          type: "MutationResponse",
++          requestId: mutationMessage.requestId,
++          success: true,
++          result: "created",
++          ts: Long.fromNumber(1),
++          logLines: [],
++        });
++
++        send({
++          type: "Transition",
++          startVersion: {
++            querySet: 0,
++            ts: Long.fromNumber(0),
++            identity: 0,
++          },
++          endVersion: {
++            querySet: 1,
++            ts: Long.fromNumber(1),
++            identity: 0,
++          },
++          modifications: [
++            {
++              type: "QueryUpdated",
++              queryId: add.queryId,
++              value: "current value",
++              logLines: [],
++              journal: null,
++            },
++          ],
++          serverPressure: {
++            kind: "degradable_query_capacity",
++            retryAfterMs: 250,
++          },
++        });
++
++        await firstPressure;
++        expect(client.localQueryResultByToken(subscription.queryToken)).toBe(
++          "current value",
++        );
++        expect(events).toEqual([
++          "transition",
++          "mutation reflected",
++          "pressure 1",
++          "0 inflight mutations",
++          "pressure error logged",
++        ]);
++        await expect(mutationPromise).resolves.toBe("created");
++
++        const removeMessage = await receive();
++        expect(removeMessage).toMatchObject({
++          type: "ModifyQuerySet",
++          baseVersion: 1,
++          newVersion: 2,
++          modifications: [{ type: "Remove", queryId: add.queryId }],
++        });
++
++        send({
++          type: "Transition",
++          startVersion: {
++            querySet: 1,
++            ts: Long.fromNumber(1),
++            identity: 0,
++          },
++          endVersion: {
++            querySet: 2,
++            ts: Long.fromNumber(2),
++            identity: 0,
++          },
++          modifications: [{ type: "QueryRemoved", queryId: add.queryId }],
++          serverPressure: {
++            kind: "degradable_query_capacity",
++            retryAfterMs: 500,
++          },
++        });
++
++        await secondPressure;
++        expect(events).toEqual([
++          "transition",
++          "mutation reflected",
++          "pressure 1",
++          "0 inflight mutations",
++          "pressure error logged",
++          "pressure 2",
++          "0 inflight mutations",
++        ]);
++      } finally {
++        await client.close();
++      }
++    });
++  });
++
++  test("logs asynchronous pressure callback rejections", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      let resolveLogged!: () => void;
++      const rejectionLogged = new Promise<void>((resolve) => {
++        resolveLogged = resolve;
++      });
++      const client = new BaseConvexClient(address, () => {}, {
++        webSocketConstructor: nodeWebSocket,
++        logger: {
++          logVerbose: () => {},
++          log: () => {},
++          warn: () => {},
++          error: (message) => {
++            if (message === "onServerPressure callback rejected:") {
++              resolveLogged();
++            }
++          },
++        },
++        unsavedChangesWarning: false,
++        skipConvexDeploymentUrlCheck: true,
++        queryWorkloadClass: "degradable",
++        onServerPressure: async () => {
++          throw new Error("application pressure callback rejected");
++        },
++      });
++
++      try {
++        expect((await receive()).type).toBe("Connect");
++        send({
++          type: "Transition",
++          startVersion: {
++            querySet: 0,
++            ts: Long.fromNumber(0),
++            identity: 0,
++          },
++          endVersion: {
++            querySet: 1,
++            ts: Long.fromNumber(1),
++            identity: 0,
++          },
++          modifications: [],
++          serverPressure: {
++            kind: "degradable_query_capacity",
++            retryAfterMs: 250,
++          },
++        });
++
++        await rejectionLogged;
++      } finally {
++        await client.close();
++      }
++    });
++  });
++
++  test.each(clientWrappers)(
++    "%s passes workload and pressure options to its internal base client",
++    async (_name, createClient) => {
++      await withInMemoryWebSocket(async ({ address, receive, send }) => {
++        let resolvePressure!: (pressure: ServerPressure) => void;
++        const pressureReceived = new Promise<ServerPressure>((resolve) => {
++          resolvePressure = resolve;
++        });
++        const client = createClient(address, {
++          webSocketConstructor: nodeWebSocket,
++          logger: false,
++          unsavedChangesWarning: false,
++          skipConvexDeploymentUrlCheck: true,
++          queryWorkloadClass: "degradable",
++          onServerPressure: resolvePressure,
++        });
++        client.connectionState();
++
++        try {
++          expect(await receive()).toMatchObject({
++            type: "Connect",
++            queryWorkloadClass: "degradable",
++            degradableQueryPressureVersion: 1,
++          });
++          expect((await receive()).type).toBe("ModifyQuerySet");
++          expect(client.retryDegradableQueries(7)).toBe(false);
++
++          send({
++            type: "Transition",
++            startVersion: {
++              querySet: 0,
++              ts: Long.fromNumber(0),
++              identity: 0,
++            },
++            endVersion: {
++              querySet: 1,
++              ts: Long.fromNumber(1),
++              identity: 0,
++            },
++            modifications: [],
++            serverPressure: {
++              kind: "degradable_query_capacity",
++              state: "active",
++              epoch: 7,
++              retryAfterMs: 250,
++              pendingQueryCount: 1,
++            },
++          });
++
++          await expect(pressureReceived).resolves.toEqual({
++            kind: "degradable_query_capacity",
++            state: "active",
++            epoch: 7,
++            retryAfterMs: 250,
++            pendingQueryCount: 1,
++          });
++          expect(client.retryDegradableQueries(7)).toBe(true);
++          expect(await receive()).toEqual({
++            type: "RetryDegradableQueries",
++            epoch: 7,
++          });
++        } finally {
++          await client.close();
++        }
++      });
++    },
++  );
++});
+diff --git a/src/browser/sync/client.ts b/src/browser/sync/client.ts
+index 218864d4e5d629d8a6437f775730deb9d897dbeb..3dd4b5e457425e3036d79a54e45985dbf874b8ea 100644
+--- a/src/browser/sync/client.ts
++++ b/src/browser/sync/client.ts
+@@ -36,13 +36,16 @@ import {
+ import {
+   ActionRequest,
+   MutationRequest,
++  QueryWorkloadClass,
+   QueryId,
+   QueryJournal,
+   ServerMessage,
++  ServerPressure,
+   RequestId,
+   TS,
+   UserIdentityAttributes,
+ } from "./protocol.js";
++export type { QueryWorkloadClass, ServerPressure } from "./protocol.js";
+ import { RemoteQuerySet } from "./remote_query_set.js";
+ import { QueryToken, serializePathAndArgs } from "./udf_path_utils.js";
+ import { ReconnectMetadata, WebSocketManager } from "./web_socket_manager.js";
+@@ -58,12 +61,53 @@ import { parseArgs, validateDeploymentUrl } from "../../common/index.js";
+ import { ConvexError } from "../../values/errors.js";
+ import { jwtDecode } from "../../vendor/jwt-decode/index.js";
+ 
++/**
++ * A handler for temporary server pressure affecting degradable reactive
++ * queries.
++ *
++ * The transition carrying the pressure is applied before this handler runs.
++ * Existing transition listeners run first; if one of them throws, this handler
++ * is not reached and the listener's existing error behavior is unchanged.
++ * Applications should present the affected connection as stale while keeping
++ * successful subscriptions mounted. The backend retains and retries only its
++ * deferred query set. Mutations and actions continue normally and are not
++ * degradable. Pressure epochs belong to one connection; applications retaining
++ * pressure state must also clear it when {@link ConnectionState.connectionCount}
++ * changes because a replacement backend worker cannot clear the old epoch.
++ *
++ * This handler should update application state synchronously. Returned promises
++ * are not awaited, but rejections and synchronous errors are logged and do not
++ * interrupt synchronization.
++ *
++ * @public
++ */
++export type ServerPressureHandler = (
++  pressure: ServerPressure,
++) => void | Promise<void>;
++
+ /**
+  * Options for {@link BaseConvexClient}.
+  *
+  * @public
+  */
+ export interface BaseConvexClientOptions {
++  /**
++   * Opts this client's root reactive queries into temporary degradation when
++   * the backend is configured to limit degradable query capacity.
++   *
++   * Omit this option to preserve normal query behavior. This setting does not
++   * apply to mutations or actions.
++   */
++  queryWorkloadClass?: QueryWorkloadClass;
++  /**
++   * Called after a server transition reports temporary pressure metadata for
++   * degradable reactive queries.
++   *
++   * Applications using lifecycle metadata should keep successful query
++   * subscriptions mounted and show visible stale state until the lifecycle
++   * reports `cleared`. Mutations and actions remain operational.
++   */
++  onServerPressure?: ServerPressureHandler;
+   /**
+    * Whether to prompt the user if they have unsaved changes pending
+    * when navigating away or closing a web page.
+@@ -287,6 +331,9 @@ export class BaseConvexClient {
+   >();
+   private nextConnectionStateSubscriberId: number = 0;
+   private _lastPublishedConnectionState: ConnectionState | undefined;
++  private activeDegradableQueryPressure:
++    | { epoch: number; retried: boolean }
++    | undefined;
+ 
+   /**
+    * @param address - The url of your Convex deployment, often provided
+@@ -310,6 +357,8 @@ export class BaseConvexClient {
+       validateDeploymentUrl(address);
+     }
+     options = { ...options };
++    const queryWorkloadClass = options.queryWorkloadClass;
++    const onServerPressure = options.onServerPressure;
+     const authRefreshTokenLeewaySeconds =
+       options.authRefreshTokenLeewaySeconds ?? 10;
+     let webSocketConstructor = options.webSocketConstructor;
+@@ -427,11 +476,21 @@ export class BaseConvexClient {
+         onOpen: (reconnectMetadata: ReconnectMetadata) => {
+           // We have a new WebSocket!
+           this.mark("convexWebSocketOpen");
++          // Pressure epochs belong to one backend sync worker. A reconnect
++          // creates a new worker. Reset before sending Connect so even a
++          // reentrant custom WebSocket cannot retry the replaced worker's
++          // epoch on the new connection.
++          this.activeDegradableQueryPressure = undefined;
++
+           this.webSocketManager.sendMessage({
+             ...reconnectMetadata,
+             type: "Connect",
+             sessionId: this._sessionId,
+             maxObservedTimestamp: this.maxObservedTimestamp,
++            ...(queryWorkloadClass === undefined ? {} : { queryWorkloadClass }),
++            ...(queryWorkloadClass === "degradable"
++              ? { degradableQueryPressureVersion: 1 as const }
++              : {}),
+           });
+ 
+           // Throw out our remote query, reissue queries
+@@ -478,7 +537,61 @@ export class BaseConvexClient {
+               const completedRequests = this.requestManager.removeCompleted(
+                 this.remoteQuerySet.timestamp(),
+               );
++              const pressure = serverMessage.serverPressure;
++              if (pressure !== undefined) {
++                if ("state" in pressure) {
++                  switch (pressure.state) {
++                    case "active": {
++                      if (
++                        this.activeDegradableQueryPressure?.epoch !==
++                        pressure.epoch
++                      ) {
++                        this.activeDegradableQueryPressure = {
++                          epoch: pressure.epoch,
++                          retried: false,
++                        };
++                      }
++                      break;
++                    }
++                    case "cleared": {
++                      if (
++                        this.activeDegradableQueryPressure?.epoch ===
++                        pressure.epoch
++                      ) {
++                        this.activeDegradableQueryPressure = undefined;
++                      }
++                      break;
++                    }
++                    default: {
++                      pressure satisfies never;
++                    }
++                  }
++                }
++              }
++              // Apply all connection-local protocol state before application
++              // transition listeners run. The pressure callback still follows
++              // those listeners to preserve their established ordering.
+               this.notifyOnQueryResultChanges(completedRequests);
++              if (pressure !== undefined) {
++                try {
++                  const result = onServerPressure?.(pressure);
++                  if (result !== undefined) {
++                    void Promise.resolve(result).catch((error) => {
++                      this.logger.error(
++                        "onServerPressure callback rejected:",
++                        error,
++                      );
++                    });
++                  }
++                } catch (error) {
++                  // Application pressure policy must not interrupt WebSocket
++                  // receive bookkeeping after the transition has been applied.
++                  this.logger.error(
++                    "onServerPressure callback threw an error:",
++                    error,
++                  );
++                }
++              }
+               break;
+             }
+             case "MutationResponse": {
+@@ -698,6 +811,50 @@ export class BaseConvexClient {
+     this.webSocketManager.sendMessage(message);
+   }
+ 
++  /**
++   * Ask the backend to retry only the queries deferred in the current pressure
++   * epoch.
++   *
++   * @returns `true` only when this client accepted the first send for that
++   * epoch. Inactive, stale, duplicate, and temporarily unsendable retries
++   * return `false`.
++   * @throws When `epoch` is not a positive unsigned 32-bit integer.
++   *
++   * @public
++   */
++  retryDegradableQueries(epoch: number): boolean {
++    if (!Number.isSafeInteger(epoch) || epoch <= 0 || epoch > 0xffff_ffff) {
++      throw new Error(
++        "Degradable query pressure epoch must be a positive unsigned 32-bit integer.",
++      );
++    }
++    const activePressure = this.activeDegradableQueryPressure;
++    if (
++      activePressure === undefined ||
++      activePressure.epoch !== epoch ||
++      activePressure.retried
++    ) {
++      return false;
++    }
++    // Claim this epoch before calling into the WebSocket implementation so a
++    // reentrant custom implementation cannot send the same retry twice.
++    activePressure.retried = true;
++    const mightBeSent = this.webSocketManager.sendMessage({
++      type: "RetryDegradableQueries",
++      epoch,
++    });
++    const accepted =
++      mightBeSent && this.webSocketManager.socketState() === "ready";
++    if (!accepted && this.activeDegradableQueryPressure === activePressure) {
++      // `sendMessage` conservatively returns true when `WebSocket.send`
++      // throws because mutations may already have reached the server. A retry
++      // is epoch-idempotent, so keep it available after that failure or while
++      // the same socket is temporarily unable to send.
++      activePressure.retried = false;
++    }
++    return accepted;
++  }
++
+   /**
+    * Subscribe to a query function.
+    *
+@@ -1168,6 +1325,8 @@ export interface BaseConvexClientInterface {
+ 
+   clearAuth(): void;
+ 
++  retryDegradableQueries(epoch: number): boolean;
++
+   subscribe(
+     name: string,
+     args?: Record<string, Value>,
+diff --git a/src/browser/sync/protocol.test.ts b/src/browser/sync/protocol.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a5245234a23047656a75b5e33ce8867d4a35f0a6
+--- /dev/null
++++ b/src/browser/sync/protocol.test.ts
+@@ -0,0 +1,397 @@
++import { describe, expect, expectTypeOf, test } from "vitest";
++import type {
++  BaseConvexClientOptions,
++  QueryWorkloadClass,
++  ServerPressure,
++  ServerPressureHandler,
++} from "../index.js";
++import type {
++  QueryWorkloadClass as ReactQueryWorkloadClass,
++  ServerPressure as ReactServerPressure,
++  ServerPressureHandler as ReactServerPressureHandler,
++} from "../../react/index.js";
++import { Long } from "../../vendor/long.js";
++import {
++  ClientMessage,
++  encodeClientMessage,
++  longToU64,
++  parseServerMessage,
++} from "./protocol.js";
++
++type ConnectMessage = Extract<ClientMessage, { type: "Connect" }>;
++
++function connectMessage(
++  queryWorkloadClass?: QueryWorkloadClass,
++  degradableQueryPressureVersion?: 1,
++): ConnectMessage {
++  return {
++    type: "Connect",
++    sessionId: "session",
++    connectionCount: 0,
++    lastCloseReason: null,
++    clientTs: 123,
++    ...(queryWorkloadClass === undefined ? {} : { queryWorkloadClass }),
++    ...(degradableQueryPressureVersion === undefined
++      ? {}
++      : { degradableQueryPressureVersion }),
++  };
++}
++
++function parseTransition({
++  serverPressure,
++  includeServerPressure = true,
++  extra,
++}: {
++  serverPressure?: unknown;
++  includeServerPressure?: boolean;
++  extra?: Record<string, unknown>;
++} = {}) {
++  const encoded = {
++    type: "Transition",
++    startVersion: {
++      querySet: 0,
++      ts: longToU64(Long.fromNumber(0)),
++      identity: 0,
++    },
++    endVersion: {
++      querySet: 0,
++      ts: longToU64(Long.fromNumber(0)),
++      identity: 0,
++    },
++    modifications: [],
++    ...(includeServerPressure ? { serverPressure } : {}),
++    ...extra,
++  };
++  const parsed = parseServerMessage(
++    encoded as unknown as Parameters<typeof parseServerMessage>[0],
++  );
++  if (parsed.type !== "Transition") {
++    throw new Error(`Expected Transition, got ${parsed.type}`);
++  }
++  return parsed;
++}
++
++describe("degradable client protocol", () => {
++  test("exports only the degradable workload class through client options", () => {
++    expectTypeOf<QueryWorkloadClass>().toEqualTypeOf<"degradable">();
++    expectTypeOf<BaseConvexClientOptions["queryWorkloadClass"]>().toEqualTypeOf<
++      QueryWorkloadClass | undefined
++    >();
++    expectTypeOf<ServerPressureHandler>().toEqualTypeOf<
++      (pressure: ServerPressure) => void | Promise<void>
++    >();
++    expectTypeOf<ReactQueryWorkloadClass>().toEqualTypeOf<QueryWorkloadClass>();
++    expectTypeOf<ReactServerPressure>().toEqualTypeOf<ServerPressure>();
++    expectTypeOf<ReactServerPressureHandler>().toEqualTypeOf<ServerPressureHandler>();
++  });
++
++  test("omitting the workload class preserves the existing Connect bytes", () => {
++    expect(JSON.stringify(encodeClientMessage(connectMessage()))).toBe(
++      '{"type":"Connect","sessionId":"session","connectionCount":0,"lastCloseReason":null,"clientTs":123}',
++    );
++  });
++
++  test("serializes the degradable workload class on Connect", () => {
++    expect(
++      JSON.stringify(encodeClientMessage(connectMessage("degradable"))),
++    ).toBe(
++      '{"type":"Connect","sessionId":"session","connectionCount":0,"lastCloseReason":null,"clientTs":123,"queryWorkloadClass":"degradable"}',
++    );
++  });
++
++  test("serializes lifecycle capability and epoch retry", () => {
++    expect(
++      JSON.stringify(encodeClientMessage(connectMessage("degradable", 1))),
++    ).toBe(
++      '{"type":"Connect","sessionId":"session","connectionCount":0,"lastCloseReason":null,"clientTs":123,"queryWorkloadClass":"degradable","degradableQueryPressureVersion":1}',
++    );
++    expect(
++      encodeClientMessage({ type: "RetryDegradableQueries", epoch: 7 }),
++    ).toEqual({ type: "RetryDegradableQueries", epoch: 7 });
++  });
++
++  test("decodes bounded degradable query pressure", () => {
++    const parsed = parseTransition({
++      serverPressure: {
++        kind: "degradable_query_capacity",
++        retryAfterMs: 0xffff_ffff,
++        futurePressureProperty: { enabled: true },
++      },
++    });
++
++    expect(parsed.serverPressure).toEqual({
++      kind: "degradable_query_capacity",
++      retryAfterMs: 0xffff_ffff,
++    });
++    expect(parsed.serverPressure).not.toHaveProperty("futurePressureProperty");
++  });
++
++  test("decodes active and cleared pressure lifecycle", () => {
++    expect(
++      parseTransition({
++        serverPressure: {
++          kind: "degradable_query_capacity",
++          state: "active",
++          epoch: 0xffff_ffff,
++          retryAfterMs: 0xffff_ffff,
++          pendingQueryCount: 0xffff_ffff,
++          futurePressureProperty: true,
++        },
++      }).serverPressure,
++    ).toEqual({
++      kind: "degradable_query_capacity",
++      state: "active",
++      epoch: 0xffff_ffff,
++      retryAfterMs: 0xffff_ffff,
++      pendingQueryCount: 0xffff_ffff,
++    });
++    expect(
++      parseTransition({
++        serverPressure: {
++          kind: "degradable_query_capacity",
++          state: "cleared",
++          epoch: 7,
++          pendingQueryCount: 0,
++        },
++      }).serverPressure,
++    ).toEqual({
++      kind: "degradable_query_capacity",
++      state: "cleared",
++      epoch: 7,
++      pendingQueryCount: 0,
++    });
++  });
++
++  test("rejects partial lifecycle shapes and invalid positive-u32 fields", () => {
++    const active = {
++      kind: "degradable_query_capacity",
++      state: "active",
++      epoch: 1,
++      retryAfterMs: 1000,
++      pendingQueryCount: 1,
++    };
++    const invalidPositiveU32 = [
++      undefined,
++      null,
++      0,
++      -1,
++      1.5,
++      0x1_0000_0000,
++      Number.MAX_SAFE_INTEGER + 1,
++      Number.NaN,
++      Number.POSITIVE_INFINITY,
++      "1",
++      true,
++    ];
++    for (const field of [
++      "epoch",
++      "retryAfterMs",
++      "pendingQueryCount",
++    ] as const) {
++      for (const invalid of invalidPositiveU32) {
++        expect(() =>
++          parseTransition({
++            serverPressure: { ...active, [field]: invalid },
++          }),
++        ).toThrow("Invalid serverPressure in Transition");
++      }
++    }
++
++    for (const invalid of [
++      { kind: "degradable_query_capacity", retryAfterMs: null },
++      { kind: "degradable_query_capacity", retryAfterMs: 1000, epoch: 1 },
++      { kind: "degradable_query_capacity", retryAfterMs: 1000, epoch: null },
++      {
++        kind: "degradable_query_capacity",
++        retryAfterMs: 1000,
++        pendingQueryCount: 1,
++      },
++      {
++        kind: "degradable_query_capacity",
++        state: "cleared",
++        epoch: 1,
++      },
++      {
++        kind: "degradable_query_capacity",
++        state: "cleared",
++        epoch: null,
++        pendingQueryCount: 0,
++      },
++      {
++        kind: "degradable_query_capacity",
++        state: "cleared",
++        epoch: 1,
++        pendingQueryCount: null,
++      },
++      {
++        kind: "degradable_query_capacity",
++        state: "cleared",
++        epoch: 1,
++        pendingQueryCount: 0,
++        retryAfterMs: null,
++      },
++      {
++        kind: "degradable_query_capacity",
++        state: "cleared",
++        epoch: 0,
++        pendingQueryCount: 0,
++      },
++      {
++        kind: "degradable_query_capacity",
++        state: "cleared",
++        epoch: 0x1_0000_0000,
++        pendingQueryCount: 0,
++      },
++    ]) {
++      expect(() => parseTransition({ serverPressure: invalid })).toThrow(
++        "Invalid serverPressure in Transition",
++      );
++    }
++  });
++
++  test("accepts transitions without pressure and ignores future properties", () => {
++    const parsed = parseTransition({
++      includeServerPressure: false,
++      extra: { futureTransitionProperty: { enabled: true } },
++    });
++
++    expect(parsed).not.toHaveProperty("serverPressure");
++    expect(parsed).toHaveProperty("futureTransitionProperty", {
++      enabled: true,
++    });
++  });
++
++  const malformedPressure: Array<[string, unknown]> = [
++    ["null", null],
++    ["a boolean", true],
++    ["a string", "degradable_query_capacity"],
++    ["an empty object", {}],
++    ["an unknown kind", { kind: "normal", retryAfterMs: 1000 }],
++    [
++      "a null state",
++      {
++        kind: "degradable_query_capacity",
++        state: null,
++        retryAfterMs: 1000,
++      },
++    ],
++    [
++      "an unknown state",
++      {
++        kind: "degradable_query_capacity",
++        state: "future",
++        epoch: 1,
++        retryAfterMs: 1000,
++        pendingQueryCount: 1,
++      },
++    ],
++    ["a missing delay", { kind: "degradable_query_capacity" }],
++    [
++      "a string delay",
++      {
++        kind: "degradable_query_capacity",
++        retryAfterMs: "1000",
++      },
++    ],
++    [
++      "a boolean delay",
++      {
++        kind: "degradable_query_capacity",
++        retryAfterMs: true,
++      },
++    ],
++    ["zero", { kind: "degradable_query_capacity", retryAfterMs: 0 }],
++    [
++      "a negative delay",
++      {
++        kind: "degradable_query_capacity",
++        retryAfterMs: -1,
++      },
++    ],
++    [
++      "a fractional delay",
++      {
++        kind: "degradable_query_capacity",
++        retryAfterMs: 1.5,
++      },
++    ],
++    [
++      "an integer above the wire bound",
++      {
++        kind: "degradable_query_capacity",
++        retryAfterMs: 0x1_0000_0000,
++      },
++    ],
++    [
++      "an unsafe integer",
++      {
++        kind: "degradable_query_capacity",
++        retryAfterMs: Number.MAX_SAFE_INTEGER + 1,
++      },
++    ],
++    ["NaN", { kind: "degradable_query_capacity", retryAfterMs: Number.NaN }],
++    [
++      "infinity",
++      {
++        kind: "degradable_query_capacity",
++        retryAfterMs: Number.POSITIVE_INFINITY,
++      },
++    ],
++    [
++      "an active zero epoch",
++      {
++        kind: "degradable_query_capacity",
++        state: "active",
++        epoch: 0,
++        retryAfterMs: 1000,
++        pendingQueryCount: 1,
++      },
++    ],
++    [
++      "an active zero pending count",
++      {
++        kind: "degradable_query_capacity",
++        state: "active",
++        epoch: 1,
++        retryAfterMs: 1000,
++        pendingQueryCount: 0,
++      },
++    ],
++    [
++      "a cleared nonzero pending count",
++      {
++        kind: "degradable_query_capacity",
++        state: "cleared",
++        epoch: 1,
++        pendingQueryCount: 1,
++      },
++    ],
++    [
++      "a cleared retry delay",
++      {
++        kind: "degradable_query_capacity",
++        state: "cleared",
++        epoch: 1,
++        pendingQueryCount: 0,
++        retryAfterMs: 1000,
++      },
++    ],
++    [
++      "legacy lifecycle fields",
++      {
++        kind: "degradable_query_capacity",
++        retryAfterMs: 1000,
++        epoch: 1,
++      },
++    ],
++  ];
++
++  test.each(malformedPressure)(
++    "rejects pressure with %s",
++    (_name, pressure) => {
++      expect(() => parseTransition({ serverPressure: pressure })).toThrow(
++        "Invalid serverPressure in Transition",
++      );
++    },
++  );
++});
+diff --git a/src/browser/sync/protocol.ts b/src/browser/sync/protocol.ts
+index 1a2745a8d7e00a87ea1edab7f29b17069b5431b8..33e58806501023d06b59d6f2447c8d4eb839de98 100644
+--- a/src/browser/sync/protocol.ts
++++ b/src/browser/sync/protocol.ts
+@@ -36,8 +36,10 @@ export function parseServerMessage(
+       }
+     }
+     case "Transition": {
++      const serverPressure = parseServerPressure(encoded.serverPressure);
+       return {
+         ...encoded,
++        ...(serverPressure === undefined ? {} : { serverPressure }),
+         startVersion: {
+           ...encoded.startVersion,
+           ts: u64ToLong(encoded.startVersion.ts),
+@@ -55,6 +57,60 @@ export function parseServerMessage(
+   return undefined as never;
+ }
+ 
++function parseServerPressure(encoded: unknown): ServerPressure | undefined {
++  if (encoded === undefined) {
++    return undefined;
++  }
++  if (typeof encoded !== "object" || encoded === null) {
++    throw new Error("Invalid serverPressure in Transition");
++  }
++
++  const { kind, state, epoch, retryAfterMs, pendingQueryCount } =
++    encoded as Record<string, unknown>;
++  if (kind !== "degradable_query_capacity") {
++    throw new Error("Invalid serverPressure in Transition");
++  }
++  const isU32 = (value: unknown): value is number =>
++    typeof value === "number" &&
++    Number.isSafeInteger(value) &&
++    value >= 0 &&
++    value <= 0xffff_ffff;
++  const isPositiveU32 = (value: unknown): value is number =>
++    isU32(value) && value > 0;
++
++  if (state === undefined) {
++    if (
++      !isPositiveU32(retryAfterMs) ||
++      epoch !== undefined ||
++      pendingQueryCount !== undefined
++    ) {
++      throw new Error("Invalid serverPressure in Transition");
++    }
++    return { kind, retryAfterMs };
++  }
++  if (state === "active") {
++    if (
++      !isPositiveU32(epoch) ||
++      !isPositiveU32(retryAfterMs) ||
++      !isPositiveU32(pendingQueryCount)
++    ) {
++      throw new Error("Invalid serverPressure in Transition");
++    }
++    return { kind, state, epoch, retryAfterMs, pendingQueryCount };
++  }
++  if (state === "cleared") {
++    if (
++      !isPositiveU32(epoch) ||
++      retryAfterMs !== undefined ||
++      pendingQueryCount !== 0
++    ) {
++      throw new Error("Invalid serverPressure in Transition");
++    }
++    return { kind, state, epoch, pendingQueryCount };
++  }
++  throw new Error("Invalid serverPressure in Transition");
++}
++
+ export function encodeClientMessage(
+   message: ClientMessage,
+ ): EncodedClientMessage {
+@@ -63,6 +119,7 @@ export function encodeClientMessage(
+     case "ModifyQuerySet":
+     case "Mutation":
+     case "Action":
++    case "RetryDegradableQueries":
+     case "Event": {
+       return { ...message };
+     }
+@@ -116,6 +173,14 @@ export type QueryJournal = string | null;
+  * Client message schema
+  */
+ 
++/**
++ * A query workload class that opts a client's root reactive queries into
++ * temporary degradation when the backend is under pressure.
++ *
++ * @public
++ */
++export type QueryWorkloadClass = "degradable";
++
+ type Connect = {
+   type: "Connect";
+   sessionId: string;
+@@ -123,6 +188,8 @@ type Connect = {
+   lastCloseReason: string | null;
+   maxObservedTimestamp?: TS | undefined;
+   clientTs: number;
++  queryWorkloadClass?: QueryWorkloadClass | undefined;
++  degradableQueryPressureVersion?: 1 | undefined;
+ };
+ 
+ export type AddQuery = {
+@@ -169,6 +236,11 @@ export type ActionRequest = {
+   componentPath?: string | undefined;
+ };
+ 
++export type RetryDegradableQueries = {
++  type: "RetryDegradableQueries";
++  epoch: number;
++};
++
+ export type AdminAuthentication = {
+   type: "Authenticate";
+   tokenType: "Admin";
+@@ -202,6 +274,7 @@ export type ClientMessage =
+   | QuerySetModification
+   | MutationRequest
+   | ActionRequest
++  | RetryDegradableQueries
+   | Event;
+ 
+ type EncodedConnect = Omit<Connect, "maxObservedTimestamp"> & {
+@@ -217,6 +290,7 @@ type EncodedClientMessage =
+   | QuerySetModification
+   | MutationRequest
+   | ActionRequest
++  | RetryDegradableQueries
+   | Event;
+ 
+ /**
+@@ -226,6 +300,37 @@ export type TS = U64;
+ type EncodedTS = EncodedU64;
+ type LogLines = string[];
+ 
++/**
++ * Temporary server pressure reported for degradable reactive queries.
++ * `retryAfterMs` is a strictly positive unsigned 32-bit integer and is the
++ * backend's automatic retry delay. Lifecycle `epoch` values are also positive
++ * unsigned 32-bit integers; `pendingQueryCount` is positive for `active` and
++ * zero for `cleared`. Lifecycle-capable applications should keep successful
++ * subscriptions mounted until a matching `cleared` event. A transition with
++ * no pressure metadata does not clear an active epoch. The variant without a
++ * `state` field is legacy metadata and has no explicit clear event.
++ *
++ * @public
++ */
++export type ServerPressure =
++  | {
++      kind: "degradable_query_capacity";
++      retryAfterMs: number;
++    }
++  | {
++      kind: "degradable_query_capacity";
++      state: "active";
++      epoch: number;
++      retryAfterMs: number;
++      pendingQueryCount: number;
++    }
++  | {
++      kind: "degradable_query_capacity";
++      state: "cleared";
++      epoch: number;
++      pendingQueryCount: 0;
++    };
++
+ export type StateVersion = {
+   querySet: QuerySetVersion;
+   ts: TS;
+@@ -259,6 +364,7 @@ export type Transition = {
+   startVersion: StateVersion;
+   endVersion: StateVersion;
+   modifications: StateModification[];
++  serverPressure?: ServerPressure;
+   clientClockSkew?: number;
+   serverTs?: number;
+ };
+diff --git a/src/react/client.ts b/src/react/client.ts
+index 37ccee6f182ea9c4c5a616d6a99b19ba7c9783d2..a80c1ccd0f37cc454d0d8898a7a0c10f0df7ce63 100644
+--- a/src/react/client.ts
++++ b/src/react/client.ts
+@@ -314,7 +314,10 @@ export interface ConvexReactClientOptions extends BaseConvexClientOptions {
+   /**
+    * An already-constructed {@link BaseConvexClient} to use instead of
+    * constructing one internally. When provided, this client (and its
+-   * derived {@link PaginatedQueryClient}) is used for all operations.
++   * derived {@link PaginatedQueryClient}) is used for all operations. Configure
++   * base client options, including `queryWorkloadClass` and `onServerPressure`,
++   * when constructing the supplied client; the other options in this object
++   * do not reconfigure it.
+    *
+    * @internal
+    */
+@@ -718,6 +721,21 @@ export class ConvexReactClient {
+     });
+   }
+ 
++  /**
++   * Ask the backend to retry only the queries deferred in the current
++   * degradable-query pressure epoch.
++   *
++   * @returns `true` only when the current epoch accepted its first send.
++   * Inactive, stale, duplicate, and temporarily unsendable retries return
++   * `false`.
++   * @throws When `epoch` is not a positive unsigned 32-bit integer.
++   *
++   * @public
++   */
++  retryDegradableQueries(epoch: number): boolean {
++    return this.sync.retryDegradableQueries(epoch);
++  }
++
+   /**
+    * Get the current {@link ConnectionState} between the client and the Convex
+    * backend.
+diff --git a/src/react/index.ts b/src/react/index.ts
+index 61cc7137a994f9b4f91a87f6b6123761f81c4dad..27da66fe3e378e92b9010b43780db586f5428be7 100644
+--- a/src/react/index.ts
++++ b/src/react/index.ts
+@@ -71,7 +71,12 @@ export {
+ } from "./use_paginated_query2.js";
+ export { usePaginatedQuery } from "./use_paginated_query.js";
+ export { useQueries, type RequestForQueries } from "./use_queries.js";
+-export type { AuthTokenFetcher } from "../browser/sync/client.js";
++export type {
++  AuthTokenFetcher,
++  QueryWorkloadClass,
++  ServerPressure,
++  ServerPressureHandler,
++} from "../browser/sync/client.js";
+ export * from "./auth_helpers.js";
+ export * from "./ConvexAuthState.js";
+ export * from "./hydration.js";

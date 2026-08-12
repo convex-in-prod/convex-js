@@ -1,0 +1,630 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Tue, 23 Jun 2026 17:40:29 +0800
+Subject: [PATCH 1/7] client: retry write conflict mutations
+
+---
+ src/browser/http_client.ts              |  56 ++++++++++--
+ src/browser/sync/client.ts              |  38 ++++++--
+ src/common/write_conflict_retry.test.ts |  88 ++++++++++++++++++
+ src/common/write_conflict_retry.ts      | 117 ++++++++++++++++++++++++
+ src/nextjs/index.ts                     |  13 ++-
+ src/react/client.ts                     |  26 +++++-
+ src/server/impl/actions_impl.ts         |  18 +++-
+ src/server/impl/registration_impl.ts    |  19 +++-
+ src/server/registration.ts              |   6 +-
+ 9 files changed, 357 insertions(+), 24 deletions(-)
+ create mode 100644 src/common/write_conflict_retry.test.ts
+ create mode 100644 src/common/write_conflict_retry.ts
+
+diff --git a/src/browser/http_client.ts b/src/browser/http_client.ts
+index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..90e0f156dc70c880642ad549af215b00d7b0d14d 100644
+--- a/src/browser/http_client.ts
++++ b/src/browser/http_client.ts
+@@ -23,6 +23,12 @@ import {
+   FunctionArgs,
+   UserIdentityAttributes,
+ } from "../server/index.js";
++import {
++  retryOnWriteConflict,
++  validateWriteConflictRetryOptions,
++  ValidatedWriteConflictRetryOptions,
++  WriteConflictRetryOptions,
++} from "../common/write_conflict_retry.js";
+ 
+ export const STATUS_CODE_OK = 200;
+ export const STATUS_CODE_BAD_REQUEST = 400;
+@@ -37,14 +43,14 @@ export function setFetch(f: typeof globalThis.fetch) {
+   specifiedFetch = f;
+ }
+ 
+-export type HttpMutationOptions = {
++export type HttpMutationOptions = WriteConflictRetryOptions & {
+   /**
+    * Skip the default queue of mutations and run this immediately.
+    *
+    * This allows the same HttpConvexClient to be used to request multiple
+    * mutations in parallel, something not possible with WebSocket-based clients.
+    */
+-  skipQueue: boolean;
++  skipQueue?: boolean | undefined;
+ };
+ 
+ /**
+@@ -70,6 +76,7 @@ export class ConvexHttpClient {
+   private mutationQueue: Array<{
+     mutation: FunctionReference<"mutation">;
+     args: FunctionArgs<any>;
++    writeConflictRetryOptions: ValidatedWriteConflictRetryOptions;
+     resolve: (value: any) => void;
+     reject: (error: any) => void;
+   }> = [];
+@@ -342,6 +349,19 @@ export class ConvexHttpClient {
+   private async mutationInner<Mutation extends FunctionReference<"mutation">>(
+     mutation: Mutation,
+     mutationArgs: FunctionArgs<Mutation>,
++    writeConflictRetryOptions: ValidatedWriteConflictRetryOptions,
++  ): Promise<FunctionReturnType<Mutation>> {
++    return await retryOnWriteConflict(
++      () => this.mutationInnerOnce(mutation, mutationArgs),
++      writeConflictRetryOptions,
++    );
++  }
++
++  private async mutationInnerOnce<
++    Mutation extends FunctionReference<"mutation">,
++  >(
++    mutation: Mutation,
++    mutationArgs: FunctionArgs<Mutation>,
+   ): Promise<FunctionReturnType<Mutation>> {
+     const name = getFunctionName(mutation);
+     const body = JSON.stringify({
+@@ -397,9 +417,14 @@ export class ConvexHttpClient {
+ 
+     this.isProcessingQueue = true;
+     while (this.mutationQueue.length > 0) {
+-      const { mutation, args, resolve, reject } = this.mutationQueue.shift()!;
++      const { mutation, args, writeConflictRetryOptions, resolve, reject } =
++        this.mutationQueue.shift()!;
+       try {
+-        const result = await this.mutationInner(mutation, args);
++        const result = await this.mutationInner(
++          mutation,
++          args,
++          writeConflictRetryOptions,
++        );
+         resolve(result);
+       } catch (error) {
+         reject(error);
+@@ -411,9 +436,16 @@ export class ConvexHttpClient {
+   private enqueueMutation<Mutation extends FunctionReference<"mutation">>(
+     mutation: Mutation,
+     args: FunctionArgs<Mutation>,
++    writeConflictRetryOptions: ValidatedWriteConflictRetryOptions,
+   ): Promise<FunctionReturnType<Mutation>> {
+     return new Promise((resolve, reject) => {
+-      this.mutationQueue.push({ mutation, args, resolve, reject });
++      this.mutationQueue.push({
++        mutation,
++        args,
++        writeConflictRetryOptions,
++        resolve,
++        reject,
++      });
+       void this.processMutationQueue();
+     });
+   }
+@@ -434,11 +466,21 @@ export class ConvexHttpClient {
+     const [fnArgs, options] = args;
+     const mutationArgs = parseArgs(fnArgs);
+     const queued = !options?.skipQueue;
++    const writeConflictRetryOptions =
++      validateWriteConflictRetryOptions(options);
+ 
+     if (queued) {
+-      return await this.enqueueMutation(mutation, mutationArgs);
++      return await this.enqueueMutation(
++        mutation,
++        mutationArgs,
++        writeConflictRetryOptions,
++      );
+     } else {
+-      return await this.mutationInner(mutation, mutationArgs);
++      return await this.mutationInner(
++        mutation,
++        mutationArgs,
++        writeConflictRetryOptions,
++      );
+     }
+   }
+ 
+diff --git a/src/browser/sync/client.ts b/src/browser/sync/client.ts
+index 64d19dc759f32e3727ad8964aade81ee065490ac..218864d4e5d629d8a6437f775730deb9d897dbeb 100644
+--- a/src/browser/sync/client.ts
++++ b/src/browser/sync/client.ts
+@@ -23,6 +23,12 @@ import {
+   OptimisticLocalStore,
+   OptimisticUpdate,
+ } from "./optimistic_updates.js";
++import {
++  isWriteConflictRetryableResult,
++  sleepForWriteConflictRetry,
++  validateWriteConflictRetryOptions,
++  WriteConflictRetryOptions,
++} from "../../common/write_conflict_retry.js";
+ import {
+   OptimisticQueryResults,
+   QueryResultsMap,
+@@ -216,7 +222,7 @@ export interface SubscribeOptions {
+  *
+  * @public
+  */
+-export interface MutationOptions {
++export interface MutationOptions extends WriteConflictRetryOptions {
+   /**
+    * An optimistic update to apply along with this mutation.
+    *
+@@ -902,13 +908,29 @@ export class BaseConvexClient {
+     options?: MutationOptions,
+     componentPath?: string,
+   ): Promise<FunctionResult> {
+-    const { mutationPromise } = this.enqueueMutation(
+-      udfPath,
+-      args,
+-      options,
+-      componentPath,
+-    );
+-    return mutationPromise;
++    const writeConflictRetryOptions =
++      validateWriteConflictRetryOptions(options);
++    let retriesRemaining = writeConflictRetryOptions.maxWriteConflictRetries;
++    while (true) {
++      const { mutationPromise } = this.enqueueMutation(
++        udfPath,
++        args,
++        options,
++        componentPath,
++      );
++      const result = await mutationPromise;
++      if (
++        retriesRemaining <= 0 ||
++        !isWriteConflictRetryableResult(result) ||
++        this.webSocketManager.socketState() === "terminated"
++      ) {
++        return result;
++      }
++      retriesRemaining -= 1;
++      await sleepForWriteConflictRetry(
++        writeConflictRetryOptions.writeConflictRetryDelayMs,
++      );
++    }
+   }
+ 
+   /**
+diff --git a/src/common/write_conflict_retry.test.ts b/src/common/write_conflict_retry.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..39b2d5428bfe70e64851e97c3383866032981f2e
+--- /dev/null
++++ b/src/common/write_conflict_retry.test.ts
+@@ -0,0 +1,88 @@
++import { describe, expect, test, vi } from "vitest";
++
++import {
++  isWriteConflictRetryableMessage,
++  retryOnWriteConflict,
++  validateMaxWriteConflictRetries,
++  validateWriteConflictRetryDelayMs,
++} from "./write_conflict_retry.js";
++
++describe("write conflict retries", () => {
++  test("matches Convex write conflict messages", () => {
++    expect(
++      isWriteConflictRetryableMessage("OptimisticConcurrencyControlFailure"),
++    ).toBe(true);
++    expect(
++      isWriteConflictRetryableMessage(
++        'Documents read from or written to the "users" table changed while this mutation was being run and on every subsequent retry.',
++      ),
++    ).toBe(true);
++    expect(isWriteConflictRetryableMessage("Validation failed")).toBe(false);
++  });
++
++  test("validates retry counts", () => {
++    expect(validateMaxWriteConflictRetries(undefined)).toBe(1);
++    expect(
++      validateMaxWriteConflictRetries({ maxWriteConflictRetries: 0 }),
++    ).toBe(0);
++    expect(
++      validateMaxWriteConflictRetries({ maxWriteConflictRetries: 2 }),
++    ).toBe(2);
++    expect(() =>
++      validateMaxWriteConflictRetries({ maxWriteConflictRetries: -1 }),
++    ).toThrow("maxWriteConflictRetries must be a nonnegative integer.");
++  });
++
++  test("validates retry delays", () => {
++    expect(validateWriteConflictRetryDelayMs(undefined)).toBe(2000);
++    expect(
++      validateWriteConflictRetryDelayMs({ writeConflictRetryDelayMs: 0 }),
++    ).toBe(0);
++    expect(
++      validateWriteConflictRetryDelayMs({ writeConflictRetryDelayMs: 2500 }),
++    ).toBe(2500);
++    expect(() =>
++      validateWriteConflictRetryDelayMs({ writeConflictRetryDelayMs: -1 }),
++    ).toThrow("writeConflictRetryDelayMs must be a nonnegative number.");
++  });
++
++  test("retries write conflict errors", async () => {
++    vi.useFakeTimers();
++    let calls = 0;
++    const result = retryOnWriteConflict(
++      async () => {
++        calls += 1;
++        if (calls === 1) {
++          throw new Error("OptimisticConcurrencyControlFailure");
++        }
++        return "ok";
++      },
++      {
++        maxWriteConflictRetries: 1,
++        writeConflictRetryDelayMs: 2000,
++      },
++    );
++
++    await vi.advanceTimersByTimeAsync(2000);
++    await expect(result).resolves.toBe("ok");
++    expect(calls).toBe(2);
++    vi.useRealTimers();
++  });
++
++  test("does not retry other errors", async () => {
++    let calls = 0;
++    await expect(
++      retryOnWriteConflict(
++        async () => {
++          calls += 1;
++          throw new Error("Validation failed");
++        },
++        {
++          maxWriteConflictRetries: 1,
++          writeConflictRetryDelayMs: 2000,
++        },
++      ),
++    ).rejects.toThrow("Validation failed");
++    expect(calls).toBe(1);
++  });
++});
+diff --git a/src/common/write_conflict_retry.ts b/src/common/write_conflict_retry.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..02a94ff7ea0e4f5ba0b7bb44a68f5c5a60d375a8
+--- /dev/null
++++ b/src/common/write_conflict_retry.ts
+@@ -0,0 +1,117 @@
++const WRITE_CONFLICT_ERROR_TEXT = "OptimisticConcurrencyControlFailure";
++const WRITE_CONFLICT_PUBLIC_ERROR_TEXT = "Documents read from or written to";
++const WRITE_CONFLICT_PUBLIC_RETRY_TEXT =
++  "changed while this mutation was being run and on every subsequent retry";
++
++const DEFAULT_MAX_WRITE_CONFLICT_RETRIES = 1;
++const DEFAULT_WRITE_CONFLICT_RETRY_DELAY_MS = 2000;
++
++export interface WriteConflictRetryOptions {
++  /**
++   * The number of additional attempts to make after Convex reports a final
++   * write conflict for a mutation.
++   *
++   * Defaults to 1. Set to 0 to disable client-side or action-side write
++   * conflict retries.
++   */
++  maxWriteConflictRetries?: number | undefined;
++  /**
++   * The delay before each additional write conflict retry, in milliseconds.
++   *
++   * Defaults to 2000.
++   */
++  writeConflictRetryDelayMs?: number | undefined;
++}
++
++export type ValidatedWriteConflictRetryOptions = {
++  maxWriteConflictRetries: number;
++  writeConflictRetryDelayMs: number;
++};
++
++export function validateWriteConflictRetryOptions(
++  options: WriteConflictRetryOptions | undefined,
++): ValidatedWriteConflictRetryOptions {
++  return {
++    maxWriteConflictRetries: validateMaxWriteConflictRetries(options),
++    writeConflictRetryDelayMs: validateWriteConflictRetryDelayMs(options),
++  };
++}
++
++export function validateMaxWriteConflictRetries(
++  options: WriteConflictRetryOptions | undefined,
++): number {
++  const maxWriteConflictRetries =
++    options?.maxWriteConflictRetries ?? DEFAULT_MAX_WRITE_CONFLICT_RETRIES;
++  if (
++    !Number.isInteger(maxWriteConflictRetries) ||
++    maxWriteConflictRetries < 0
++  ) {
++    throw new Error("maxWriteConflictRetries must be a nonnegative integer.");
++  }
++  return maxWriteConflictRetries;
++}
++
++export function validateWriteConflictRetryDelayMs(
++  options: WriteConflictRetryOptions | undefined,
++): number {
++  const writeConflictRetryDelayMs =
++    options?.writeConflictRetryDelayMs ?? DEFAULT_WRITE_CONFLICT_RETRY_DELAY_MS;
++  if (
++    !Number.isFinite(writeConflictRetryDelayMs) ||
++    writeConflictRetryDelayMs < 0
++  ) {
++    throw new Error("writeConflictRetryDelayMs must be a nonnegative number.");
++  }
++  return writeConflictRetryDelayMs;
++}
++
++export function isWriteConflictRetryableMessage(message: string): boolean {
++  return (
++    message.includes(WRITE_CONFLICT_ERROR_TEXT) ||
++    (message.includes(WRITE_CONFLICT_PUBLIC_ERROR_TEXT) &&
++      message.includes(WRITE_CONFLICT_PUBLIC_RETRY_TEXT))
++  );
++}
++
++export function isWriteConflictRetryableError(error: unknown): boolean {
++  return (
++    error instanceof Error && isWriteConflictRetryableMessage(error.message)
++  );
++}
++
++export function isWriteConflictRetryableResult(result: {
++  success: boolean;
++  errorMessage?: string;
++}): boolean {
++  return (
++    !result.success &&
++    result.errorMessage !== undefined &&
++    isWriteConflictRetryableMessage(result.errorMessage)
++  );
++}
++
++export async function sleepForWriteConflictRetry(
++  delayMs: number,
++): Promise<void> {
++  return await new Promise((resolve) => {
++    setTimeout(resolve, delayMs);
++  });
++}
++
++export async function retryOnWriteConflict<T>(
++  operation: () => Promise<T>,
++  options: ValidatedWriteConflictRetryOptions,
++): Promise<T> {
++  let attemptsRemaining = options.maxWriteConflictRetries;
++  while (true) {
++    try {
++      return await operation();
++    } catch (error: unknown) {
++      if (attemptsRemaining <= 0 || !isWriteConflictRetryableError(error)) {
++        throw error;
++      }
++      attemptsRemaining -= 1;
++      await sleepForWriteConflictRetry(options.writeConflictRetryDelayMs);
++    }
++  }
++}
+diff --git a/src/nextjs/index.ts b/src/nextjs/index.ts
+index 6d3b7d11d47950fb1a58fd698bad193a6798b72c..b428d8bd914aacf435dd28445262b9f976cd4e13 100644
+--- a/src/nextjs/index.ts
++++ b/src/nextjs/index.ts
+@@ -45,6 +45,7 @@
+ 
+ import { ConvexHttpClient } from "../browser/index.js";
+ import { validateDeploymentUrl } from "../common/index.js";
++import type { WriteConflictRetryOptions } from "../common/write_conflict_retry.js";
+ import { Preloaded } from "../react/index.js";
+ import {
+   ArgsAndOptions,
+@@ -86,6 +87,11 @@ export type NextjsOptions = {
+   skipConvexDeploymentUrlCheck?: boolean;
+ };
+ 
++/**
++ * Options to {@link fetchMutation}.
++ */
++export type NextjsMutationOptions = NextjsOptions & WriteConflictRetryOptions;
++
+ /**
+  * Execute a Convex query function and return a `Preloaded`
+  * payload which can be passed to {@link react.usePreloadedQuery} in a Client
+@@ -156,11 +162,14 @@ export async function fetchMutation<
+   Mutation extends FunctionReference<"mutation">,
+ >(
+   mutation: Mutation,
+-  ...args: ArgsAndOptions<Mutation, NextjsOptions>
++  ...args: ArgsAndOptions<Mutation, NextjsMutationOptions>
+ ): Promise<FunctionReturnType<Mutation>> {
+   const [fnArgs, options] = args;
+   const client = setupClient(options ?? {});
+-  return client.mutation(mutation, fnArgs || {});
++  return client.mutation(mutation, fnArgs || {}, {
++    maxWriteConflictRetries: options?.maxWriteConflictRetries,
++    writeConflictRetryDelayMs: options?.writeConflictRetryDelayMs,
++  });
+ }
+ 
+ /**
+diff --git a/src/react/client.ts b/src/react/client.ts
+index b71e6044d1b8037c8215f5067c13b09063bb4787..37ccee6f182ea9c4c5a616d6a99b19ba7c9783d2 100644
+--- a/src/react/client.ts
++++ b/src/react/client.ts
+@@ -18,6 +18,7 @@ import type { UserIdentityAttributes } from "../browser/sync/protocol.js";
+ import { RequestForQueries, useQueries } from "./use_queries.js";
+ import { useSubscription } from "./use_subscription.js";
+ import { parseArgs } from "../common/index.js";
++import type { WriteConflictRetryOptions } from "../common/write_conflict_retry.js";
+ import {
+   ArgsAndOptions,
+   FunctionArgs,
+@@ -60,9 +61,12 @@ export interface ReactMutation<Mutation extends FunctionReference<"mutation">> {
+    * Execute the mutation on the server, returning a `Promise` of its return value.
+    *
+    * @param args - Arguments for the mutation to pass up to the server.
++   * @param options - Options for this mutation invocation.
+    * @returns The return value of the server-side function call.
+    */
+-  (...args: OptionalRestArgs<Mutation>): Promise<FunctionReturnType<Mutation>>;
++  (
++    ...args: ArgsAndOptions<Mutation, WriteConflictRetryOptions>
++  ): Promise<FunctionReturnType<Mutation>>;
+ 
+   /**
+    * Define an optimistic update to apply as part of this mutation.
+@@ -99,11 +103,16 @@ export function createMutation(
+   client: ConvexReactClient,
+   update?: OptimisticUpdate<any>,
+ ): ReactMutation<any> {
+-  function mutation(args?: Record<string, Value>): Promise<unknown> {
++  function mutation(
++    args?: Record<string, Value>,
++    options?: WriteConflictRetryOptions,
++  ): Promise<unknown> {
+     assertNotAccidentalArgument(args);
+ 
+     return client.mutation(mutationReference, args, {
+       optimisticUpdate: update,
++      maxWriteConflictRetries: options?.maxWriteConflictRetries,
++      writeConflictRetryDelayMs: options?.writeConflictRetryDelayMs,
+     });
+   }
+   mutation.withOptimisticUpdate = function withOptimisticUpdate(
+@@ -281,6 +290,19 @@ export interface MutationOptions<Args extends Record<string, Value>> {
+    * Once the mutation completes, the update will be rolled back.
+    */
+   optimisticUpdate?: OptimisticUpdate<Args> | undefined;
++  /**
++   * The number of additional attempts to make after Convex reports a final
++   * write conflict for this mutation.
++   *
++   * Defaults to 1. Set to 0 to disable client-side write conflict retries.
++   */
++  maxWriteConflictRetries?: number | undefined;
++  /**
++   * The delay before each additional write conflict retry, in milliseconds.
++   *
++   * Defaults to 2000.
++   */
++  writeConflictRetryDelayMs?: number | undefined;
+ }
+ 
+ /**
+diff --git a/src/server/impl/actions_impl.ts b/src/server/impl/actions_impl.ts
+index c3df52b022a2bb4b385aac74740470e4c13a4853..2f69825db68165c593cee47f8f4418cc18aa1250 100644
+--- a/src/server/impl/actions_impl.ts
++++ b/src/server/impl/actions_impl.ts
+@@ -4,6 +4,11 @@ import { performAsyncSyscall } from "./syscall.js";
+ import { parseArgs } from "../../common/index.js";
+ import { FunctionReference } from "../../server/api.js";
+ import { getFunctionAddress } from "../components/paths.js";
++import {
++  retryOnWriteConflict,
++  validateWriteConflictRetryOptions,
++  WriteConflictRetryOptions,
++} from "../../common/write_conflict_retry.js";
+ 
+ function syscallArgs(
+   requestId: string,
+@@ -34,10 +39,17 @@ export function setupActionCalls(requestId: string) {
+     runMutation: async (
+       mutation: FunctionReference<"mutation", "public" | "internal">,
+       args?: Record<string, Value>,
++      options?: WriteConflictRetryOptions,
+     ): Promise<any> => {
+-      const result = await performAsyncSyscall(
+-        "1.0/actions/mutation",
+-        syscallArgs(requestId, mutation, args),
++      const writeConflictRetryOptions =
++        validateWriteConflictRetryOptions(options);
++      const result = await retryOnWriteConflict(
++        () =>
++          performAsyncSyscall(
++            "1.0/actions/mutation",
++            syscallArgs(requestId, mutation, args),
++          ),
++        writeConflictRetryOptions,
+       );
+       return jsonToConvex(result);
+     },
+diff --git a/src/server/impl/registration_impl.ts b/src/server/impl/registration_impl.ts
+index 5c7adc0e17a457281cc83510d24fb72d90d0986b..b033c40d905663f20e104a5c1e248648f4e5f9a3 100644
+--- a/src/server/impl/registration_impl.ts
++++ b/src/server/impl/registration_impl.ts
+@@ -46,6 +46,18 @@ import {
+   setupActionMeta,
+ } from "./meta_impl.js";
+ 
++function transactionLimitsForMutationRunMutation(options: any) {
++  if (
++    options?.maxWriteConflictRetries !== undefined ||
++    options?.writeConflictRetryDelayMs !== undefined
++  ) {
++    throw new Error(
++      "Write conflict retry options are only supported for client mutations and ActionCtx.runMutation calls. MutationCtx.runMutation runs within the parent mutation transaction and is retried with the parent mutation.",
++    );
++  }
++  return options?.transactionLimits;
++}
++
+ async function invokeMutation<
+   F extends (ctx: GenericMutationCtx<GenericDataModel>, ...args: any) => any,
+ >(func: F, argsStr: string, visibility: FunctionVisibility) {
+@@ -65,7 +77,12 @@ async function invokeMutation<
+         ? runUdf("snapshotQuery", reference, args, options?.transactionLimits)
+         : runUdf("query", reference, args, options?.transactionLimits),
+     runMutation: (reference: any, args?: any, options?: any) =>
+-      runUdf("mutation", reference, args, options?.transactionLimits),
++      runUdf(
++        "mutation",
++        reference,
++        args,
++        transactionLimitsForMutationRunMutation(options),
++      ),
+   };
+   const result = await invokeFunction(func, mutationCtx, args as any);
+   validateReturnValue(result);
+diff --git a/src/server/registration.ts b/src/server/registration.ts
+index 5f83511b58154999df78c2ec19df50d823029819..672fe8015ef033736678665f9e1d80ab36aca06a 100644
+--- a/src/server/registration.ts
++++ b/src/server/registration.ts
+@@ -27,6 +27,7 @@ import {
+   ObjectType,
+   PropertyValidators,
+ } from "../values/validator.js";
++import type { WriteConflictRetryOptions } from "../common/write_conflict_retry.js";
+ import { Id } from "../values/value.js";
+ import {
+   GenericDataModel,
+@@ -336,6 +337,9 @@ export interface GenericActionCtx<DataModel extends GenericDataModel> {
+    *
+    * Each `runMutation` call is a separate write transaction. Consider using
+    * an {@link internalMutation} to prevent users from calling it directly.
++   * If Convex reports a final write conflict, this call retries once by
++   * default. Pass `{ maxWriteConflictRetries: 0 }` as the final argument to
++   * disable this retry.
+    *
+    * @example
+    * ```typescript
+@@ -350,7 +354,7 @@ export interface GenericActionCtx<DataModel extends GenericDataModel> {
+     Mutation extends FunctionReference<"mutation", "public" | "internal">,
+   >(
+     mutation: Mutation,
+-    ...args: OptionalRestArgs<Mutation>
++    ...args: ArgsAndOptions<Mutation, WriteConflictRetryOptions>
+   ): Promise<FunctionReturnType<Mutation>>;
+ 
+   /**

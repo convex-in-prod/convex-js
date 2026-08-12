@@ -1,0 +1,540 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Wed, 12 Aug 2026 13:32:50 +0800
+Subject: [PATCH 7/7] bundler: support module-scoped Node pools
+
+Recognize paired "use node" and "use node pool:<name>" directives on root function entries. Validate pool names, reserve the default executor name, attach the required pool-bearing environment and explicit pool field only to the corresponding entry output, and leave shared chunks in the ordinary Node environment.
+
+Require pool metadata to agree with the module environment in both full-module and hash-only deployment schemas. Include the metadata in changed-module comparison and deployment records so a pool move cannot be reported as unchanged, while preserving component rejection of Node modules.
+
+Add focused coverage for directive parsing, entry-output association, dependency chunks, reserved names, schema agreement, and unchanged-module metadata.
+---
+ src/bundler/index.test.ts                   | 146 ++++++++++++++++++++
+ src/bundler/index.ts                        | 113 ++++++++++++---
+ src/cli/lib/components.ts                   |   2 +
+ src/cli/lib/components/definition/bundle.ts |   2 +
+ src/cli/lib/config.ts                       |   1 +
+ src/cli/lib/deployApi/modules.test.ts       |  38 +++++
+ src/cli/lib/deployApi/modules.ts            |  24 +++-
+ 7 files changed, 306 insertions(+), 20 deletions(-)
+ create mode 100644 src/bundler/index.test.ts
+ create mode 100644 src/cli/lib/deployApi/modules.test.ts
+
+diff --git a/src/bundler/index.test.ts b/src/bundler/index.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5506beb91a83daf7d34c9dd7baa25a20af80d6d5
+--- /dev/null
++++ b/src/bundler/index.test.ts
+@@ -0,0 +1,146 @@
++import path from "path";
++import { expect, test } from "vitest";
++import { Context } from "./context.js";
++import { nodeFs, withTmpDir } from "./fs.js";
++import {
++  Bundle,
++  BundleHash,
++  bundle,
++  entryPointsByEnvironment,
++} from "./index.js";
++import { hash, partitionModulesByChanges } from "../cli/lib/components.js";
++
++function testContext(): Context {
++  return {
++    fs: nodeFs,
++    deprecationMessagePrinted: false,
++    crash: async ({ printedMessage }) => {
++      throw new Error(printedMessage ?? "CLI crashed without a message");
++    },
++    registerCleanup: () => "test-cleanup",
++    removeCleanup: () => async () => {},
++    bigBrainAuth: () => null,
++    _updateBigBrainAuth: () => {},
++  };
++}
++
++test("Node pool directives require Node and a valid non-default name", async () => {
++  await withTmpDir(async (tmpDir) => {
++    const modulePath = path.join(tmpDir.path, "consumer.ts");
++    nodeFs.writeUtf8File(
++      modulePath,
++      '"use node";\n"use node pool:consumer";\nexport const run = 1;\n',
++    );
++    const entryPoints = await entryPointsByEnvironment(
++      testContext(),
++      tmpDir.path,
++    );
++    expect(entryPoints.node).toEqual([modulePath]);
++    expect(entryPoints.nodePools).toEqual(new Map([[modulePath, "consumer"]]));
++
++    nodeFs.writeUtf8File(
++      modulePath,
++      '"use node pool:consumer";\nexport const run = 1;\n',
++    );
++    await expect(
++      entryPointsByEnvironment(testContext(), tmpDir.path),
++    ).rejects.toThrow('requires a separate "use node" directive');
++
++    nodeFs.writeUtf8File(
++      modulePath,
++      '"use node";\n"use node pool:default";\nexport const run = 1;\n',
++    );
++    await expect(
++      entryPointsByEnvironment(testContext(), tmpDir.path),
++    ).rejects.toThrow('"default" is reserved');
++  });
++});
++
++test("only a bundled entry module inherits its declared pool", async () => {
++  await withTmpDir(async (tmpDir) => {
++    nodeFs.writeUtf8File(
++      path.join(tmpDir.path, "shared.ts"),
++      "export const shared = () => 1;\n",
++    );
++    const consumerPath = path.join(tmpDir.path, "consumer.ts");
++    nodeFs.writeUtf8File(
++      consumerPath,
++      '"use node";\n"use node pool:consumer";\nimport { shared } from "./shared";\nexport const run = shared;\n',
++    );
++    nodeFs.writeUtf8File(
++      path.join(tmpDir.path, "ordinary.ts"),
++      '"use node";\nimport { shared } from "./shared";\nexport const run = shared;\n',
++    );
++
++    const entryPoints = await entryPointsByEnvironment(
++      testContext(),
++      tmpDir.path,
++    );
++    const result = await bundle({
++      ctx: testContext(),
++      dir: tmpDir.path,
++      entryPoints: entryPoints.node,
++      nodePoolsByEntryPoint: entryPoints.nodePools,
++      generateSourceMaps: false,
++      platform: "node",
++      chunksFolder: path.join("_deps", "node"),
++    });
++
++    expect(
++      result.modules.find((module) => module.path === "consumer.js"),
++    ).toMatchObject({
++      environment: "node:pool:consumer",
++      nodePool: "consumer",
++    });
++    expect(
++      result.modules.find((module) => module.path === "ordinary.js"),
++    ).toMatchObject({ environment: "node" });
++    const dependencyChunks = result.modules.filter((module) =>
++      module.path.startsWith("_deps/node/"),
++    );
++    expect(dependencyChunks.length).toBeGreaterThan(0);
++    expect(
++      dependencyChunks.every(
++        (module) =>
++          module.environment === "node" && module.nodePool === undefined,
++      ),
++    ).toBe(true);
++  });
++});
++
++test("unchanged-module comparison includes the explicit pool", () => {
++  const pooled: Bundle = {
++    path: "consumer.js",
++    source: "export const run = 1;",
++    environment: "node:pool:consumer",
++    nodePool: "consumer",
++  };
++  const remote = new Map<string, BundleHash>([
++    [
++      pooled.path,
++      {
++        path: pooled.path,
++        hash: hash(pooled),
++        environment: pooled.environment,
++      },
++    ],
++  ]);
++
++  expect(partitionModulesByChanges([pooled], remote)).toEqual({
++    unchangedModuleHashes: [],
++    changedModules: [pooled],
++  });
++
++  remote.get(pooled.path)!.nodePool = "consumer";
++  expect(partitionModulesByChanges([pooled], remote)).toEqual({
++    unchangedModuleHashes: [
++      {
++        path: pooled.path,
++        environment: pooled.environment,
++        nodePool: "consumer",
++        sha256: hash(pooled),
++      },
++    ],
++    changedModules: [],
++  });
++});
+diff --git a/src/bundler/index.ts b/src/bundler/index.ts
+index cd99fb8d5533cb47afc2bf0feb674fad1cd348a3..165f9ebf843042ad44f9f2246b9cea1432a92796 100644
+--- a/src/bundler/index.ts
++++ b/src/bundler/index.ts
+@@ -46,19 +46,21 @@ export function* walkDir(
+ }
+ 
+ // Convex specific module environment.
+-type ModuleEnvironment = "node" | "isolate";
++type ModuleEnvironment = "node" | "isolate" | `node:pool:${string}`;
+ 
+ export interface Bundle {
+   path: string;
+   source: string;
+   sourceMap?: string | undefined;
+   environment: ModuleEnvironment;
++  nodePool?: string | undefined;
+ }
+ 
+ export interface BundleHash {
+   path: string;
+   hash: string;
+   environment: ModuleEnvironment;
++  nodePool?: string | undefined;
+ }
+ 
+ type EsBuildResult = esbuild.BuildResult & {
+@@ -267,6 +269,7 @@ export async function bundle({
+   includeSourcesContent = false,
+   splitting,
+   experimentalContextReuse,
++  nodePoolsByEntryPoint = new Map(),
+ }: {
+   ctx: Context;
+   dir: string;
+@@ -279,6 +282,7 @@ export async function bundle({
+   includeSourcesContent?: boolean;
+   splitting?: boolean;
+   experimentalContextReuse?: ExperimentalContextReuse;
++  nodePoolsByEntryPoint?: Map<string, string>;
+ }): Promise<{
+   modules: Bundle[];
+   externalDependencies: Map<string, string>;
+@@ -317,6 +321,13 @@ export async function bundle({
+   const sourceMaps = new Map();
+   const modules: Bundle[] = [];
+   const environment = platform === "node" ? "node" : "isolate";
++  const normalizedNodePoolsByEntryPoint = new Map(
++    [...nodePoolsByEntryPoint].map(([entryPoint, pool]) => [
++      path.resolve(entryPoint),
++      pool,
++    ]),
++  );
++  const assignedNodePoolEntryPoints = new Set<string>();
+   const contextReuseOutputPolicy = new Map<
+     string,
+     { enabled: boolean; entry: string }
+@@ -383,7 +394,33 @@ export async function bundle({
+         contextReusePolicy.entry,
+       );
+     }
+-    modules.push({ path: posixRelPath, source, environment });
++    const metafilePath = path
++      .relative(process.cwd(), outputFile.path)
++      .split(path.sep)
++      .join(path.posix.sep);
++    const entryPoint = result.metafile!.outputs[metafilePath]?.entryPoint;
++    const nodePool = entryPoint
++      ? normalizedNodePoolsByEntryPoint.get(path.resolve(entryPoint))
++      : undefined;
++    if (entryPoint !== undefined && nodePool !== undefined) {
++      assignedNodePoolEntryPoints.add(path.resolve(entryPoint));
++    }
++    modules.push({
++      path: posixRelPath,
++      source,
++      environment: nodePool ? `node:pool:${nodePool}` : environment,
++      ...(nodePool === undefined ? {} : { nodePool }),
++    });
++  }
++  if (
++    assignedNodePoolEntryPoints.size !== normalizedNodePoolsByEntryPoint.size
++  ) {
++    return await ctx.crash({
++      exitCode: 1,
++      errorType: "fatal",
++      printedMessage:
++        "Failed to associate every declared Node executor pool with its bundled entry module.",
++    });
+   }
+   for (const module of modules) {
+     const sourceMapPath = module.path + ".map";
+@@ -636,13 +673,16 @@ export async function entryPoints(
+ 
+ // A fallback regex in case we fail to parse the AST.
+ export const useNodeDirectiveRegex = /^\s*("|')use node("|');?\s*$/;
++const nodePoolNameRegex = /^[a-z][a-z0-9_]{0,31}$/;
++const nodeDirectiveFallbackRegex =
++  /^\s*(["'])(use node(?: pool:[^"']*)?)\1;?\s*$/;
+ 
+-function hasUseNodeDirective(ctx: Context, fpath: string): boolean {
++function readNodeDirectives(ctx: Context, fpath: string): string[] {
+   // Do a quick check for the exact string. If it doesn't exist, don't
+   // bother parsing.
+   const source = ctx.fs.readUtf8File(fpath);
+   if (source.indexOf("use node") === -1) {
+-    return false;
++    return [];
+   }
+ 
+   // We parse the AST here to extract the "use node" declaration. This is more
+@@ -656,27 +696,26 @@ function hasUseNodeDirective(ctx: Context, fpath: string): boolean {
+       // here too.
+       plugins: ["jsx", "typescript"],
+     });
+-    return ast.program.directives
+-      .map((d) => d.value.value)
+-      .includes("use node");
+-  } catch (error: any) {
++    return ast.program.directives.map((d) => d.value.value);
++  } catch (error: unknown) {
+     // Given that we have failed to parse, we are most likely going to fail in
+     // the esbuild step, which seem to return better formatted error messages.
+     // We don't throw here and fallback to regex.
+-    let lineMatches = false;
++    const directives = [];
+     for (const line of source.split("\n")) {
+-      if (line.match(useNodeDirectiveRegex)) {
+-        lineMatches = true;
+-        break;
++      const match = line.match(nodeDirectiveFallbackRegex);
++      if (match?.[2]) {
++        directives.push(match[2]);
+       }
+     }
+ 
+     // Log that we failed to parse in verbose node if we need this for debugging.
++    const parseError = error instanceof Error ? error.message : String(error);
+     logVerbose(
+-      `Failed to parse ${fpath}. Use node is set to ${lineMatches} based on regex. Parse error: ${error.toString()}.`,
++      `Failed to parse ${fpath}. Node directives are ${JSON.stringify(directives)} based on regex. Parse error: ${parseError}.`,
+     );
+ 
+-    return lineMatches;
++    return directives;
+   }
+ }
+ 
+@@ -694,7 +733,41 @@ async function determineEnvironment(
+ ): Promise<ModuleEnvironment> {
+   const relPath = path.relative(dir, fpath);
+ 
+-  const useNodeDirectiveFound = hasUseNodeDirective(ctx, fpath);
++  const directives = readNodeDirectives(ctx, fpath);
++  const useNodeDirectiveFound = directives.includes("use node");
++  const poolDirectives = directives.filter((directive) =>
++    directive.startsWith("use node pool"),
++  );
++  if (poolDirectives.length > 1) {
++    return await ctx.crash({
++      exitCode: 1,
++      errorType: "invalid filesystem data",
++      printedMessage: `Only one "use node pool:<name>" directive is allowed in ${relPath}.`,
++    });
++  }
++  const poolDirective = poolDirectives[0];
++  const nodePool = poolDirective?.startsWith("use node pool:")
++    ? poolDirective.slice("use node pool:".length)
++    : undefined;
++  if (
++    poolDirective !== undefined &&
++    (nodePool === undefined ||
++      !nodePoolNameRegex.test(nodePool) ||
++      nodePool === "default")
++  ) {
++    return await ctx.crash({
++      exitCode: 1,
++      errorType: "invalid filesystem data",
++      printedMessage: `Node pool names must match [a-z][a-z0-9_]{0,31}, and "default" is reserved (${relPath}).`,
++    });
++  }
++  if (nodePool !== undefined && !useNodeDirectiveFound) {
++    return await ctx.crash({
++      exitCode: 1,
++      errorType: "invalid filesystem data",
++      printedMessage: `"use node pool:${nodePool}" requires a separate "use node" directive in ${relPath}.`,
++    });
++  }
+   if (useNodeDirectiveFound) {
+     if (mustBeIsolate(relPath)) {
+       return await ctx.crash({
+@@ -703,7 +776,7 @@ async function determineEnvironment(
+         printedMessage: `"use node" directive is not allowed for ${relPath}.`,
+       });
+     }
+-    return "node";
++    return nodePool === undefined ? "node" : `node:pool:${nodePool}`;
+   }
+ 
+   const actionsPrefix = actionsDir + path.sep;
+@@ -721,14 +794,18 @@ async function determineEnvironment(
+ export async function entryPointsByEnvironment(ctx: Context, dir: string) {
+   const isolate = [];
+   const node = [];
++  const nodePools = new Map<string, string>();
+   for (const entryPoint of await entryPoints(ctx, dir)) {
+     const environment = await determineEnvironment(ctx, dir, entryPoint);
+-    if (environment === "node") {
++    if (environment === "node" || environment.startsWith("node:pool:")) {
+       node.push(entryPoint);
++      if (environment.startsWith("node:pool:")) {
++        nodePools.set(entryPoint, environment.slice("node:pool:".length));
++      }
+     } else {
+       isolate.push(entryPoint);
+     }
+   }
+ 
+-  return { isolate, node };
++  return { isolate, node, nodePools };
+ }
+diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
+index 0545b41c491bc6ba17e2f649a7dc3123804607b1..204d4ddcdea0fa685821b58b2961de6b27a3416d 100644
+--- a/src/cli/lib/components.ts
++++ b/src/cli/lib/components.ts
+@@ -150,6 +150,7 @@ export function hash(bundle: Bundle) {
+ function isModuleTheSame(newBundle: Bundle, oldBundleHash: BundleHash) {
+   return (
+     newBundle.environment === oldBundleHash.environment &&
++    newBundle.nodePool === oldBundleHash.nodePool &&
+     hash(newBundle) === oldBundleHash.hash
+   );
+ }
+@@ -170,6 +171,7 @@ export function partitionModulesByChanges(
+     .map((func) => ({
+       path: func.path,
+       environment: func.environment,
++      ...(func.nodePool === undefined ? {} : { nodePool: func.nodePool }),
+       sha256: hash(func),
+     }));
+   const changedModules = functions.filter((newBundle) => {
+diff --git a/src/cli/lib/components/definition/bundle.ts b/src/cli/lib/components/definition/bundle.ts
+index 064002b675f6caf51986bffde1c3889c1c4ceb9d..d5f5e35df520a5aa5584394215d47ac78b72cbe5 100644
+--- a/src/cli/lib/components/definition/bundle.ts
++++ b/src/cli/lib/components/definition/bundle.ts
+@@ -719,6 +719,7 @@ export async function bundleImplementations({
+         ctx,
+         dir: resolvedPath,
+         entryPoints: entryPoints.node,
++        nodePoolsByEntryPoint: entryPoints.nodePools,
+         generateSourceMaps: true,
+         platform: "node",
+         chunksFolder: path.join("_deps", "node"),
+@@ -754,6 +755,7 @@ export async function bundleImplementations({
+           ctx,
+           dir: resolvedPath,
+           entryPoints: entryPoints.node,
++          nodePoolsByEntryPoint: entryPoints.nodePools,
+           generateSourceMaps: true,
+           platform: "node",
+           chunksFolder: path.join("_deps", "node"),
+diff --git a/src/cli/lib/config.ts b/src/cli/lib/config.ts
+index 678f3657be23458ae523a4e52ca59b2cb1cfdcb4..d5f5a65002a427e21032d677033bf5b54ed0c28b 100644
+--- a/src/cli/lib/config.ts
++++ b/src/cli/lib/config.ts
+@@ -693,6 +693,7 @@ export async function configFromProjectConfig(
+     ctx,
+     dir: baseDir,
+     entryPoints: entryPoints.node,
++    nodePoolsByEntryPoint: entryPoints.nodePools,
+     generateSourceMaps: true,
+     platform: "node",
+     chunksFolder: path.join("_deps", "node"),
+diff --git a/src/cli/lib/deployApi/modules.test.ts b/src/cli/lib/deployApi/modules.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..34540fbda7869d1a70a65a6e1b4816f01b03bea2
+--- /dev/null
++++ b/src/cli/lib/deployApi/modules.test.ts
+@@ -0,0 +1,38 @@
++import { expect, test } from "vitest";
++import { moduleConfig, moduleHashConfig } from "./modules.js";
++
++const moduleMetadata = {
++  path: "consumer.js",
++  source: "export const run = 1;",
++  environment: "node:pool:consumer",
++};
++
++test("module schemas validate Node pool metadata agreement", () => {
++  expect(moduleConfig.safeParse(moduleMetadata).success).toBe(true);
++  expect(
++    moduleConfig.safeParse({ ...moduleMetadata, nodePool: "consumer" }).success,
++  ).toBe(true);
++  expect(
++    moduleConfig.safeParse({ ...moduleMetadata, nodePool: "other" }).success,
++  ).toBe(false);
++  expect(
++    moduleHashConfig.safeParse({
++      path: moduleMetadata.path,
++      environment: moduleMetadata.environment,
++      nodePool: "other",
++      sha256: "hash",
++    }).success,
++  ).toBe(false);
++});
++
++test("module schemas reject reserved Node pool names", () => {
++  expect(
++    moduleConfig.safeParse({
++      ...moduleMetadata,
++      environment: "node:pool:default",
++    }).success,
++  ).toBe(false);
++  expect(
++    moduleConfig.safeParse({ ...moduleMetadata, nodePool: "default" }).success,
++  ).toBe(false);
++});
+diff --git a/src/cli/lib/deployApi/modules.ts b/src/cli/lib/deployApi/modules.ts
+index e8ea18e8d88a822ba4b3ac5abdbec8ad9ec8cc38..b7860b91e21e6acc6988a348fce2c838a5f36536 100644
+--- a/src/cli/lib/deployApi/modules.ts
++++ b/src/cli/lib/deployApi/modules.ts
+@@ -4,22 +4,42 @@ import { looseObject } from "./utils.js";
+ export const moduleEnvironment = z.union([
+   z.literal("isolate"),
+   z.literal("node"),
++  z.string().regex(/^node:pool:(?!default$)[a-z][a-z0-9_]{0,31}$/),
+ ]);
+ export type ModuleEnvironment = z.infer<typeof moduleEnvironment>;
+ 
++const nodePoolName = z.string().regex(/^(?!default$)[a-z][a-z0-9_]{0,31}$/);
++const validateModulePoolMetadata = (
++  value: { environment: ModuleEnvironment; nodePool?: string | undefined },
++  ctx: z.RefinementCtx,
++) => {
++  const environmentPool = value.environment.startsWith("node:pool:")
++    ? value.environment.slice("node:pool:".length)
++    : undefined;
++  if (value.nodePool !== undefined && environmentPool !== value.nodePool) {
++    ctx.addIssue({
++      code: z.ZodIssueCode.custom,
++      path: ["nodePool"],
++      message: "Node pool metadata must match the module environment",
++    });
++  }
++};
++
+ export const moduleConfig = looseObject({
+   path: z.string(),
+   source: z.string(),
+   sourceMap: z.optional(z.string()),
+   environment: moduleEnvironment,
+-});
++  nodePool: z.optional(nodePoolName),
++}).superRefine(validateModulePoolMetadata);
+ export type ModuleConfig = z.infer<typeof moduleConfig>;
+ 
+ export const moduleHashConfig = looseObject({
+   path: z.string(),
+   environment: moduleEnvironment,
++  nodePool: z.optional(nodePoolName),
+   sha256: z.string(),
+-});
++}).superRefine(validateModulePoolMetadata);
+ export type ModuleHashConfig = z.infer<typeof moduleHashConfig>;
+ 
+ export const nodeDependency = looseObject({

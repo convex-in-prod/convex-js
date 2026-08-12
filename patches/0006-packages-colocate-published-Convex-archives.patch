@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Wed, 22 Jul 2026 11:48:33 +0800
+Subject: [PATCH 6/7] packages: colocate published Convex archives
+
+Import the three immutable package archives and provenance manifests currently served by convex-in-prod.github.io. Keep source-SHA paths and bytes unchanged so the existing package URLs and lockfile integrity values remain valid.
+
+Make convex-js the package source of truth and document the separate publication-commit boundary. The Pages repository can mirror this directory from an exact commit instead of owning binary package history.
+---
+ packages/README.md | 34 ++++++++++++++++++++++++++++++++++
+ patches/README.md  | 26 ++++++++++++++++++++------
+ 2 files changed, 54 insertions(+), 6 deletions(-)
+ create mode 100644 packages/README.md
+
+diff --git a/packages/README.md b/packages/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c688c455b34ce0635c40cee94d434939daa4445
+--- /dev/null
++++ b/packages/README.md
+@@ -0,0 +1,34 @@
++# Published Convex Packages
++
++This directory owns the immutable `convex-in-prod` package archives. Each
++`packages/convex/<source-sha>/` directory contains:
++
++- `convex.tgz`, the package built from that exact convex-js source commit; and
++- `manifest.json`, the package version, source and upstream provenance, SHA-512
++  checksum, lockfile integrity value, and build-run URL.
++
++The source SHA identifies the code used to build the package. The later Git
++commit that adds the archive to this directory is the publication commit. Do not
++overwrite an existing source-SHA directory or rebuild an archive under an
++existing path.
++
++The `convex-in-prod.github.io` Pages build mirrors this directory from an exact
++convex-js publication commit. Existing consumers can therefore keep using:
++
++```text
++https://convex-in-prod.github.io/packages/convex/<source-sha>/convex.tgz
++```
++
++To publish a new archive:
++
++1. Run the manually dispatched `Build convex-in-prod package` workflow for the
++   exact reviewed source commit.
++2. Download its artifact and verify the embedded `convexInProd` provenance,
++   package version, SHA-512 checksum, and integrity value.
++3. Add a new source-SHA directory and manifest in a separate `packages: publish`
++   commit. Keep the maintained source patch train below publication data
++   commits.
++4. Update the Pages repository workflow to mirror packages from that exact
++   publication commit, then verify the existing public URL byte-for-byte.
++
++The Pages repository is a delivery mirror, not the package source of truth.
+diff --git a/patches/README.md b/patches/README.md
+index 3cb27a92c463364fab39deafacd59164c8895a29..4c05781eea77f61363af93e3daecd9601987a27e 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -36,12 +36,19 @@ Remove the local commit when upstream contains equivalent behavior.
+ ### Degradable reactive-query pressure
+ 
+ A sync client may opt its root reactive queries into the closed `"degradable"`
+-workload class and receive bounded server-pressure metadata after applying a
+-transition. Mutations and actions remain normal. Application callback failures
+-are contained so they cannot interrupt synchronization.
++workload class and negotiate lifecycle version 1. The client strictly parses
++legacy, active, and cleared server-pressure metadata after applying each
++transition, tracks the current connection-local epoch, and exposes one
++epoch-scoped deferred-query retry request. Invalid retry epochs fail before a
++wire message is sent, and duplicate or stale retries do not send. Mutations and
++actions remain normal. Application callback failures are contained so they
++cannot interrupt synchronization.
+ 
+ This wire extension requires matching backend support. It remains inert unless
+ the application opts in and the backend enables degradable leader admission.
++Lifecycle-capable applications keep successful subscriptions mounted and use a
++matching cleared event as the recovery boundary; the backend owns the exact
++deferred query set.
+ 
+ ### Local query-result removal observation
+ 
+@@ -61,13 +68,20 @@ of fixed delays or access to internal client state.
+ 4. Push the maintained `main` branch to `convex-in-prod/convex-js`.
+ 5. Manually dispatch `Build convex-in-prod package` for that exact `main`
+    commit.
++6. Verify the downloaded archive and add it under
++   `packages/convex/<full-source-sha>/` in a separate publication commit.
++7. Update the Pages repository to mirror `packages/convex/` from that exact
++   publication commit.
+ 
+ The workflow appends source-derived SemVer build metadata to the upstream
+ version, records full source and upstream SHAs in package metadata, and uploads
+ the tarball for operator publication under the same full SHA at
+-`https://convex-in-prod.github.io/packages/convex/`. GitHub's npm registry is
+-not the application distribution boundary because even public packages require
+-install-time authentication. No Git tag or GitHub Release is required.
++`https://convex-in-prod.github.io/packages/convex/`. The immutable archives and
++manifests are owned by this repository under
++[`packages/`](../packages/README.md); the Pages repository mirrors them from an
++exact convex-js publication commit. GitHub's npm registry is not the application
++distribution boundary because even public packages require install-time
++authentication. No Git tag or GitHub Release is required.
+ 
+ Do not encode the fork identity as a SemVer prerelease. Packages that declare an
+ ordinary `convex@^1.x` peer do not accept prerelease versions even when the fork
