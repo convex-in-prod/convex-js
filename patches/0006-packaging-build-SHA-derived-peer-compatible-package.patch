@@ -1,33 +1,33 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Mon, 20 Jul 2026 16:27:40 +0800
-Subject: [PATCH 5/7] packaging: build SHA-derived peer-compatible package
+Subject: [PATCH 6/7] packaging: build SHA-derived peer-compatible package
 
 Record the exact upstream base and document the maintained patch stack. Add a manually dispatched workflow that verifies one exact source commit, appends source-derived SemVer build metadata, embeds full source and upstream provenance, and uploads the packed artifact.
 
 Keep the source package name and version unchanged in Git. Build metadata identifies the fork without turning it into a prerelease, so packages declaring an ordinary convex@^1.x peer remain compatible. The immutable full-SHA artifact URL remains the installation and provenance boundary.
 ---
  .convex-in-prod-upstream                   |   1 +
- .github/workflows/build-convex-in-prod.yml | 160 +++++++++++++++++++++
- patches/README.md                          |  78 ++++++++++
- 3 files changed, 239 insertions(+)
+ .github/workflows/build-convex-in-prod.yml | 152 +++++++++++++++++++++
+ patches/README.md                          |  85 ++++++++++++
+ 3 files changed, 238 insertions(+)
  create mode 100644 .convex-in-prod-upstream
  create mode 100644 .github/workflows/build-convex-in-prod.yml
  create mode 100644 patches/README.md
 
 diff --git a/.convex-in-prod-upstream b/.convex-in-prod-upstream
 new file mode 100644
-index 0000000000000000000000000000000000000000..0fc6e4bbe7d0579304f71096ede95d78abd3a29e
+index 0000000000000000000000000000000000000000..d206d044bb3191b8f6f55e41da9aa834155a194d
 --- /dev/null
 +++ b/.convex-in-prod-upstream
 @@ -0,0 +1 @@
-+b96ea1b0a5c6883351566db866edf682463bb088
++ee011723bdd746e491084563f9bc687e0e66351d
 diff --git a/.github/workflows/build-convex-in-prod.yml b/.github/workflows/build-convex-in-prod.yml
 new file mode 100644
-index 0000000000000000000000000000000000000000..eb0b842f43072d84e3b8ebf9ebd94ec2d6570ba6
+index 0000000000000000000000000000000000000000..ab69dc289c5b7b9a104a8ac2c022ebc4de75f4d2
 --- /dev/null
 +++ b/.github/workflows/build-convex-in-prod.yml
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,152 @@
 +name: Build convex-in-prod package
 +
 +on:
@@ -65,22 +65,16 @@ index 0000000000000000000000000000000000000000..eb0b842f43072d84e3b8ebf9ebd94ec2
 +        # source type baseline and verify it below instead of changing it here.
 +        run: npm install --legacy-peer-deps
 +
-+      - name: Restore checked-in source
-+        # Installing the root package runs its prepare build, which rewrites
-+        # tracked generated source. Validate the exact commit below; the
-+        # provenance build regenerates package output after version stamping.
-+        run: git restore --source=HEAD --worktree -- .
-+
 +      - name: Test
 +        run: npm test -- --run
 +
 +      - name: Typecheck
 +        run: npm run typecheck
 +
-+      - name: Restore checked-in source after validation
-+        # Tests and typechecking may rebuild tracked generated source. Format
-+        # and package the exact commit selected by this workflow.
-+        run: git restore --source=HEAD --worktree -- .
++      - name: Reject validation side effects
++        # Package the exact reviewed commit rather than silently restoring
++        # files if validation unexpectedly changes tracked source.
++        run: git diff --exit-code
 +
 +      - name: Check maintained source formatting
 +        run: |
@@ -151,10 +145,8 @@ index 0000000000000000000000000000000000000000..eb0b842f43072d84e3b8ebf9ebd94ec2
 +          );
 +          NODE
 +
-+      - name: Build
-+        run: npm run build
-+
 +      - name: Pack
++        # Upstream's prepack hook performs the authoritative package build.
 +        run: npm pack --silent
 +
 +      - name: Upload package
@@ -190,10 +182,10 @@ index 0000000000000000000000000000000000000000..eb0b842f43072d84e3b8ebf9ebd94ec2
 +          NODE
 diff --git a/patches/README.md b/patches/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..3cb27a92c463364fab39deafacd59164c8895a29
+index 0000000000000000000000000000000000000000..ef595de6da2d7a4a2c27e1f493156fefbb749cd9
 --- /dev/null
 +++ b/patches/README.md
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,85 @@
 +# Convex-In-Prod Patch Stack
 +
 +The fork's `main` branch carries a short generic patch stack over the exact
@@ -209,14 +201,6 @@ index 0000000000000000000000000000000000000000..3cb27a92c463364fab39deafacd59164
 +installed Convex files.
 +
 +## Maintained changes
-+
-+### Default database-context reuse during bundling
-+
-+Applications that have reviewed their database-UDF graphs may make the upstream
-+`experimental_reuseContext` export a bundle-time default and retain a small,
-+reasoned exclusion map. The setting is disabled by default and does not place
-+application module names in backend logic. See
-+[`default_database_context_reuse/README.md`](default_database_context_reuse/README.md).
 +
 +### Terminal OCC mutation retry
 +
@@ -246,6 +230,21 @@ index 0000000000000000000000000000000000000000..3cb27a92c463364fab39deafacd59164
 +without subscribing to or executing the query. These APIs let applications gate
 +one-shot retries and resumed subscriptions on the actual sync transition instead
 +of fixed delays or access to internal client state.
++
++### Default database-context reuse during bundling
++
++Applications that have reviewed their database-UDF graphs may make the upstream
++`experimental_reuseContext` export a bundle-time default and retain a small,
++reasoned exclusion map. The setting is disabled by default and does not place
++application module names in backend logic. See
++[`default_database_context_reuse/README.md`](default_database_context_reuse/README.md).
++
++### Module-scoped Node pools
++
++Applications may annotate Node modules with a bounded local-pool declaration.
++The bundler validates the annotation, emits it in module metadata, and rejects
++conflicting declarations within a bundle. Deployments without the annotation
++retain the upstream execution model.
 +
 +## Rebase and release
 +

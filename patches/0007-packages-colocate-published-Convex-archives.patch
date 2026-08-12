@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 22 Jul 2026 11:48:33 +0800
-Subject: [PATCH 6/7] packages: colocate published Convex archives
+Subject: [PATCH 7/7] packages: colocate published Convex archives
 
 Import the three immutable package archives and provenance manifests currently served by convex-in-prod.github.io. Keep source-SHA paths and bytes unchanged so the existing package URLs and lockfile integrity values remain valid.
 
@@ -53,10 +53,10 @@ index 0000000000000000000000000000000000000000..9c688c455b34ce0635c40cee94d43493
 +
 +The Pages repository is a delivery mirror, not the package source of truth.
 diff --git a/patches/README.md b/patches/README.md
-index 3cb27a92c463364fab39deafacd59164c8895a29..4c05781eea77f61363af93e3daecd9601987a27e 100644
+index ef595de6da2d7a4a2c27e1f493156fefbb749cd9..72ebec921b2d944de473968ba02a5b9c8451776d 100644
 --- a/patches/README.md
 +++ b/patches/README.md
-@@ -36,12 +36,19 @@ Remove the local commit when upstream contains equivalent behavior.
+@@ -28,12 +28,19 @@ Remove the local commit when upstream contains equivalent behavior.
  ### Degradable reactive-query pressure
  
  A sync client may opt its root reactive queries into the closed `"degradable"`
@@ -79,7 +79,7 @@ index 3cb27a92c463364fab39deafacd59164c8895a29..4c05781eea77f61363af93e3daecd960
  
  ### Local query-result removal observation
  
-@@ -61,13 +68,20 @@ of fixed delays or access to internal client state.
+@@ -68,13 +75,20 @@ retain the upstream execution model.
  4. Push the maintained `main` branch to `convex-in-prod/convex-js`.
  5. Manually dispatch `Build convex-in-prod package` for that exact `main`
     commit.

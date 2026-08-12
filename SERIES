@@ -1,8 +1,8 @@
 # patch-file source-commit
-0001-client-retry-write-conflict-mutations.patch d983e083c353a11f47a1a59dd998ce57f62eb163
-0002-sync-add-degradable-query-pressure-protocol.patch 8badb722c0fcee3117a309eedbf3a5be26784e4e
-0003-react-expose-local-query-result-removal.patch 06d6275127c7121e84179dd2b299fb33d69e4c97
-0004-bundler-support-default-database-context-reuse.patch 346fde8eb4552c31c9e2f30b7f245c8727063d6f
-0005-packaging-build-SHA-derived-peer-compatible-package.patch 57926f25ee49a93df01d198bd188100b2d853b4f
-0006-packages-colocate-published-Convex-archives.patch 501692b209b62f284e2d7ee00547dd4de9c2de7e
-0007-bundler-support-module-scoped-Node-pools.patch 2d27d4a8e5de8e5b859deda4ca6648d2198baa18
+0001-client-retry-write-conflict-mutations.patch 384b3e7f8c4c649578158ee320cf8b9a10a5df02
+0002-sync-add-degradable-query-pressure-protocol.patch 5b28d18a234aa0ca0f0764e8f185f7d3bdaed852
+0003-react-expose-local-query-result-removal.patch 46f1d58824c91e0cf06e1b653c61a567a53696ea
+0004-bundler-support-default-database-context-reuse.patch 81b670aef4b1f4c0e62a7f5ea8415129dcd77ac6
+0005-bundler-support-module-scoped-Node-pools.patch d6242f6129841e15dd5c204da3b09208fac4362d
+0006-packaging-build-SHA-derived-peer-compatible-package.patch f5fb5faaea843e6e65aa9e83f536667c524b1e97
+0007-packages-colocate-published-Convex-archives.patch 18f8ffab5959e0a8e075966b45d67579e7049518

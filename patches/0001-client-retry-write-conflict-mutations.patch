@@ -524,13 +524,13 @@ index b71e6044d1b8037c8215f5067c13b09063bb4787..37ccee6f182ea9c4c5a616d6a99b19ba
  
  /**
 diff --git a/src/server/impl/actions_impl.ts b/src/server/impl/actions_impl.ts
-index c3df52b022a2bb4b385aac74740470e4c13a4853..2f69825db68165c593cee47f8f4418cc18aa1250 100644
+index 8f186c57e18092a7909918f9cc1fd4c5886d9a85..bc3e4878cd6a29d5e21efff45dfff45b971ad186 100644
 --- a/src/server/impl/actions_impl.ts
 +++ b/src/server/impl/actions_impl.ts
-@@ -4,6 +4,11 @@ import { performAsyncSyscall } from "./syscall.js";
- import { parseArgs } from "../../common/index.js";
+@@ -5,6 +5,11 @@ import { parseArgs } from "../../common/index.js";
  import { FunctionReference } from "../../server/api.js";
  import { getFunctionAddress } from "../components/paths.js";
+ import { validateArg } from "./validate.js";
 +import {
 +  retryOnWriteConflict,
 +  validateWriteConflictRetryOptions,
@@ -539,7 +539,7 @@ index c3df52b022a2bb4b385aac74740470e4c13a4853..2f69825db68165c593cee47f8f4418cc
  
  function syscallArgs(
    requestId: string,
-@@ -34,10 +39,17 @@ export function setupActionCalls(requestId: string) {
+@@ -35,10 +40,17 @@ export function setupActionCalls(requestId: string) {
      runMutation: async (
        mutation: FunctionReference<"mutation", "public" | "internal">,
        args?: Record<string, Value>,
