@@ -150,6 +150,7 @@ export function hash(bundle: Bundle) {
 function isModuleTheSame(newBundle: Bundle, oldBundleHash: BundleHash) {
   return (
     newBundle.environment === oldBundleHash.environment &&
+    newBundle.nodePool === oldBundleHash.nodePool &&
     hash(newBundle) === oldBundleHash.hash
   );
 }
@@ -170,6 +171,7 @@ export function partitionModulesByChanges(
     .map((func) => ({
       path: func.path,
       environment: func.environment,
+      ...(func.nodePool === undefined ? {} : { nodePool: func.nodePool }),
       sha256: hash(func),
     }));
   const changedModules = functions.filter((newBundle) => {
