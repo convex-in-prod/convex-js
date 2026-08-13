@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 22 Jul 2026 11:48:33 +0800
-Subject: [PATCH 7/7] packages: colocate published Convex archives
+Subject: [PATCH 7/8] packages: colocate published Convex archives
 
 Import the three immutable package archives and provenance manifests currently served by convex-in-prod.github.io. Keep source-SHA paths and bytes unchanged so the existing package URLs and lockfile integrity values remain valid.
 

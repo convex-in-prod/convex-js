@@ -1,0 +1,223 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Thu, 13 Aug 2026 23:46:52 +0800
+Subject: [PATCH 8/8] deploy: support forced local Node cutover
+
+Add --force-node-cutover to deploy and preview flows, negotiate cutover protocol version 1 before sending it, and warn that interrupted actions may have completed external effects. Keep dry runs and internal development pushes non-forced.
+
+Send the optional force request through deploy2, surface a committed cutover failure as an explicit fatal result, and include application-declared Node pool modules in Node bundle size telemetry.
+---
+ src/cli/deploy.ts                  |  3 +++
+ src/cli/lib/command.ts             |  5 +++++
+ src/cli/lib/components.ts          | 23 ++++++++++++++++++++++-
+ src/cli/lib/deploy2.ts             | 17 +++++++++++++++++
+ src/cli/lib/deployApi/startPush.ts |  1 +
+ src/cli/lib/dev.ts                 |  1 +
+ src/cli/lib/run.ts                 |  1 +
+ 7 files changed, 50 insertions(+), 1 deletion(-)
+
+diff --git a/src/cli/deploy.ts b/src/cli/deploy.ts
+index 4dbc3542906a149ea824ddd5dde2568e42408bc4..81fd83a239f9133c19fc1f3712479cd88aac2cdc 100644
+--- a/src/cli/deploy.ts
++++ b/src/cli/deploy.ts
+@@ -238,6 +238,7 @@ async function deployToNewPreviewDeployment(
+     debugBundlePath?: string | undefined;
+     skipWorkosCheck?: boolean | undefined;
+     message: string | null;
++    forceNodeCutover?: boolean | undefined;
+   },
+ ) {
+   const previewName = options.previewName ?? null;
+@@ -334,6 +335,7 @@ async function deployToNewPreviewDeployment(
+     pushAllModules: !!options.pushAllModules,
+     largeIndexDeletionCheck: "no verification", // fine for preview deployments
+     message: options.message,
++    forceNodeCutover: !!options.forceNodeCutover,
+   };
+   showSpinner(`Deploying to ${previewUrl}...`);
+   await runPush(ctx, pushOptions);
+@@ -379,6 +381,7 @@ async function deployToExistingDeployment(
+     skipWorkosCheck?: boolean | undefined;
+     allowDeletingLargeIndexes: boolean;
+     message: string | null;
++    forceNodeCutover?: boolean | undefined;
+   },
+ ) {
+   const deploymentToActOn = await loadSelectedDeploymentCredentials(
+diff --git a/src/cli/lib/command.ts b/src/cli/lib/command.ts
+index 8da9f8ee16b46e58d25bce70e39cd1212e7e51bb..8d3a248837e3fe2bc7e941dda6d469456bf151fa 100644
+--- a/src/cli/lib/command.ts
++++ b/src/cli/lib/command.ts
+@@ -55,6 +55,7 @@ declare module "@commander-js/extra-typings" {
+       Opts & {
+         verbose?: boolean;
+         dryRun?: boolean;
++        forceNodeCutover?: boolean;
+         yes?: boolean;
+         typecheck: "enable" | "try" | "disable";
+         typecheckComponents: boolean;
+@@ -341,6 +342,10 @@ Command.prototype.addDeployOptions = function () {
+       "--dry-run",
+       "Print out the generated configuration without deploying to your Convex deployment",
+     )
++    .option(
++      "--force-node-cutover",
++      "Reclaim occupied local Node cutover capacity, which can interrupt superseded actions",
++    )
+     .addOption(
+       new Option(
+         "-y, --yes",
+diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
+index 204d4ddcdea0fa685821b58b2961de6b27a3416d..d9ad10aa21d05b978abf4ac2dda353af2ac3d617 100644
+--- a/src/cli/lib/components.ts
++++ b/src/cli/lib/components.ts
+@@ -76,6 +76,7 @@ export type PushOptions = {
+   logManager?: LogManager | undefined;
+   largeIndexDeletionCheck: LargeIndexDeletionCheck;
+   message: string | null;
++  forceNodeCutover: boolean;
+ };
+ 
+ export async function runCodegen(
+@@ -232,6 +233,7 @@ async function startComponentsPushAndCodegen(
+     debugNodeApis: boolean;
+     largeIndexDeletionCheck: LargeIndexDeletionCheck;
+     codegenOnlyThisComponent?: string | undefined;
++    forceNodeCutover?: boolean | undefined;
+   },
+ ): Promise<StartPushResponse | null> {
+   const convexDir = await getFunctionsDirectoryPath(ctx);
+@@ -471,6 +473,22 @@ async function startComponentsPushAndCodegen(
+     startPush(ctx, span, startPushRequest, options),
+   );
+ 
++  if (options.forceNodeCutover && !options.dryRun) {
++    if (startPushResponse.nodeExecutorCutoverProtocolVersion !== 1) {
++      await ctx.crash({
++        exitCode: 1,
++        errorType: "fatal",
++        printedMessage:
++          "The target backend does not support --force-node-cutover. Remove the option or use a backend that advertises forced Node cutover protocol version 1.",
++      });
++    }
++    logMessage(
++      chalkStderr.yellow(
++        "Warning: forced Node cutover can interrupt actions whose external effects may already have completed. Read authoritative state before retrying an interrupted action.",
++      ),
++    );
++  }
++
+   if (options.verbose) {
+     logMessage("startPush: " + JSON.stringify(startPushResponse, null, 2));
+   }
+@@ -566,7 +584,10 @@ function logStartPushSizes(span: Span, startPushRequest: StartPushRequest) {
+       if (module.environment === "isolate") {
+         v8Size += module.source.length + (module.sourceMap ?? "").length;
+         v8Count += 1;
+-      } else if (module.environment === "node") {
++      } else if (
++        module.environment === "node" ||
++        module.environment.startsWith("node:pool:")
++      ) {
+         nodeSize += module.source.length + (module.sourceMap ?? "").length;
+         nodeCount += 1;
+       }
+diff --git a/src/cli/lib/deploy2.ts b/src/cli/lib/deploy2.ts
+index 8f278503e4518d98fdaa4c51262c068dfcb56f94..0b5c7e3ec38841daa31e434df4fce2a57cb20f56 100644
+--- a/src/cli/lib/deploy2.ts
++++ b/src/cli/lib/deploy2.ts
+@@ -11,6 +11,7 @@ import { spawnSync } from "child_process";
+ import {
+   deploymentFetch,
+   logAndHandleFetchError,
++  ThrowingFetchError,
+   typedDeploymentClient,
+ } from "./utils/utils.js";
+ import {
+@@ -304,6 +305,7 @@ export async function finishPush(
+     deploymentName: string | null;
+     deploymentType?: DeploymentType;
+     message: string | null;
++    forceNodeCutover: boolean;
+   },
+ ): Promise<FinishPushDiff> {
+   changeSpinner("Finalizing push...");
+@@ -316,6 +318,8 @@ export async function finishPush(
+     startPush,
+     dryRun: options.dryRun,
+     message: options.message,
++    forceNodeCutover:
++      (!options.dryRun && options.forceNodeCutover) || undefined,
+   };
+   try {
+     const response = await fetch("/api/deploy2/finish_push", {
+@@ -329,6 +333,17 @@ export async function finishPush(
+     });
+     return finishPushDiff.parse(await response.json());
+   } catch (error: unknown) {
++    if (
++      error instanceof ThrowingFetchError &&
++      error.serverErrorData?.code === "NodeExecutorCutoverFailedAfterCommit"
++    ) {
++      return await ctx.crash({
++        exitCode: 1,
++        errorType: "fatal",
++        errForSentry: error,
++        printedMessage: chalkStderr.red(error.serverErrorData.message),
++      });
++    }
+     return await handlePushConfigError(
+       ctx,
+       error,
+@@ -405,6 +420,7 @@ export async function deployToDeployment(
+     skipWorkosCheck?: boolean | undefined;
+     allowDeletingLargeIndexes: boolean;
+     message: string | null;
++    forceNodeCutover?: boolean | undefined;
+   },
+ ) {
+   const { url, adminKey } = credentials;
+@@ -454,6 +470,7 @@ export async function deployToDeployment(
+       ? "has confirmation"
+       : "ask for confirmation",
+     message: options.message,
++    forceNodeCutover: !!options.forceNodeCutover,
+   };
+   showSpinner(`Deploying to ${url}...${options.dryRun ? " [dry run]" : ""}`);
+   await runPush(ctx, pushOptions);
+diff --git a/src/cli/lib/deployApi/startPush.ts b/src/cli/lib/deployApi/startPush.ts
+index b23da979aa095358a272dd711f3a554e7a208cee..932289ab1575347970e67915a69c4ae8111e3e65 100644
+--- a/src/cli/lib/deployApi/startPush.ts
++++ b/src/cli/lib/deployApi/startPush.ts
+@@ -45,6 +45,7 @@ export const startPushResponse = looseObject({
+   app: checkedComponent,
+ 
+   schemaChange,
++  nodeExecutorCutoverProtocolVersion: z.number().optional(),
+ });
+ export type StartPushResponse = z.infer<typeof startPushResponse>;
+ 
+diff --git a/src/cli/lib/dev.ts b/src/cli/lib/dev.ts
+index b3259cd9bf0a7b1a9892cb2764552e993d4f4c9b..92fa9f521bd2f64b6b8b93316d513f7f4b14cad1 100644
+--- a/src/cli/lib/dev.ts
++++ b/src/cli/lib/dev.ts
+@@ -138,6 +138,7 @@ export async function devAgainstDeployment(
+         ...credentials,
+         verbose: devOptions.verbose,
+         dryRun: false,
++        forceNodeCutover: false,
+         typecheck: devOptions.typecheck,
+         typecheckComponents: devOptions.typecheckComponents,
+         debug: false,
+diff --git a/src/cli/lib/run.ts b/src/cli/lib/run.ts
+index 80910b35995cfcc80774910b2af0ef53dc6df83f..1499832e22a5d6d0c04589d23aacdf6bc9dc2481 100644
+--- a/src/cli/lib/run.ts
++++ b/src/cli/lib/run.ts
+@@ -527,6 +527,7 @@ export async function pushToDeployment(
+       deploymentName: args.deploymentName,
+       verbose: false,
+       dryRun: false,
++      forceNodeCutover: false,
+       typecheck: args.typecheck,
+       typecheckComponents: args.typecheckComponents,
+       debug: false,

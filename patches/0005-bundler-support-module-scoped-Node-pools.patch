@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 12 Aug 2026 13:32:50 +0800
-Subject: [PATCH 5/7] bundler: support module-scoped Node pools
+Subject: [PATCH 5/8] bundler: support module-scoped Node pools
 
 Recognize paired "use node" and "use node pool:<name>" directives on root function entries. Validate pool names, reserve the default executor name, attach the required pool-bearing environment and explicit pool field only to the corresponding entry output, and leave shared chunks in the ordinary Node environment.
 

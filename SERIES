@@ -6,3 +6,4 @@
 0005-bundler-support-module-scoped-Node-pools.patch d6242f6129841e15dd5c204da3b09208fac4362d
 0006-packaging-build-SHA-derived-peer-compatible-package.patch f5fb5faaea843e6e65aa9e83f536667c524b1e97
 0007-packages-colocate-published-Convex-archives.patch 18f8ffab5959e0a8e075966b45d67579e7049518
+0008-deploy-support-forced-local-Node-cutover.patch 9a22d4cefde19e551c8c9b0ed8517061f4dbe4d1
