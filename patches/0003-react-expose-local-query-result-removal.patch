@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 22 Jul 2026 19:05:15 +0800
-Subject: [PATCH 3/8] react: expose local query-result removal
+Subject: [PATCH 3/7] react: expose local query-result removal
 
 Expose a non-throwing local-result presence check and a one-shot removal observer on Watch. Applications can now wait for a removed subscription's retained success or error to leave the local sync state without reaching into ConvexReactClient internals or creating another subscription.
 
