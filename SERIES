@@ -4,5 +4,6 @@
 0003-react-expose-local-query-result-removal.patch 46f1d58824c91e0cf06e1b653c61a567a53696ea
 0004-bundler-support-default-database-context-reuse.patch 81b670aef4b1f4c0e62a7f5ea8415129dcd77ac6
 0005-cli-support-module-scoped-local-Node-pools.patch a938538f08c9bf14cf94ced04c56fe049aa3df64
-0006-packaging-build-SHA-derived-peer-compatible-package.patch 41c081ee91ef49b7ca6576a9b3005952c61e3021
-0007-packages-colocate-published-Convex-archives.patch 938a9d5ee7ab0329a42b6381572c3c2218f59539
+0006-codegen-use-non-committing-deployment-analysis.patch 8658bd08c36436971d214e95ca8163781de60e79
+0007-packaging-build-SHA-derived-peer-compatible-package.patch a175b976ce2135b6862c16ffd8cce5d1e7e8064b
+0008-packages-colocate-published-Convex-archives.patch 736eed3b9f51da025abb28e0f6be00d981f4f494

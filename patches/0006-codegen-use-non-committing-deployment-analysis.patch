@@ -1,0 +1,605 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Fri, 14 Aug 2026 11:52:23 +0800
+Subject: [PATCH 6/8] codegen: use non-committing deployment analysis
+
+Route standalone codegen through evaluate_push with an explicit analysis request instead of beginning the start_push deployment lifecycle. Refuse older backend responses without analysis rather than falling back to a request that can publish pending schema and index metadata.
+
+Keep dev and deploy on start_push, omit the analysis request from deployment preflight, and preserve compatibility with legacy evaluation responses for a precise version error. Generate API, data-model, component, and environment types from a narrow shared analysis contract and fail clearly when component analysis is incomplete.
+
+Add response-decoder coverage, operator patch guidance, and an Unreleased changelog entry.
+---
+ CHANGELOG.md                               |  4 ++
+ src/cli/codegen.ts                         |  3 +-
+ src/cli/codegen_templates/component_api.ts | 28 ++++----
+ src/cli/codegen_templates/dataModel.ts     | 16 ++---
+ src/cli/lib/codegen.ts                     | 38 +++++-----
+ src/cli/lib/components.ts                  | 82 +++++++++++++++-------
+ src/cli/lib/deploy2.ts                     |  8 ++-
+ src/cli/lib/deployApi/startPush.test.ts    | 22 ++++++
+ src/cli/lib/deployApi/startPush.ts         | 14 +++-
+ 9 files changed, 148 insertions(+), 67 deletions(-)
+ create mode 100644 src/cli/lib/deployApi/startPush.test.ts
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 6d66c0045563665f0b216a3e39b0fb06b4066f6b..400a6f1e8950514547f1a225f2adac66da487a01 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,10 @@
+ 
+ ## Unreleased
+ 
++- `npx convex codegen` now obtains server analysis through deployment preflight
++  without committing pending schemas or indexes or starting index backfills. It
++  reports an explicit error when the target backend's preflight response does
++  not include code generation analysis.
+ - `schema.doc(tableName)` returns the validator for whole documents of a table:
+   the table's own validator with the `_id` and `_creationTime` system fields
+   added (to each member, for tables defined with a union).
+diff --git a/src/cli/codegen.ts b/src/cli/codegen.ts
+index 2538b957ff95de9100fb24b3fe84f613d8d90a68..8f72fc320a90c110ea4f8d088a84a36db3dab201 100644
+--- a/src/cli/codegen.ts
++++ b/src/cli/codegen.ts
+@@ -67,7 +67,8 @@ export const codegen = new Command("codegen")
+       liveComponentSources: !!options.liveComponentSources,
+       debugNodeApis: false,
+       systemUdfs: !!options.systemUdfs,
+-      largeIndexDeletionCheck: "no verification" as const, // `codegen` is a read-only operation
++      // Codegen does not commit pending schemas or indexes.
++      largeIndexDeletionCheck: "no verification" as const,
+       codegenOnlyThisComponent: options.componentDir,
+     };
+ 
+diff --git a/src/cli/codegen_templates/component_api.ts b/src/cli/codegen_templates/component_api.ts
+index 1734ef3c97bef9f4a63bdb4c0aa0f6678edd052b..ff06e5f6c66d7e479aaa4751c1197f66622fa7c2 100644
+--- a/src/cli/codegen_templates/component_api.ts
++++ b/src/cli/codegen_templates/component_api.ts
+@@ -7,7 +7,7 @@ import {
+   toComponentDefinitionPath,
+   ComponentDefinitionPath,
+ } from "../lib/components/definition/directoryStructure.js";
+-import { StartPushResponse } from "../lib/deployApi/startPush.js";
++import { PushAnalysis } from "../lib/deployApi/startPush.js";
+ import { importPath, moduleIdentifier } from "./api.js";
+ import {
+   apiComment,
+@@ -83,7 +83,7 @@ export function componentApiStubTS() {
+ 
+ export async function componentApiDTS(
+   ctx: Context,
+-  startPush: StartPushResponse,
++  pushAnalysis: PushAnalysis,
+   rootComponent: ComponentDirectory,
+   componentDirectory: ComponentDirectory,
+   componentsMap: Map<string, ComponentDirectory>,
+@@ -94,12 +94,12 @@ export async function componentApiDTS(
+     componentDirectory,
+   );
+ 
+-  const analysis = startPush.analysis[definitionPath];
++  const analysis = pushAnalysis.analysis[definitionPath];
+   if (!analysis) {
+     return await ctx.crash({
+       exitCode: 1,
+       errorType: "fatal",
+-      printedMessage: `No analysis found for component ${definitionPath} orig: ${definitionPath}\nin\n${Object.keys(startPush.analysis).toString()}`,
++      printedMessage: `No analysis found for component ${definitionPath}. Available components: ${Object.keys(pushAnalysis.analysis).join(", ")}`,
+     });
+   }
+ 
+@@ -120,7 +120,7 @@ export async function componentApiDTS(
+   lines.push(
+     ...(await componentApiLines(
+       ctx,
+-      startPush,
++      pushAnalysis,
+       analysis,
+       rootComponent,
+       componentsMap,
+@@ -133,7 +133,7 @@ export async function componentApiDTS(
+ 
+ async function componentApiLines(
+   ctx: Context,
+-  startPush: StartPushResponse,
++  pushAnalysis: PushAnalysis,
+   analysis: EvaluatedComponentDefinition,
+   rootComponent: ComponentDirectory,
+   componentsMap: Map<string, ComponentDirectory>,
+@@ -173,7 +173,7 @@ async function componentApiLines(
+         `  "${childComponent.name}": import("${importPath}/_generated/component.js").ComponentApi<"${childComponent.name}">,`,
+       );
+     } else {
+-      const childComponentAnalysis = startPush.analysis[childComponent.path];
++      const childComponentAnalysis = pushAnalysis.analysis[childComponent.path];
+       if (!childComponentAnalysis) {
+         return await ctx.crash({
+           exitCode: 1,
+@@ -195,7 +195,7 @@ async function componentApiLines(
+ 
+ export async function componentTS(
+   ctx: Context,
+-  startPush: StartPushResponse,
++  pushAnalysis: PushAnalysis,
+   rootComponent: ComponentDirectory,
+   componentDirectory: ComponentDirectory,
+ ) {
+@@ -203,12 +203,12 @@ export async function componentTS(
+     rootComponent,
+     componentDirectory,
+   );
+-  const analysis = startPush.analysis[definitionPath];
++  const analysis = pushAnalysis.analysis[definitionPath];
+   if (!analysis) {
+     return await ctx.crash({
+       exitCode: 1,
+       errorType: "fatal",
+-      printedMessage: `No analysis found for component ${definitionPath} orig: ${definitionPath}\nin\n${Object.keys(startPush.analysis).toString()}`,
++      printedMessage: `No analysis found for component ${definitionPath}. Available components: ${Object.keys(pushAnalysis.analysis).join(", ")}`,
+     });
+   }
+ 
+@@ -245,7 +245,7 @@ export async function componentTS(
+ 
+ export async function componentApiTSWithTypes(
+   ctx: Context,
+-  startPush: StartPushResponse,
++  pushAnalysis: PushAnalysis,
+   rootComponent: ComponentDirectory,
+   componentDirectory: ComponentDirectory,
+   componentsMap: Map<string, ComponentDirectory>,
+@@ -256,12 +256,12 @@ export async function componentApiTSWithTypes(
+     componentDirectory,
+   );
+ 
+-  const analysis = startPush.analysis[definitionPath];
++  const analysis = pushAnalysis.analysis[definitionPath];
+   if (!analysis) {
+     return await ctx.crash({
+       exitCode: 1,
+       errorType: "fatal",
+-      printedMessage: `No analysis found for component ${definitionPath} orig: ${definitionPath}\nin\n${Object.keys(startPush.analysis).toString()}`,
++      printedMessage: `No analysis found for component ${definitionPath}. Available components: ${Object.keys(pushAnalysis.analysis).join(", ")}`,
+     });
+   }
+ 
+@@ -283,7 +283,7 @@ export async function componentApiTSWithTypes(
+   lines.push(
+     ...(await componentApiLines(
+       ctx,
+-      startPush,
++      pushAnalysis,
+       analysis,
+       rootComponent,
+       componentsMap,
+diff --git a/src/cli/codegen_templates/dataModel.ts b/src/cli/codegen_templates/dataModel.ts
+index 4ec0f9724ce0a820abbe54a116c366309f3db745..cd8377ed780313ccdd7bb046e76c7598f03aa742 100644
+--- a/src/cli/codegen_templates/dataModel.ts
++++ b/src/cli/codegen_templates/dataModel.ts
+@@ -8,7 +8,7 @@ import {
+   AnalyzedSchema,
+   TableDefinition,
+ } from "../lib/deployApi/componentDefinition.js";
+-import { StartPushResponse } from "../lib/deployApi/startPush.js";
++import { PushAnalysis } from "../lib/deployApi/startPush.js";
+ import { ConvexValidator } from "../lib/deployApi/validator.js";
+ import { compareStrings, header } from "./common.js";
+ import { validatorToType } from "./validator_helpers.js";
+@@ -126,7 +126,7 @@ export function dynamicDataModelTS() {
+ 
+ async function staticDataModelImpl(
+   ctx: Context,
+-  startPush: StartPushResponse,
++  pushAnalysis: PushAnalysis,
+   rootComponent: ComponentDirectory,
+   componentDirectory: ComponentDirectory,
+   useTypeScript: boolean,
+@@ -136,12 +136,12 @@ async function staticDataModelImpl(
+     componentDirectory,
+   );
+ 
+-  const analysis = startPush.analysis[definitionPath];
++  const analysis = pushAnalysis.analysis[definitionPath];
+   if (!analysis) {
+     return await ctx.crash({
+       exitCode: 1,
+       errorType: "fatal",
+-      printedMessage: `No analysis found for component ${definitionPath} orig: ${definitionPath}\nin\n${Object.keys(startPush.analysis).toString()}`,
++      printedMessage: `No analysis found for component ${definitionPath}. Available components: ${Object.keys(pushAnalysis.analysis).join(", ")}`,
+     });
+   }
+   if (!analysis.schema) {
+@@ -190,13 +190,13 @@ async function staticDataModelImpl(
+ 
+ export async function staticDataModelDTS(
+   ctx: Context,
+-  startPush: StartPushResponse,
++  pushAnalysis: PushAnalysis,
+   rootComponent: ComponentDirectory,
+   componentDirectory: ComponentDirectory,
+ ) {
+   return staticDataModelImpl(
+     ctx,
+-    startPush,
++    pushAnalysis,
+     rootComponent,
+     componentDirectory,
+     false,
+@@ -206,13 +206,13 @@ export async function staticDataModelDTS(
+ // Used for components and root
+ export async function staticDataModelTS(
+   ctx: Context,
+-  startPush: StartPushResponse,
++  pushAnalysis: PushAnalysis,
+   rootComponent: ComponentDirectory,
+   componentDirectory: ComponentDirectory,
+ ) {
+   return staticDataModelImpl(
+     ctx,
+-    startPush,
++    pushAnalysis,
+     rootComponent,
+     componentDirectory,
+     true,
+diff --git a/src/cli/lib/codegen.ts b/src/cli/lib/codegen.ts
+index ad546c493e79c4efef0701c32ed7f3f6845b5279..9d809d4ef298267094359dd0db049b2cf96a6a4a 100644
+--- a/src/cli/lib/codegen.ts
++++ b/src/cli/lib/codegen.ts
+@@ -35,7 +35,7 @@ import {
+   ComponentDirectory,
+   toComponentDefinitionPath,
+ } from "./components/definition/directoryStructure.js";
+-import { StartPushResponse } from "./deployApi/startPush.js";
++import { PushAnalysis } from "./deployApi/startPush.js";
+ import {
+   componentApiDTS,
+   componentApiJs,
+@@ -326,7 +326,7 @@ export async function doFinalComponentCodegen(
+   tmpDir: TempDir,
+   rootComponent: ComponentDirectory,
+   componentDirectory: ComponentDirectory,
+-  startPushResponse: StartPushResponse,
++  pushAnalysis: PushAnalysis,
+   componentsMap: Map<string, ComponentDirectory>,
+   opts?: {
+     dryRun?: boolean;
+@@ -351,9 +351,20 @@ export async function doFinalComponentCodegen(
+   const useTypeScript =
+     !componentDirectory.isRoot || usesTypeScriptCodegen(projectConfig);
+ 
+-  // `dataModel` and `api` files depend on analyze results so will get replaced
+-  // in the later post-analysis codegen phase,  but `server` files don't need
+-  // analysis info so the stubs from initial codegen are sufficient.
++  // Replace the initial stubs with files generated from the server analysis.
++  // In particular, `server` uses the evaluated environment declarations.
++  const definitionPath = toComponentDefinitionPath(
++    rootComponent,
++    componentDirectory,
++  );
++  const analysis = pushAnalysis.analysis[definitionPath];
++  if (!analysis) {
++    return await ctx.crash({
++      exitCode: 1,
++      errorType: "fatal",
++      printedMessage: `No analysis found for component ${definitionPath}. Available components: ${Object.keys(pushAnalysis.analysis).join(", ")}`,
++    });
++  }
+ 
+   // dataModel
+   const hasSchemaFile = schemaFileExists(ctx, componentDirectory.path);
+@@ -363,13 +374,13 @@ export async function doFinalComponentCodegen(
+       dataModelContents = useTypeScript
+         ? await staticDataModelTS(
+             ctx,
+-            startPushResponse,
++            pushAnalysis,
+             rootComponent,
+             componentDirectory,
+           )
+         : await staticDataModelDTS(
+             ctx,
+-            startPushResponse,
++            pushAnalysis,
+             rootComponent,
+             componentDirectory,
+           );
+@@ -401,7 +412,7 @@ export async function doFinalComponentCodegen(
+     const componentTSPath = path.join(codegenDir, "component.ts");
+     const componentTSContents = await componentTS(
+       ctx,
+-      startPushResponse,
++      pushAnalysis,
+       rootComponent,
+       componentDirectory,
+     );
+@@ -416,13 +427,8 @@ export async function doFinalComponentCodegen(
+   }
+ 
+   // server.ts - regenerate it in final codegen so we can emit typed env vars.
+-  const definitionPath = toComponentDefinitionPath(
+-    rootComponent,
+-    componentDirectory,
+-  );
+-  const analysis = startPushResponse.analysis[definitionPath];
+   const envVars: EnvVarMeta[] =
+-    analysis?.definition.envVars && analysis.definition.envVars.length > 0
++    analysis.definition.envVars && analysis.definition.envVars.length > 0
+       ? analysis.definition.envVars
+       : [];
+   await writeServerFilesForComponent(
+@@ -440,7 +446,7 @@ export async function doFinalComponentCodegen(
+     const apiDTSPath = path.join(codegenDir, "api.d.ts");
+     const apiContents = await componentApiDTS(
+       ctx,
+-      startPushResponse,
++      pushAnalysis,
+       rootComponent,
+       componentDirectory,
+       componentsMap,
+@@ -473,7 +479,7 @@ export async function doFinalComponentCodegen(
+     const apiTSPath = path.join(codegenDir, "api.ts");
+     const apiContents = await componentApiTSWithTypes(
+       ctx,
+-      startPushResponse,
++      pushAnalysis,
+       rootComponent,
+       componentDirectory,
+       componentsMap,
+diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
+index d9ad10aa21d05b978abf4ac2dda353af2ac3d617..049fc853bfbf08e66b850cf9d0b57d0b3a6afedd 100644
+--- a/src/cli/lib/components.ts
++++ b/src/cli/lib/components.ts
+@@ -15,6 +15,7 @@ import {
+   diffConfig,
+ } from "./config.js";
+ import {
++  evaluatePush,
+   finishPush,
+   reportPushCompleted,
+   startPush,
+@@ -43,7 +44,11 @@ import { typeCheckFunctionsInMode, TypeCheckMode } from "./typecheck.js";
+ import { withTmpDir } from "../../bundler/fs.js";
+ import { handleDebugBundlePath } from "./debugBundlePath.js";
+ import { chalkStderr } from "chalk";
+-import { StartPushRequest, StartPushResponse } from "./deployApi/startPush.js";
++import {
++  PushAnalysis,
++  StartPushRequest,
++  StartPushResponse,
++} from "./deployApi/startPush.js";
+ import { DetailedDeploymentCredentials } from "./api.js";
+ import { FinishPushDiff } from "./deployApi/finishPush.js";
+ import { Reporter, Span } from "./tracing.js";
+@@ -109,6 +114,7 @@ export async function runCodegen(
+       configPath,
+       {
+         ...options,
++        pushMode: "codegen",
+         deploymentName: credentials.deploymentFields?.deploymentName ?? null,
+         ...(credentials.deploymentFields?.deploymentType !== undefined
+           ? { deploymentType: credentials.deploymentFields.deploymentType }
+@@ -234,6 +240,7 @@ async function startComponentsPushAndCodegen(
+     largeIndexDeletionCheck: LargeIndexDeletionCheck;
+     codegenOnlyThisComponent?: string | undefined;
+     forceNodeCutover?: boolean | undefined;
++    pushMode: "codegen" | "deployment";
+   },
+ ): Promise<StartPushResponse | null> {
+   const convexDir = await getFunctionsDirectoryPath(ctx);
+@@ -444,6 +451,7 @@ async function startComponentsPushAndCodegen(
+     nodeDependencies: appImplementation.externalNodeDependencies,
+     nodeVersion: projectConfig.node.nodeVersion,
+     forCodegen: !!options.codegenOnlyThisComponent,
++    ...(options.pushMode === "codegen" ? { includeAnalysis: true } : {}),
+   };
+   if (options.writePushRequest) {
+     const pushRequestPath = path.resolve(options.writePushRequest);
+@@ -468,29 +476,54 @@ async function startComponentsPushAndCodegen(
+     );
+   }
+ 
+-  changeSpinner("Uploading functions to Convex...");
+-  const startPushResponse = await parentSpan.enterAsync("startPush", (span) =>
+-    startPush(ctx, span, startPushRequest, options),
+-  );
+-
+-  if (options.forceNodeCutover && !options.dryRun) {
+-    if (startPushResponse.nodeExecutorCutoverProtocolVersion !== 1) {
+-      await ctx.crash({
++  let pushAnalysis: PushAnalysis;
++  let startPushResponse: StartPushResponse | null = null;
++  if (options.pushMode === "codegen") {
++    changeSpinner("Analyzing functions for code generation...");
++    const evaluatePushResponse = await parentSpan.enterAsync(
++      "evaluatePush",
++      (span) => evaluatePush(ctx, span, startPushRequest, options),
++    );
++    if (evaluatePushResponse.analysis === undefined) {
++      return await ctx.crash({
+         exitCode: 1,
+         errorType: "fatal",
+         printedMessage:
+-          "The target backend does not support --force-node-cutover. Remove the option or use a backend that advertises forced Node cutover protocol version 1.",
++          "The target backend does not return code generation analysis from deployment preflight. Update the backend before running this version of `convex codegen`.",
+       });
+     }
+-    logMessage(
+-      chalkStderr.yellow(
+-        "Warning: forced Node cutover can interrupt actions whose external effects may already have completed. Read authoritative state before retrying an interrupted action.",
+-      ),
++    pushAnalysis = { analysis: evaluatePushResponse.analysis };
++    if (options.verbose) {
++      logMessage(
++        "evaluatePush: " + JSON.stringify(evaluatePushResponse, null, 2),
++      );
++    }
++  } else {
++    changeSpinner("Uploading functions to Convex...");
++    startPushResponse = await parentSpan.enterAsync("startPush", (span) =>
++      startPush(ctx, span, startPushRequest, options),
+     );
+-  }
++    pushAnalysis = startPushResponse;
++
++    if (options.forceNodeCutover && !options.dryRun) {
++      if (startPushResponse.nodeExecutorCutoverProtocolVersion !== 1) {
++        await ctx.crash({
++          exitCode: 1,
++          errorType: "fatal",
++          printedMessage:
++            "The target backend does not support --force-node-cutover. Remove the option or use a backend that advertises forced Node cutover protocol version 1.",
++        });
++      }
++      logMessage(
++        chalkStderr.yellow(
++          "Warning: forced Node cutover can interrupt actions whose external effects may already have completed. Read authoritative state before retrying an interrupted action.",
++        ),
++      );
++    }
+ 
+-  if (options.verbose) {
+-    logMessage("startPush: " + JSON.stringify(startPushResponse, null, 2));
++    if (options.verbose) {
++      logMessage("startPush: " + JSON.stringify(startPushResponse, null, 2));
++    }
+   }
+ 
+   if (options.codegen) {
+@@ -506,7 +539,7 @@ async function startComponentsPushAndCodegen(
+             tmpDir,
+             rootComponent,
+             rootComponent,
+-            startPushResponse,
++            pushAnalysis,
+             components,
+             options,
+           );
+@@ -527,7 +560,7 @@ async function startComponentsPushAndCodegen(
+             tmpDir,
+             rootComponent,
+             directory,
+-            startPushResponse,
++            pushAnalysis,
+             components,
+             options,
+           );
+@@ -615,13 +648,10 @@ export async function runComponentsPush(
+   const startPushResponse = await pushSpan.enterAsync(
+     "startComponentsPushAndCodegen",
+     (span) =>
+-      startComponentsPushAndCodegen(
+-        ctx,
+-        span,
+-        projectConfig,
+-        configPath,
+-        options,
+-      ),
++      startComponentsPushAndCodegen(ctx, span, projectConfig, configPath, {
++        ...options,
++        pushMode: "deployment",
++      }),
+   );
+   if (!startPushResponse) {
+     return;
+diff --git a/src/cli/lib/deploy2.ts b/src/cli/lib/deploy2.ts
+index 0b5c7e3ec38841daa31e434df4fce2a57cb20f56..a00c4cbb8832a21f31ce627ef7c6330442e9f3b9 100644
+--- a/src/cli/lib/deploy2.ts
++++ b/src/cli/lib/deploy2.ts
+@@ -126,6 +126,8 @@ async function pushCode(
+     componentCount: request.componentDefinitions?.length ?? 0,
+     hasDependencies: request.nodeDependencies?.length > 0,
+     dryRun: request.dryRun,
++    forCodegen: request.forCodegen ?? false,
++    includeAnalysis: request.includeAnalysis ?? false,
+   };
+   logVerbose(`Push request summary: ${JSON.stringify(requestSummary)}`);
+   const onError = (err: any) => {
+@@ -150,10 +152,14 @@ async function pushCode(
+     });
+     return await response.json();
+   } catch (error: unknown) {
++    const defaultMessage =
++      endpoint === "/api/deploy2/evaluate_push"
++        ? "Error: Unable to evaluate push against " + options.url
++        : "Error: Unable to start push to " + options.url;
+     return await handlePushConfigError(
+       ctx,
+       error,
+-      "Error: Unable to start push to " + options.url,
++      defaultMessage,
+       options.deploymentName,
+       {
+         adminKey: request.adminKey,
+diff --git a/src/cli/lib/deployApi/startPush.test.ts b/src/cli/lib/deployApi/startPush.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3f64c0ab1b8be5d30772393c778e7c36c40e5ced
+--- /dev/null
++++ b/src/cli/lib/deployApi/startPush.test.ts
+@@ -0,0 +1,22 @@
++import { expect, test } from "vitest";
++import { evaluatePushResponse } from "./startPush.js";
++
++const schemaChange = {
++  allocatedComponentIds: {},
++  schemaIds: {},
++};
++
++test("evaluate push preserves missing analysis for version checks", () => {
++  const parsed = evaluatePushResponse.parse({ schemaChange });
++
++  expect(parsed.analysis).toBeUndefined();
++});
++
++test("evaluate push preserves codegen analysis", () => {
++  const parsed = evaluatePushResponse.parse({
++    analysis: {},
++    schemaChange,
++  });
++
++  expect(parsed.analysis).toEqual({});
++});
+diff --git a/src/cli/lib/deployApi/startPush.ts b/src/cli/lib/deployApi/startPush.ts
+index 932289ab1575347970e67915a69c4ae8111e3e65..2f0bf3029e608419ee63a8224663a7082aa9d5b0 100644
+--- a/src/cli/lib/deployApi/startPush.ts
++++ b/src/cli/lib/deployApi/startPush.ts
+@@ -23,6 +23,8 @@ export const startPushRequest = looseObject({
+   nodeDependencies: z.array(nodeDependency),
+ 
+   nodeVersion: z.optional(z.string()),
++  forCodegen: z.boolean().optional(),
++  includeAnalysis: z.boolean().optional(),
+ });
+ export type StartPushRequest = z.infer<typeof startPushRequest>;
+ 
+@@ -33,6 +35,14 @@ export const schemaChange = looseObject({
+ });
+ export type SchemaChange = z.infer<typeof schemaChange>;
+ 
++const analysisByComponent = z.record(
++  componentDefinitionPath,
++  evaluatedComponentDefinition,
++);
++export type PushAnalysis = {
++  analysis: z.infer<typeof analysisByComponent>;
++};
++
+ export const startPushResponse = looseObject({
+   environmentVariables: z.record(z.string(), z.string()),
+ 
+@@ -40,7 +50,7 @@ export const startPushResponse = looseObject({
+   componentDefinitionPackages: z.record(componentDefinitionPath, sourcePackage),
+ 
+   appAuth: z.array(authInfo),
+-  analysis: z.record(componentDefinitionPath, evaluatedComponentDefinition),
++  analysis: analysisByComponent,
+ 
+   app: checkedComponent,
+ 
+@@ -50,6 +60,8 @@ export const startPushResponse = looseObject({
+ export type StartPushResponse = z.infer<typeof startPushResponse>;
+ 
+ export const evaluatePushResponse = looseObject({
++  // Older backends only returned schemaChange from this endpoint.
++  analysis: analysisByComponent.optional(),
+   schemaChange,
+ });
+ export type EvaluatePushResponse = z.infer<typeof evaluatePushResponse>;

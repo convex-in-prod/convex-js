@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 15 Jul 2026 19:45:08 +0800
-Subject: [PATCH 2/7] sync: add degradable query pressure protocol
+Subject: [PATCH 2/8] sync: add degradable query pressure protocol
 
 Add an optional connection-level degradable root-query class and lifecycle-version capability. Preserve the legacy Connect and pressure shapes when omitted, validate all bounded lifecycle fields strictly, and serialize both declarations on reconnect.
 

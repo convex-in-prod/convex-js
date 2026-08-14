@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Mon, 20 Jul 2026 16:27:40 +0800
-Subject: [PATCH 6/7] packaging: build SHA-derived peer-compatible package
+Subject: [PATCH 7/8] packaging: build SHA-derived peer-compatible package
 
 Record the exact upstream base and document the maintained patch stack. Add a manually dispatched workflow that verifies one exact source commit, appends source-derived SemVer build metadata, embeds full source and upstream provenance, and uploads the packed artifact.
 
@@ -9,8 +9,8 @@ Keep the source package name and version unchanged in Git. Build metadata identi
 ---
  .convex-in-prod-upstream                   |   1 +
  .github/workflows/build-convex-in-prod.yml | 152 +++++++++++++++++++++
- patches/README.md                          |  85 ++++++++++++
- 3 files changed, 238 insertions(+)
+ patches/README.md                          |  97 +++++++++++++
+ 3 files changed, 250 insertions(+)
  create mode 100644 .convex-in-prod-upstream
  create mode 100644 .github/workflows/build-convex-in-prod.yml
  create mode 100644 patches/README.md
@@ -182,10 +182,10 @@ index 0000000000000000000000000000000000000000..ab69dc289c5b7b9a104a8ac2c022ebc4
 +          NODE
 diff --git a/patches/README.md b/patches/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..ef595de6da2d7a4a2c27e1f493156fefbb749cd9
+index 0000000000000000000000000000000000000000..69f313bbcbad9afb5ac403ba139dc41569cf65e0
 --- /dev/null
 +++ b/patches/README.md
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,97 @@
 +# Convex-In-Prod Patch Stack
 +
 +The fork's `main` branch carries a short generic patch stack over the exact
@@ -245,6 +245,18 @@ index 0000000000000000000000000000000000000000..ef595de6da2d7a4a2c27e1f493156fef
 +The bundler validates the annotation, emits it in module metadata, and rejects
 +conflicting declarations within a bundle. Deployments without the annotation
 +retain the upstream execution model.
++
++### Non-committing codegen analysis
++
++Standalone `convex codegen` requests evaluated component analysis from the
++backend's deployment preflight endpoint instead of beginning a multiphase push.
++It does not fall back to a mutating request when the backend lacks the matching
++analysis response. Development and deployment commands retain the normal push
++lifecycle.
++
++This change requires the matching backend patch. Upgrade the backend before
++distributing this CLI; roll back the CLI first if codegen must remain available
++through a rollback.
 +
 +## Rebase and release
 +
