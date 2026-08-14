@@ -35,7 +35,7 @@ import {
   ComponentDirectory,
   toComponentDefinitionPath,
 } from "./components/definition/directoryStructure.js";
-import { StartPushResponse } from "./deployApi/startPush.js";
+import { PushAnalysis } from "./deployApi/startPush.js";
 import {
   componentApiDTS,
   componentApiJs,
@@ -326,7 +326,7 @@ export async function doFinalComponentCodegen(
   tmpDir: TempDir,
   rootComponent: ComponentDirectory,
   componentDirectory: ComponentDirectory,
-  startPushResponse: StartPushResponse,
+  pushAnalysis: PushAnalysis,
   componentsMap: Map<string, ComponentDirectory>,
   opts?: {
     dryRun?: boolean;
@@ -351,9 +351,20 @@ export async function doFinalComponentCodegen(
   const useTypeScript =
     !componentDirectory.isRoot || usesTypeScriptCodegen(projectConfig);
 
-  // `dataModel` and `api` files depend on analyze results so will get replaced
-  // in the later post-analysis codegen phase,  but `server` files don't need
-  // analysis info so the stubs from initial codegen are sufficient.
+  // Replace the initial stubs with files generated from the server analysis.
+  // In particular, `server` uses the evaluated environment declarations.
+  const definitionPath = toComponentDefinitionPath(
+    rootComponent,
+    componentDirectory,
+  );
+  const analysis = pushAnalysis.analysis[definitionPath];
+  if (!analysis) {
+    return await ctx.crash({
+      exitCode: 1,
+      errorType: "fatal",
+      printedMessage: `No analysis found for component ${definitionPath}. Available components: ${Object.keys(pushAnalysis.analysis).join(", ")}`,
+    });
+  }
 
   // dataModel
   const hasSchemaFile = schemaFileExists(ctx, componentDirectory.path);
@@ -363,13 +374,13 @@ export async function doFinalComponentCodegen(
       dataModelContents = useTypeScript
         ? await staticDataModelTS(
             ctx,
-            startPushResponse,
+            pushAnalysis,
             rootComponent,
             componentDirectory,
           )
         : await staticDataModelDTS(
             ctx,
-            startPushResponse,
+            pushAnalysis,
             rootComponent,
             componentDirectory,
           );
@@ -401,7 +412,7 @@ export async function doFinalComponentCodegen(
     const componentTSPath = path.join(codegenDir, "component.ts");
     const componentTSContents = await componentTS(
       ctx,
-      startPushResponse,
+      pushAnalysis,
       rootComponent,
       componentDirectory,
     );
@@ -416,13 +427,8 @@ export async function doFinalComponentCodegen(
   }
 
   // server.ts - regenerate it in final codegen so we can emit typed env vars.
-  const definitionPath = toComponentDefinitionPath(
-    rootComponent,
-    componentDirectory,
-  );
-  const analysis = startPushResponse.analysis[definitionPath];
   const envVars: EnvVarMeta[] =
-    analysis?.definition.envVars && analysis.definition.envVars.length > 0
+    analysis.definition.envVars && analysis.definition.envVars.length > 0
       ? analysis.definition.envVars
       : [];
   await writeServerFilesForComponent(
@@ -440,7 +446,7 @@ export async function doFinalComponentCodegen(
     const apiDTSPath = path.join(codegenDir, "api.d.ts");
     const apiContents = await componentApiDTS(
       ctx,
-      startPushResponse,
+      pushAnalysis,
       rootComponent,
       componentDirectory,
       componentsMap,
@@ -473,7 +479,7 @@ export async function doFinalComponentCodegen(
     const apiTSPath = path.join(codegenDir, "api.ts");
     const apiContents = await componentApiTSWithTypes(
       ctx,
-      startPushResponse,
+      pushAnalysis,
       rootComponent,
       componentDirectory,
       componentsMap,
