@@ -15,6 +15,7 @@ import {
   diffConfig,
 } from "./config.js";
 import {
+  evaluatePush,
   finishPush,
   reportPushCompleted,
   startPush,
@@ -43,7 +44,11 @@ import { typeCheckFunctionsInMode, TypeCheckMode } from "./typecheck.js";
 import { withTmpDir } from "../../bundler/fs.js";
 import { handleDebugBundlePath } from "./debugBundlePath.js";
 import { chalkStderr } from "chalk";
-import { StartPushRequest, StartPushResponse } from "./deployApi/startPush.js";
+import {
+  PushAnalysis,
+  StartPushRequest,
+  StartPushResponse,
+} from "./deployApi/startPush.js";
 import { DetailedDeploymentCredentials } from "./api.js";
 import { FinishPushDiff } from "./deployApi/finishPush.js";
 import { Reporter, Span } from "./tracing.js";
@@ -109,6 +114,7 @@ export async function runCodegen(
       configPath,
       {
         ...options,
+        pushMode: "codegen",
         deploymentName: credentials.deploymentFields?.deploymentName ?? null,
         ...(credentials.deploymentFields?.deploymentType !== undefined
           ? { deploymentType: credentials.deploymentFields.deploymentType }
@@ -234,6 +240,7 @@ async function startComponentsPushAndCodegen(
     largeIndexDeletionCheck: LargeIndexDeletionCheck;
     codegenOnlyThisComponent?: string | undefined;
     forceNodeCutover?: boolean | undefined;
+    pushMode: "codegen" | "deployment";
   },
 ): Promise<StartPushResponse | null> {
   const convexDir = await getFunctionsDirectoryPath(ctx);
@@ -444,6 +451,7 @@ async function startComponentsPushAndCodegen(
     nodeDependencies: appImplementation.externalNodeDependencies,
     nodeVersion: projectConfig.node.nodeVersion,
     forCodegen: !!options.codegenOnlyThisComponent,
+    ...(options.pushMode === "codegen" ? { includeAnalysis: true } : {}),
   };
   if (options.writePushRequest) {
     const pushRequestPath = path.resolve(options.writePushRequest);
@@ -468,29 +476,54 @@ async function startComponentsPushAndCodegen(
     );
   }
 
-  changeSpinner("Uploading functions to Convex...");
-  const startPushResponse = await parentSpan.enterAsync("startPush", (span) =>
-    startPush(ctx, span, startPushRequest, options),
-  );
-
-  if (options.forceNodeCutover && !options.dryRun) {
-    if (startPushResponse.nodeExecutorCutoverProtocolVersion !== 1) {
-      await ctx.crash({
+  let pushAnalysis: PushAnalysis;
+  let startPushResponse: StartPushResponse | null = null;
+  if (options.pushMode === "codegen") {
+    changeSpinner("Analyzing functions for code generation...");
+    const evaluatePushResponse = await parentSpan.enterAsync(
+      "evaluatePush",
+      (span) => evaluatePush(ctx, span, startPushRequest, options),
+    );
+    if (evaluatePushResponse.analysis === undefined) {
+      return await ctx.crash({
         exitCode: 1,
         errorType: "fatal",
         printedMessage:
-          "The target backend does not support --force-node-cutover. Remove the option or use a backend that advertises forced Node cutover protocol version 1.",
+          "The target backend does not return code generation analysis from deployment preflight. Update the backend before running this version of `convex codegen`.",
       });
     }
-    logMessage(
-      chalkStderr.yellow(
-        "Warning: forced Node cutover can interrupt actions whose external effects may already have completed. Read authoritative state before retrying an interrupted action.",
-      ),
+    pushAnalysis = { analysis: evaluatePushResponse.analysis };
+    if (options.verbose) {
+      logMessage(
+        "evaluatePush: " + JSON.stringify(evaluatePushResponse, null, 2),
+      );
+    }
+  } else {
+    changeSpinner("Uploading functions to Convex...");
+    startPushResponse = await parentSpan.enterAsync("startPush", (span) =>
+      startPush(ctx, span, startPushRequest, options),
     );
-  }
+    pushAnalysis = startPushResponse;
 
-  if (options.verbose) {
-    logMessage("startPush: " + JSON.stringify(startPushResponse, null, 2));
+    if (options.forceNodeCutover && !options.dryRun) {
+      if (startPushResponse.nodeExecutorCutoverProtocolVersion !== 1) {
+        await ctx.crash({
+          exitCode: 1,
+          errorType: "fatal",
+          printedMessage:
+            "The target backend does not support --force-node-cutover. Remove the option or use a backend that advertises forced Node cutover protocol version 1.",
+        });
+      }
+      logMessage(
+        chalkStderr.yellow(
+          "Warning: forced Node cutover can interrupt actions whose external effects may already have completed. Read authoritative state before retrying an interrupted action.",
+        ),
+      );
+    }
+
+    if (options.verbose) {
+      logMessage("startPush: " + JSON.stringify(startPushResponse, null, 2));
+    }
   }
 
   if (options.codegen) {
@@ -506,7 +539,7 @@ async function startComponentsPushAndCodegen(
             tmpDir,
             rootComponent,
             rootComponent,
-            startPushResponse,
+            pushAnalysis,
             components,
             options,
           );
@@ -527,7 +560,7 @@ async function startComponentsPushAndCodegen(
             tmpDir,
             rootComponent,
             directory,
-            startPushResponse,
+            pushAnalysis,
             components,
             options,
           );
@@ -615,13 +648,10 @@ export async function runComponentsPush(
   const startPushResponse = await pushSpan.enterAsync(
     "startComponentsPushAndCodegen",
     (span) =>
-      startComponentsPushAndCodegen(
-        ctx,
-        span,
-        projectConfig,
-        configPath,
-        options,
-      ),
+      startComponentsPushAndCodegen(ctx, span, projectConfig, configPath, {
+        ...options,
+        pushMode: "deployment",
+      }),
   );
   if (!startPushResponse) {
     return;

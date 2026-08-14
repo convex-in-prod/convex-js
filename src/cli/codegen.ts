@@ -67,7 +67,8 @@ export const codegen = new Command("codegen")
       liveComponentSources: !!options.liveComponentSources,
       debugNodeApis: false,
       systemUdfs: !!options.systemUdfs,
-      largeIndexDeletionCheck: "no verification" as const, // `codegen` is a read-only operation
+      // Codegen does not commit pending schemas or indexes.
+      largeIndexDeletionCheck: "no verification" as const,
       codegenOnlyThisComponent: options.componentDir,
     };
 
