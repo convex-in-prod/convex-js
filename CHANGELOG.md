@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `npx convex codegen` now obtains server analysis through deployment preflight
+  without committing pending schemas or indexes or starting index backfills. It
+  reports an explicit error when the target backend's preflight response does
+  not include code generation analysis.
+
 ## 1.44.0
 
 - `schema.doc(tableName)` returns the validator for whole documents of a table:
