@@ -12,7 +12,31 @@ The commits are the source authority. Applications consume an immutable package
 produced from one exact commit; they do not install this Git branch or rewrite
 installed Convex files.
 
+Backend patches and the backend sides of cross-repository contracts are indexed
+in the
+[`convex-backend` maintained patch set](https://github.com/convex-in-prod/convex-backend/blob/main/patches/README.md).
+
 ## Maintained changes
+
+### Typed completed HTTP failures
+
+`ConvexHttpClient` throws `ConvexHttpError` for a completed non-UDF HTTP
+failure. The error retains the HTTP status and response text, plus the parsed
+response body when the response declares valid JSON. Transport failures and
+incomplete response bodies remain ordinary transport errors because they do not
+provide a completed server result. This lets downstream consumers distinguish
+explicit server rejection from an ambiguous request outcome without parsing
+error messages or intercepting the client's fetch implementation.
+
+The error also exposes `executionStatus = "rejected_before_execution"` for a
+completed JSON HTTP 503 whose exact short code is emitted by the backend's
+`ErrorCode::RejectedBeforeExecution` paths. The backend currently omits that
+semantic category from HTTP JSON, so the client maintains the compatibility set
+from `RejectedBeforeExecutionReason::error_metadata` in
+`crates/isolate/src/metrics.rs`. When rebasing, review every set member for
+exclusive use by rejected-before-execution paths and add new backend members
+only after that review. Missing a new member fails closed; status, response
+text, malformed JSON, and unknown short codes never grant this classification.
 
 ### Terminal OCC mutation retry
 
