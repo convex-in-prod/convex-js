@@ -16,6 +16,10 @@
   without committing pending schemas or indexes or starting index backfills. It
   reports an explicit error when the target backend's preflight response does
   not include code generation analysis.
+- `ConvexHttpClient` now throws `ConvexHttpError` for completed non-UDF HTTP
+  failures. The error retains the HTTP status, response text, and parsed JSON
+  body when available, and identifies completed backend responses that prove
+  function execution was rejected before it started.
 
 ## 1.44.0
 
