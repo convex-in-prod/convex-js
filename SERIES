@@ -7,3 +7,4 @@
 0006-codegen-use-non-committing-deployment-analysis.patch 7da4e2586dc203753a9f39023df6ebc4ecbeb3c1
 0007-packaging-build-SHA-derived-peer-compatible-package.patch ff0749792c36168e858b3ae780d59a997ca993ad
 0008-packages-colocate-published-Convex-archives.patch 245c25072e828d459145bcc545f1fe9dd0da8627
+0009-http-client-classify-pre-execution-HTTP-rejections.patch 52746ea1cad7928879934d8e6e8aa89ff87e49c4

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Mon, 20 Jul 2026 16:27:40 +0800
-Subject: [PATCH 7/8] packaging: build SHA-derived peer-compatible package
+Subject: [PATCH 7/9] packaging: build SHA-derived peer-compatible package
 
 Record the exact upstream base and document the maintained patch stack. Add a manually dispatched workflow that verifies one exact source commit, appends source-derived SemVer build metadata, embeds full source and upstream provenance, and uploads the packed artifact.
 

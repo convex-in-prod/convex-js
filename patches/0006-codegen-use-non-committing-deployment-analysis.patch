@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Fri, 14 Aug 2026 11:52:23 +0800
-Subject: [PATCH 6/8] codegen: use non-committing deployment analysis
+Subject: [PATCH 6/9] codegen: use non-committing deployment analysis
 
 Route standalone codegen through evaluate_push with an explicit analysis request instead of beginning the start_push deployment lifecycle. Refuse older backend responses without analysis rather than falling back to a request that can publish pending schema and index metadata.
 

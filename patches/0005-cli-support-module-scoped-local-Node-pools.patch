@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 12 Aug 2026 13:32:50 +0800
-Subject: [PATCH 5/8] cli: support module-scoped local Node pools
+Subject: [PATCH 5/9] cli: support module-scoped local Node pools
 
 Parse and preserve required module-scoped Node pool declarations through bundling and deployment metadata. Keep the declaration attached to the entry module, reject invalid or ambiguous combinations, and include dedicated-pool modules in Node bundle telemetry.
 

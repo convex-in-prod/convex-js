@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Mon, 20 Jul 2026 14:02:18 +0800
-Subject: [PATCH 4/8] bundler: support default database context reuse
+Subject: [PATCH 4/9] bundler: support default database context reuse
 
 Add a disabled-by-default root-application bundling policy that emits Convex's existing experimental_reuseContext marker for isolate entries. Keep reviewed exceptions in a centralized reasoned map and fail when exclusions are stale or source output carries a competing marker.
 

@@ -1,0 +1,361 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Thu, 20 Aug 2026 18:37:52 +0800
+Subject: [PATCH 9/9] http-client: classify pre-execution HTTP rejections
+
+Represent completed non-UDF HTTP failures with a public ConvexHttpError that retains the status, complete response text, and parsed JSON when the server declares valid JSON. Transport failures and incomplete bodies remain ordinary errors because they do not prove a server result.\n\nMirror the backend's reviewed rejected-before-execution short codes at the HTTP boundary, where the wire response currently omits the semantic category. Require the exact 503 status and structured code, and leave unknown or malformed responses unclassified so the execution guarantee fails closed.\n\nThis centralizes the compatibility contract for SDK consumers and avoids downstream response-message parsing or duplicated backend code lists.
+---
+ CHANGELOG.md                    |   4 +
+ patches/README.md               |  24 ++++++
+ src/browser/http_client.test.ts | 135 ++++++++++++++++++++++++++++++++
+ src/browser/http_client.ts      |  94 ++++++++++++++++++++--
+ src/browser/index.ts            |   2 +-
+ 5 files changed, 253 insertions(+), 6 deletions(-)
+ create mode 100644 src/browser/http_client.test.ts
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 3c2cc54fa2521aff326472ef1172667358a97f2f..08eaa5b577cb10a0f9c925e37e3812f7bed00fa9 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,10 @@
+ 
+ ## Unreleased
+ 
++- `ConvexHttpClient` now throws `ConvexHttpError` for completed non-UDF HTTP
++  failures. The error retains the HTTP status, response text, and parsed JSON
++  body when available, and identifies completed backend responses that prove
++  function execution was rejected before it started.
+ - `npx convex codegen` now obtains server analysis through deployment preflight
+   without committing pending schemas or indexes or starting index backfills. It
+   reports an explicit error when the target backend's preflight response does
+diff --git a/patches/README.md b/patches/README.md
+index 4a869b6883cf7a6cbac7fae91f8f713a99da2072..21c9928adb23ab0d49ebb8cae702a13f2378e66a 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -12,8 +12,32 @@ The commits are the source authority. Applications consume an immutable package
+ produced from one exact commit; they do not install this Git branch or rewrite
+ installed Convex files.
+ 
++Backend patches and the backend sides of cross-repository contracts are indexed
++in the
++[`convex-backend` maintained patch set](https://github.com/convex-in-prod/convex-backend/blob/main/patches/README.md).
++
+ ## Maintained changes
+ 
++### Typed completed HTTP failures
++
++`ConvexHttpClient` throws `ConvexHttpError` for a completed non-UDF HTTP
++failure. The error retains the HTTP status and response text, plus the parsed
++response body when the response declares valid JSON. Transport failures and
++incomplete response bodies remain ordinary transport errors because they do not
++provide a completed server result. This lets downstream consumers distinguish
++explicit server rejection from an ambiguous request outcome without parsing
++error messages or intercepting the client's fetch implementation.
++
++The error also exposes `executionStatus = "rejected_before_execution"` for a
++completed JSON HTTP 503 whose exact short code is emitted by the backend's
++`ErrorCode::RejectedBeforeExecution` paths. The backend currently omits that
++semantic category from HTTP JSON, so the client maintains the compatibility set
++from `RejectedBeforeExecutionReason::error_metadata` in
++`crates/isolate/src/metrics.rs`. When rebasing, review every set member for
++exclusive use by rejected-before-execution paths and add new backend members
++only after that review. Missing a new member fails closed; status, response
++text, malformed JSON, and unknown short codes never grant this classification.
++
+ ### Terminal OCC mutation retry
+ 
+ The client and action context retry a mutation once after a terminal
+diff --git a/src/browser/http_client.test.ts b/src/browser/http_client.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e826cefcfb7bb620e18d9095b7fd27d6d6bf6957
+--- /dev/null
++++ b/src/browser/http_client.test.ts
+@@ -0,0 +1,135 @@
++import { describe, expect, test, vi } from "vitest";
++import { makeFunctionReference } from "../server/api.js";
++import { ConvexHttpClient, ConvexHttpError } from "./index.js";
++
++const mutation = makeFunctionReference<"mutation", { value: string }, string>(
++  "test:mutation",
++);
++
++const rejectedBeforeExecutionCodes = [
++  "ExpiredInQueue",
++  "WorkerOverloaded",
++  "IsolateNotClean",
++  "InitialPermitTimeoutError",
++  "ExecuteFullError",
++] as const;
++
++describe("ConvexHttpClient HTTP errors", () => {
++  test("preserves a completed JSON failure as a typed HTTP error", async () => {
++    const responseBody = {
++      code: "ExpiredInQueue",
++      message: "Request expired while waiting for execution admission",
++    };
++    const localFetch = vi.fn<typeof fetch>().mockResolvedValue(
++      new Response(JSON.stringify(responseBody), {
++        status: 503,
++        headers: { "content-type": "application/json; charset=utf-8" },
++      }),
++    );
++    const client = new ConvexHttpClient("https://http-error.convex.cloud", {
++      fetch: localFetch,
++    });
++
++    const failure = await client
++      .mutation(mutation, { value: "test" })
++      .catch((error: unknown) => error);
++
++    expect(failure).toBeInstanceOf(ConvexHttpError);
++    expect(failure).toMatchObject({
++      name: "ConvexHttpError",
++      status: 503,
++      responseText: JSON.stringify(responseBody),
++      responseJson: responseBody,
++      executionStatus: "rejected_before_execution",
++    });
++  });
++
++  test.each(rejectedBeforeExecutionCodes)(
++    "classifies completed %s as rejected before execution",
++    async (code) => {
++      const localFetch = vi.fn<typeof fetch>().mockResolvedValue(
++        new Response(JSON.stringify({ code, message: "Admission rejected" }), {
++          status: 503,
++          headers: { "content-type": "application/json" },
++        }),
++      );
++      const client = new ConvexHttpClient(
++        "https://execution-rejection.convex.cloud",
++        { fetch: localFetch },
++      );
++
++      const failure = await client
++        .mutation(mutation, { value: "test" })
++        .catch((error: unknown) => error);
++
++      expect(failure).toMatchObject({
++        executionStatus: "rejected_before_execution",
++      });
++    },
++  );
++
++  test("does not classify an unknown completed 503 code", async () => {
++    const localFetch = vi.fn<typeof fetch>().mockResolvedValue(
++      new Response(JSON.stringify({ code: "FutureAdmissionFailure" }), {
++        status: 503,
++        headers: { "content-type": "application/json" },
++      }),
++    );
++    const client = new ConvexHttpClient(
++      "https://unknown-http-error.convex.cloud",
++      { fetch: localFetch },
++    );
++
++    const failure = await client
++      .mutation(mutation, { value: "test" })
++      .catch((error: unknown) => error);
++
++    expect(failure).toMatchObject({ executionStatus: undefined });
++  });
++
++  test("does not classify a known code with a different status", async () => {
++    const localFetch = vi.fn<typeof fetch>().mockResolvedValue(
++      new Response(JSON.stringify({ code: "ExpiredInQueue" }), {
++        status: 500,
++        headers: { "content-type": "application/json" },
++      }),
++    );
++    const client = new ConvexHttpClient(
++      "https://wrong-status-http-error.convex.cloud",
++      { fetch: localFetch },
++    );
++
++    const failure = await client
++      .mutation(mutation, { value: "test" })
++      .catch((error: unknown) => error);
++
++    expect(failure).toMatchObject({ executionStatus: undefined });
++  });
++
++  test("does not invent structured data for a malformed JSON failure", async () => {
++    const localFetch = vi.fn<typeof fetch>().mockResolvedValue(
++      new Response("{not-json", {
++        status: 503,
++        headers: { "content-type": "application/json" },
++      }),
++    );
++    const client = new ConvexHttpClient(
++      "https://malformed-error.convex.cloud",
++      {
++        fetch: localFetch,
++      },
++    );
++
++    const failure = await client
++      .mutation(mutation, { value: "test" })
++      .catch((error: unknown) => error);
++
++    expect(failure).toBeInstanceOf(ConvexHttpError);
++    expect(failure).toMatchObject({
++      status: 503,
++      responseText: "{not-json",
++      responseJson: undefined,
++      executionStatus: undefined,
++    });
++  });
++});
+diff --git a/src/browser/http_client.ts b/src/browser/http_client.ts
+index 90e0f156dc70c880642ad549af215b00d7b0d14d..9d679e1ff6941cb0aa5fe444baf26e38c2e968d3 100644
+--- a/src/browser/http_client.ts
++++ b/src/browser/http_client.ts
+@@ -37,6 +37,90 @@ export const STATUS_CODE_BAD_REQUEST = 400;
+ // Must match the constant of the same name in the backend.
+ export const STATUS_CODE_UDF_FAILED = 560;
+ 
++const STATUS_CODE_SERVICE_UNAVAILABLE = 503;
++
++// The HTTP protocol exposes ErrorMetadata.short_msg as `code`, but not the backend's
++// ErrorCode::RejectedBeforeExecution category. Keep this compatibility set aligned with
++// RejectedBeforeExecutionReason::error_metadata in crates/isolate/src/metrics.rs. Missing a new
++// code fails closed as an unclassified HTTP error; never infer this guarantee from status or text.
++const REJECTED_BEFORE_EXECUTION_CODES: ReadonlySet<string> = new Set([
++  "ExpiredInQueue",
++  "WorkerOverloaded",
++  "IsolateNotClean",
++  "InitialPermitTimeoutError",
++  "ExecuteFullError",
++]);
++
++function executionStatus(
++  status: number,
++  responseJson: unknown | undefined,
++): "rejected_before_execution" | undefined {
++  if (
++    status !== STATUS_CODE_SERVICE_UNAVAILABLE ||
++    typeof responseJson !== "object" ||
++    responseJson === null ||
++    !("code" in responseJson) ||
++    typeof responseJson.code !== "string" ||
++    !REJECTED_BEFORE_EXECUTION_CODES.has(responseJson.code)
++  ) {
++    return undefined;
++  }
++  return "rejected_before_execution";
++}
++
++/**
++ * A completed non-UDF HTTP error response from a Convex deployment.
++ *
++ * Transport failures can reject before a response is available and therefore do not use this
++ * class. `responseJson` is present only when the completed response declares JSON content and the
++ * body parses successfully. `executionStatus` is present only for an exact completed backend
++ * rejection that guarantees function execution did not start.
++ *
++ * @public
++ */
++export class ConvexHttpError extends Error {
++  readonly name = "ConvexHttpError";
++  readonly status: number;
++  readonly responseText: string;
++  readonly responseJson: unknown | undefined;
++  readonly executionStatus: "rejected_before_execution" | undefined;
++
++  constructor(
++    status: number,
++    responseText: string,
++    responseJson: unknown | undefined,
++  ) {
++    super(responseText);
++    this.status = status;
++    this.responseText = responseText;
++    this.responseJson = responseJson;
++    this.executionStatus = executionStatus(status, responseJson);
++  }
++}
++
++async function completedHttpError(
++  response: Response,
++): Promise<ConvexHttpError> {
++  // Reading the complete body is what distinguishes a typed server response from an ambiguous
++  // transport failure. Keep malformed or non-JSON bodies as text without inventing structured
++  // fields that callers could mistake for protocol evidence.
++  const responseText = await response.text();
++  const contentType = response.headers
++    .get("content-type")
++    ?.split(";", 1)[0]
++    ?.trim()
++    .toLowerCase();
++  let responseJson: unknown | undefined;
++  if (contentType === "application/json") {
++    try {
++      responseJson = JSON.parse(responseText) as unknown;
++    } catch {
++      responseJson = undefined;
++    }
++  }
++  return new ConvexHttpError(response.status, responseText, responseJson);
++}
++
+ // Allow fetch to be shimmed in for Node.js < 18
+ let specifiedFetch: typeof globalThis.fetch | undefined = undefined;
+ export function setFetch(f: typeof globalThis.fetch) {
+@@ -260,7 +344,7 @@ export class ConvexHttpClient {
+       headers: headers,
+     });
+     if (!response.ok) {
+-      throw new Error(await response.text());
++      throw await completedHttpError(response);
+     }
+     const { ts } = (await response.json()) as { ts: string };
+     return ts;
+@@ -321,7 +405,7 @@ export class ConvexHttpClient {
+       headers: headers,
+     });
+     if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+-      throw new Error(await response.text());
++      throw await completedHttpError(response);
+     }
+     const respJSON = await response.json();
+ 
+@@ -386,7 +470,7 @@ export class ConvexHttpClient {
+       headers: headers,
+     });
+     if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+-      throw new Error(await response.text());
++      throw await completedHttpError(response);
+     }
+     const respJSON = await response.json();
+     if (this.debug) {
+@@ -520,7 +604,7 @@ export class ConvexHttpClient {
+       headers: headers,
+     });
+     if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+-      throw new Error(await response.text());
++      throw await completedHttpError(response);
+     }
+     const respJSON = await response.json();
+     if (this.debug) {
+@@ -589,7 +673,7 @@ export class ConvexHttpClient {
+       headers: headers,
+     });
+     if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+-      throw new Error(await response.text());
++      throw await completedHttpError(response);
+     }
+     const respJSON = await response.json();
+     if (this.debug) {
+diff --git a/src/browser/index.ts b/src/browser/index.ts
+index 6d8046dd45117f540f77b42ba2d8b54a6eea8d46..2303c26ac97be46db259ab7b2712d3789f58d7a3 100644
+--- a/src/browser/index.ts
++++ b/src/browser/index.ts
+@@ -39,7 +39,7 @@ export type {
+ export type { QueryToken } from "./sync/udf_path_utils.js";
+ /** @internal */
+ export type { PaginatedQueryToken } from "./sync/udf_path_utils.js";
+-export { ConvexHttpClient } from "./http_client.js";
++export { ConvexHttpClient, ConvexHttpError } from "./http_client.js";
+ export type { HttpMutationOptions } from "./http_client.js";
+ export type { QueryJournal } from "./sync/protocol.js";
+ /** @internal */
