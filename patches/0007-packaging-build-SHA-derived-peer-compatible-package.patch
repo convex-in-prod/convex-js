@@ -17,11 +17,11 @@ Keep the source package name and version unchanged in Git. Build metadata identi
 
 diff --git a/.convex-in-prod-upstream b/.convex-in-prod-upstream
 new file mode 100644
-index 0000000000000000000000000000000000000000..f6c320f7ee29e840be004da6d0f216f4830808d8
+index 0000000000000000000000000000000000000000..23c728b62070603bb307da682c12f702b09e3b06
 --- /dev/null
 +++ b/.convex-in-prod-upstream
 @@ -0,0 +1 @@
-+194859a579dda5b9646180816e24fd9009fbfbc5
++31b96b867ecdb5a54378d233193042432ae7f754
 diff --git a/.github/workflows/build-convex-in-prod.yml b/.github/workflows/build-convex-in-prod.yml
 new file mode 100644
 index 0000000000000000000000000000000000000000..ab69dc289c5b7b9a104a8ac2c022ebc4de75f4d2

@@ -14,13 +14,13 @@ Represent completed non-UDF HTTP failures with a public ConvexHttpError that ret
  create mode 100644 src/browser/http_client.test.ts
 
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 3c2cc54fa2521aff326472ef1172667358a97f2f..08eaa5b577cb10a0f9c925e37e3812f7bed00fa9 100644
+index 2c032abdfd803b4425b8b14712493575802236a7..51e3165c93b564a69d78bb39013520fdd8f13337 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,10 @@
- 
- ## Unreleased
- 
+@@ -5,6 +5,10 @@
+ - Local deployments now upgrade to a new backend version in place, instead of
+   going through a snapshot export and import. Upgrades no longer depend on the
+   size of your local data, and no longer prompt about transferring it.
 +- `ConvexHttpClient` now throws `ConvexHttpError` for completed non-UDF HTTP
 +  failures. The error retains the HTTP status, response text, and parsed JSON
 +  body when available, and identifies completed backend responses that prove

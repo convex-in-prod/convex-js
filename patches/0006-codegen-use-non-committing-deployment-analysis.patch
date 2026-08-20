@@ -9,7 +9,7 @@ Keep dev and deploy on start_push, omit the analysis request from deployment pre
 
 Add response-decoder coverage, operator patch guidance, and an Unreleased changelog entry.
 ---
- CHANGELOG.md                               |  7 ++
+ CHANGELOG.md                               |  4 ++
  src/cli/codegen.ts                         |  3 +-
  src/cli/codegen_templates/component_api.ts | 28 ++++----
  src/cli/codegen_templates/dataModel.ts     | 16 ++---
@@ -18,26 +18,24 @@ Add response-decoder coverage, operator patch guidance, and an Unreleased change
  src/cli/lib/deploy2.ts                     |  8 ++-
  src/cli/lib/deployApi/startPush.test.ts    | 22 ++++++
  src/cli/lib/deployApi/startPush.ts         | 14 +++-
- 9 files changed, 151 insertions(+), 67 deletions(-)
+ 9 files changed, 148 insertions(+), 67 deletions(-)
  create mode 100644 src/cli/lib/deployApi/startPush.test.ts
 
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 5f660aad60263ea5705f3fdaf11a54ff4f69d0c1..3c2cc54fa2521aff326472ef1172667358a97f2f 100644
+index c2ba32f205978837ab312e44aef4ddb6f08b9684..2c032abdfd803b4425b8b14712493575802236a7 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -1,5 +1,12 @@
- # Changelog
- 
-+## Unreleased
-+
+@@ -5,6 +5,10 @@
+ - Local deployments now upgrade to a new backend version in place, instead of
+   going through a snapshot export and import. Upgrades no longer depend on the
+   size of your local data, and no longer prompt about transferring it.
 +- `npx convex codegen` now obtains server analysis through deployment preflight
 +  without committing pending schemas or indexes or starting index backfills. It
 +  reports an explicit error when the target backend's preflight response does
 +  not include code generation analysis.
-+
+ 
  ## 1.44.0
  
- - `schema.doc(tableName)` returns the validator for whole documents of a table:
 diff --git a/src/cli/codegen.ts b/src/cli/codegen.ts
 index 2538b957ff95de9100fb24b3fe84f613d8d90a68..8f72fc320a90c110ea4f8d088a84a36db3dab201 100644
 --- a/src/cli/codegen.ts
