@@ -5,6 +5,10 @@
 - Local deployments now upgrade to a new backend version in place, instead of
   going through a snapshot export and import. Upgrades no longer depend on the
   size of your local data, and no longer prompt about transferring it.
+- `ConvexHttpClient` now throws `ConvexHttpError` for completed non-UDF HTTP
+  failures. The error retains the HTTP status, response text, and parsed JSON
+  body when available, and identifies completed backend responses that prove
+  function execution was rejected before it started.
 - `npx convex codegen` now obtains server analysis through deployment preflight
   without committing pending schemas or indexes or starting index backfills. It
   reports an explicit error when the target backend's preflight response does
