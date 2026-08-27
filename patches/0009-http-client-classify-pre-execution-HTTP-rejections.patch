@@ -14,20 +14,20 @@ Represent completed non-UDF HTTP failures with a public ConvexHttpError that ret
  create mode 100644 src/browser/http_client.test.ts
 
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 2c032abdfd803b4425b8b14712493575802236a7..51e3165c93b564a69d78bb39013520fdd8f13337 100644
+index 0b7867752462858b37dba6fc735b121379caa92c..a5f2940c0429cdd2c3070d383f5a9596a321b189 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -5,6 +5,10 @@
- - Local deployments now upgrade to a new backend version in place, instead of
-   going through a snapshot export and import. Upgrades no longer depend on the
-   size of your local data, and no longer prompt about transferring it.
+@@ -16,6 +16,10 @@
+   without committing pending schemas or indexes or starting index backfills. It
+   reports an explicit error when the target backend's preflight response does
+   not include code generation analysis.
 +- `ConvexHttpClient` now throws `ConvexHttpError` for completed non-UDF HTTP
 +  failures. The error retains the HTTP status, response text, and parsed JSON
 +  body when available, and identifies completed backend responses that prove
 +  function execution was rejected before it started.
- - `npx convex codegen` now obtains server analysis through deployment preflight
-   without committing pending schemas or indexes or starting index backfills. It
-   reports an explicit error when the target backend's preflight response does
+ 
+ ## 1.44.0
+ 
 diff --git a/patches/README.md b/patches/README.md
 index 4a869b6883cf7a6cbac7fae91f8f713a99da2072..21c9928adb23ab0d49ebb8cae702a13f2378e66a 100644
 --- a/patches/README.md

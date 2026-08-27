@@ -524,7 +524,7 @@ index b71e6044d1b8037c8215f5067c13b09063bb4787..37ccee6f182ea9c4c5a616d6a99b19ba
  
  /**
 diff --git a/src/server/impl/actions_impl.ts b/src/server/impl/actions_impl.ts
-index b4c1260baa88d0a6849ea8a503bb2bd5f2ef7c12..70e2c912fc3c7ef803544664819d2cfdce229a6c 100644
+index 0b32321a4b27af74708cb59ec6c33784e1c93185..30aec48556b3d4237bdd6651f596ad8b97194c3a 100644
 --- a/src/server/impl/actions_impl.ts
 +++ b/src/server/impl/actions_impl.ts
 @@ -5,6 +5,11 @@ import { parseArgs } from "../../common/index.js";

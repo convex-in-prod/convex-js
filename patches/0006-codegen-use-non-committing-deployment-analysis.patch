@@ -22,13 +22,13 @@ Add response-decoder coverage, operator patch guidance, and an Unreleased change
  create mode 100644 src/cli/lib/deployApi/startPush.test.ts
 
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index c2ba32f205978837ab312e44aef4ddb6f08b9684..2c032abdfd803b4425b8b14712493575802236a7 100644
+index cd505eaec31e6e203788e80f3c7838d18bb7878f..0b7867752462858b37dba6fc735b121379caa92c 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -5,6 +5,10 @@
- - Local deployments now upgrade to a new backend version in place, instead of
-   going through a snapshot export and import. Upgrades no longer depend on the
-   size of your local data, and no longer prompt about transferring it.
+@@ -12,6 +12,10 @@
+   gateway.
+ - Improved the error message when `npx convex export` fails because a snapshot
+   export is already in progress.
 +- `npx convex codegen` now obtains server analysis through deployment preflight
 +  without committing pending schemas or indexes or starting index backfills. It
 +  reports an explicit error when the target backend's preflight response does

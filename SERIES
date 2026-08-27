@@ -1,10 +1,10 @@
 # patch-file source-commit
-0001-client-retry-write-conflict-mutations.patch beb46f52795b23af3680994424f7deac8243be96
-0002-sync-add-degradable-query-pressure-protocol.patch 4b6846ab0a60a2114f1202551e4d2240ee4f92cc
-0003-react-expose-local-query-result-removal.patch 8090677987584f29beb0dfbc23dd2650f0119ab8
-0004-bundler-support-default-database-context-reuse.patch 2bda7562ab88c8d7a70b6409be1caaaeb7b2801d
-0005-cli-support-module-scoped-local-Node-pools.patch 413ca7be30e06fa9f0173e6fa3c322685832acaf
-0006-codegen-use-non-committing-deployment-analysis.patch b5135401d846cd613ea41427ab8df7bf1f6237ff
-0007-packaging-build-SHA-derived-peer-compatible-package.patch f2eaff23321b5aa5bb305a3e7b4ebd2c55fbd4d7
-0008-packages-colocate-published-Convex-archives.patch 5695f9aec2c8661400ab88184f25346ef38629d6
-0009-http-client-classify-pre-execution-HTTP-rejections.patch 44308d867298f715e4daf55ac08fc3126f69d295
+0001-client-retry-write-conflict-mutations.patch b1c2bcb07ac2209819a9dbf9ae4228b398c64a45
+0002-sync-add-degradable-query-pressure-protocol.patch 25787161ff9931154bc4ab8cf83134abdf248b25
+0003-react-expose-local-query-result-removal.patch 8dd2b9485bd39f587d62fa6263333ade57af359a
+0004-bundler-support-default-database-context-reuse.patch c2abaf2f96b606d788c50b8211993d67cabfcdd4
+0005-cli-support-module-scoped-local-Node-pools.patch c1f4cbc3a6b2318fd2fdb12b6cdacbb6e2a5a65c
+0006-codegen-use-non-committing-deployment-analysis.patch c24c877bf145ee95ca96cdda7035cc8173b448be
+0007-packaging-build-SHA-derived-peer-compatible-package.patch 1061b6d9ec662663ad909af0529d5a0d95e328a3
+0008-packages-colocate-published-Convex-archives.patch b5b21bd17b473a6fa4a2c14b98af71ef73f80282
+0009-http-client-classify-pre-execution-HTTP-rejections.patch 94738efee58bfa44c7bbcbc95f9d30493ba83ca1
