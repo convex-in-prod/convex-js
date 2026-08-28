@@ -1,37 +1,50 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Mon, 20 Jul 2026 14:02:18 +0800
-Subject: [PATCH 4/9] bundler: support default database context reuse
+Subject: [PATCH 4/9] bundler: support centralized context reuse policy
 
-Add a disabled-by-default root-application bundling policy that emits Convex's existing experimental_reuseContext marker for isolate entries. Keep reviewed exceptions in a centralized reasoned map and fail when exclusions are stale or source output carries a competing marker.
+Add a disabled-by-default root-application bundling policy that emits
+Convex's existing boolean experimental_reuseContext marker for isolate
+entries. Keep reviewed exceptions in a centralized reasoned map and fail
+when exclusions are stale or source output carries a competing marker.
 
-Leave imported components, Node modules, schema bundles, and auth configuration bundles unchanged. Document the operator contract and cover marker insertion, exclusions, conflicts, and stale exclusion paths.
+Allow applications targeting a backend with typed context-reuse policy to
+enable reviewed HTTP-action graphs from the same setting. Emit a typed
+policy that enables queries, mutations, and HTTP actions while leaving
+ordinary actions fresh. Keep this extension explicit and default it to
+false so existing users continue to emit the ordinary upstream marker.
+
+Leave imported components, Node modules, schema bundles, and auth
+configuration bundles unchanged. Document the backend compatibility
+contract and cover boolean and typed marker insertion, exclusions,
+conflicts, and stale exclusion paths.
 ---
- .../default_database_context_reuse/README.md  |  63 ++++++
- schemas/convex.schema.json                    |  23 ++
- src/bundler/contextReuse.test.ts              | 204 ++++++++++++++++++
- src/bundler/index.ts                          | 139 +++++++++++-
+ .../default_database_context_reuse/README.md  |  70 ++++++
+ schemas/convex.schema.json                    |  28 +++
+ src/bundler/contextReuse.test.ts              | 212 ++++++++++++++++++
+ src/bundler/index.ts                          | 147 +++++++++++-
  src/cli/lib/components.ts                     |   6 +
- src/cli/lib/components/definition/bundle.ts   |  13 ++
- src/cli/lib/config.ts                         |  42 ++++
- 7 files changed, 489 insertions(+), 1 deletion(-)
+ src/cli/lib/components/definition/bundle.ts   |  15 ++
+ src/cli/lib/config.ts                         |  51 +++++
+ 7 files changed, 528 insertions(+), 1 deletion(-)
  create mode 100644 patches/default_database_context_reuse/README.md
  create mode 100644 src/bundler/contextReuse.test.ts
 
 diff --git a/patches/default_database_context_reuse/README.md b/patches/default_database_context_reuse/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..f2ba9602a29651b51b7be56dec8dc90d057ffd39
+index 0000000000000000000000000000000000000000..2cc8d9e53ff23622038ad54a84d3df9b6be586ab
 --- /dev/null
 +++ b/patches/default_database_context_reuse/README.md
-@@ -0,0 +1,63 @@
-+# Default database-context reuse during bundling
+@@ -0,0 +1,70 @@
++# Default context reuse during bundling
 +
 +## Purpose
 +
 +Upstream Convex enables reusable database-UDF contexts one entry module at a
-+time through `experimental_reuseContext = true`. That is a useful canary
-+interface, but it becomes repetitive when an application has reviewed all of its
-+query and mutation entry graphs and wants reuse to be the normal policy.
++time through `experimental_reuseContext = true`. A backend with typed
++context-reuse policy can additionally allow ordinary or HTTP actions. These are
++useful canary interfaces, but they become repetitive when an application has
++reviewed its entry graphs and wants reuse to be the normal policy.
 +
 +This patch adds one disabled-by-default Convex CLI setting:
 +
@@ -40,6 +53,7 @@ index 0000000000000000000000000000000000000000..f2ba9602a29651b51b7be56dec8dc90d
 +  "bundler": {
 +    "experimentalContextReuse": {
 +      "default": true,
++      "httpActions": true,
 +      "exclusions": {
 +        "generated/auth.ts": "The generated authentication graph remains under separate review."
 +      }
@@ -48,13 +62,14 @@ index 0000000000000000000000000000000000000000..f2ba9602a29651b51b7be56dec8dc90d
 +}
 +```
 +
-+When enabled, the isolate bundler adds the ordinary upstream
-+`experimental_reuseContext = true` export to every root-application isolate
-+entry output except the listed paths. Paths are relative to the configured
++When `httpActions` is absent or false, the isolate bundler adds the ordinary
++upstream `experimental_reuseContext = true` export to every root-application
++isolate entry output except the listed paths. When `httpActions` is true, it
++instead emits one typed policy that enables queries, mutations, and HTTP actions
++while leaving ordinary actions disabled. Paths are relative to the configured
 +functions directory. Imported Convex components retain their own source policy.
-+The backend receives no application module allowlist and needs no new protocol
-+field. Node entry modules, schema bundles, and auth configuration bundles are
-+unchanged.
++The backend receives no application module allowlist. Node entry modules, schema
++bundles, and auth configuration bundles are unchanged.
 +
 +The reason strings keep exceptional modules and their operator rationale
 +together. Application tooling should verify that exclusions still name
@@ -66,9 +81,12 @@ index 0000000000000000000000000000000000000000..f2ba9602a29651b51b7be56dec8dc90d
 +## Compatibility and safety
 +
 +The setting is absent by default, preserving upstream explicit opt-in behavior.
-+When it is enabled, entry source files must not also export
-+`experimental_reuseContext`; one authority owns the emitted marker so source and
-+bundle policy cannot silently disagree.
++`httpActions` separately defaults to false, so existing users continue to emit
++the upstream boolean marker. Enabling it requires a backend that accepts typed
++context-reuse policy; an ordinary upstream backend does not interpret the typed
++object as an opt-in. When the setting is enabled, entry source files must not
++also export `experimental_reuseContext`; one authority owns the emitted marker
++so source and bundle policy cannot silently disagree.
 +
 +The patch changes only module analysis input. Reuse remains opportunistic and
 +all backend eligibility, UDF-type, cancellation, read-set validation, cache, and
@@ -78,20 +96,21 @@ index 0000000000000000000000000000000000000000..f2ba9602a29651b51b7be56dec8dc90d
 +
 +## Rollback
 +
-+For one entry, add a reviewed exclusion and redeploy the application. For a
-+global rollback, remove `bundler.experimentalContextReuse` and every explicit
-+source marker, perform one complete root-application deployment, and restart
-+backend workers to clear saved contexts before traffic resumes.
++For one entry, add a reviewed exclusion and redeploy the application. To disable
++only HTTP-action reuse, set `httpActions` to false and redeploy the application.
++For a global rollback, remove `bundler.experimentalContextReuse` and every
++explicit source marker, perform one complete root-application deployment, and
++restart backend workers to clear saved contexts before traffic resumes.
 +
 +Current upstream has no backend-wide database-UDF context-reuse switch. An exact
 +previous-image and configuration rollback restores that image's runtime
 +contract, but does not prove a global disable unless the previous image,
 +configuration, and complete application analysis establish that state.
 diff --git a/schemas/convex.schema.json b/schemas/convex.schema.json
-index 0acb473379e310693b20b7440135807bff754549..f7f980787d03d5fcbc713e2876a2125b292a88bc 100644
+index 0acb473379e310693b20b7440135807bff754549..5f1ac6f36682a6ad35e810fd323439c9bbf46a06 100644
 --- a/schemas/convex.schema.json
 +++ b/schemas/convex.schema.json
-@@ -174,6 +174,29 @@
+@@ -174,6 +174,34 @@
            "description": "Whether to include original source code in source maps. Set to false to reduce bundle size.",
            "default": false,
            "deprecated": true
@@ -114,6 +133,11 @@ index 0acb473379e310693b20b7440135807bff754549..f7f980787d03d5fcbc713e2876a2125b
 +                "minLength": 32
 +              },
 +              "default": {}
++            },
++            "httpActions": {
++              "type": "boolean",
++              "description": "Allow HTTP actions in included root isolate entries to reuse initialized contexts. This requires a backend that supports typed context-reuse policy.",
++              "default": false
 +            }
 +          },
 +          "required": ["default"],
@@ -123,10 +147,10 @@ index 0acb473379e310693b20b7440135807bff754549..f7f980787d03d5fcbc713e2876a2125b
      },
 diff --git a/src/bundler/contextReuse.test.ts b/src/bundler/contextReuse.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ed36f2cd5f0f98a682111374f27d7aa8b29b0a2e
+index 0000000000000000000000000000000000000000..30a340f6e1587371d6ab826c242f237fa7a66d1c
 --- /dev/null
 +++ b/src/bundler/contextReuse.test.ts
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,212 @@
 +import { mkdtemp, rm, writeFile } from "node:fs/promises";
 +import { tmpdir } from "node:os";
 +import path from "node:path";
@@ -164,11 +188,22 @@ index 0000000000000000000000000000000000000000..ed36f2cd5f0f98a682111374f27d7aa8
 +      await applyDefaultContextReusePolicy(
 +        testContext,
 +        "const value = 1;\nexport { value };\n//# sourceMappingURL=entry.js.map\n",
-+        true,
-+        "included.ts",
++        { enabled: true, httpActions: false, entry: "included.ts" },
 +      ),
 +    ).toBe(
 +      "const value = 1;\nexport { value };\nexport const experimental_reuseContext = true;\n//# sourceMappingURL=entry.js.map\n",
++    );
++  });
++
++  test("adds a typed policy when HTTP action reuse is enabled", async () => {
++    expect(
++      await applyDefaultContextReusePolicy(
++        testContext,
++        "const value = 1;\nexport { value };\n",
++        { enabled: true, httpActions: true, entry: "http.ts" },
++      ),
++    ).toBe(
++      "const value = 1;\nexport { value };\nexport const experimental_reuseContext = { queries: true, mutations: true, actions: false, httpActions: true };\n",
 +    );
 +  });
 +
@@ -176,12 +211,11 @@ index 0000000000000000000000000000000000000000..ed36f2cd5f0f98a682111374f27d7aa8
 +    const source = "const value = 1;\nexport { value };\n";
 +
 +    expect(
-+      await applyDefaultContextReusePolicy(
-+        testContext,
-+        source,
-+        false,
-+        "excluded.ts",
-+      ),
++      await applyDefaultContextReusePolicy(testContext, source, {
++        enabled: false,
++        httpActions: true,
++        entry: "excluded.ts",
++      }),
 +    ).toBe(source);
 +  });
 +
@@ -189,22 +223,20 @@ index 0000000000000000000000000000000000000000..ed36f2cd5f0f98a682111374f27d7aa8
 +    const source = "const value = 1;\nexport { value };\n";
 +    const markedEntry: Bundle = {
 +      path: "entry.js",
-+      source: await applyDefaultContextReusePolicy(
-+        testContext,
-+        source,
-+        true,
-+        "entry.ts",
-+      ),
++      source: await applyDefaultContextReusePolicy(testContext, source, {
++        enabled: true,
++        httpActions: false,
++        entry: "entry.ts",
++      }),
 +      environment: "isolate",
 +    };
 +    const freshEntry: Bundle = {
 +      ...markedEntry,
-+      source: await applyDefaultContextReusePolicy(
-+        testContext,
-+        source,
-+        false,
-+        "entry.ts",
-+      ),
++      source: await applyDefaultContextReusePolicy(testContext, source, {
++        enabled: false,
++        httpActions: false,
++        entry: "entry.ts",
++      }),
 +    };
 +    const sharedModule: Bundle = {
 +      path: "_deps/shared.js",
@@ -250,16 +282,14 @@ index 0000000000000000000000000000000000000000..ed36f2cd5f0f98a682111374f27d7aa8
 +      applyDefaultContextReusePolicy(
 +        testContext,
 +        "const marker = true;\nexport { marker as experimental_reuseContext };\n",
-+        false,
-+        "marked.ts",
++        { enabled: false, httpActions: false, entry: "marked.ts" },
 +      ),
 +    ).rejects.toThrow(/marked\.ts.*must not export experimental_reuseContext/u);
 +    await expect(
 +      applyDefaultContextReusePolicy(
 +        testContext,
 +        "export const experimental_reuseContext = true;\n",
-+        true,
-+        "marked.ts",
++        { enabled: true, httpActions: false, entry: "marked.ts" },
 +      ),
 +    ).rejects.toThrow(/marked\.ts.*must not export experimental_reuseContext/u);
 +  });
@@ -286,6 +316,7 @@ index 0000000000000000000000000000000000000000..ed36f2cd5f0f98a682111374f27d7aa8
 +            "excluded.ts":
 +              "This fixture entry remains fresh to verify the bundle-time exclusion path.",
 +          },
++          httpActions: true,
 +        },
 +      });
 +
@@ -296,7 +327,7 @@ index 0000000000000000000000000000000000000000..ed36f2cd5f0f98a682111374f27d7aa8
 +        (module) => module.path === "excluded.js",
 +      );
 +      expect(includedBundle?.source).toContain(
-+        "export const experimental_reuseContext = true;",
++        "export const experimental_reuseContext = { queries: true, mutations: true, actions: false, httpActions: true };",
 +      );
 +      expect(excludedBundle?.source).not.toContain("experimental_reuseContext");
 +    } finally {
@@ -323,6 +354,7 @@ index 0000000000000000000000000000000000000000..ed36f2cd5f0f98a682111374f27d7aa8
 +              "stale.ts":
 +                "This fixture path must fail because it is not a root isolate entry.",
 +            },
++            httpActions: false,
 +          },
 +        }),
 +      ).rejects.toThrow(/Unmatched exclusions: stale\.ts/u);
@@ -332,21 +364,30 @@ index 0000000000000000000000000000000000000000..ed36f2cd5f0f98a682111374f27d7aa8
 +  });
 +});
 diff --git a/src/bundler/index.ts b/src/bundler/index.ts
-index 915c65a54f6f45f2b3ec459060ed60e3478684a8..cd99fb8d5533cb47afc2bf0feb674fad1cd348a3 100644
+index 915c65a54f6f45f2b3ec459060ed60e3478684a8..b8f1317c68b38cc3b06c47da0664e2e7463d0328 100644
 --- a/src/bundler/index.ts
 +++ b/src/bundler/index.ts
-@@ -69,6 +69,82 @@ type EsBuildResult = esbuild.BuildResult & {
+@@ -69,6 +69,93 @@ type EsBuildResult = esbuild.BuildResult & {
    bundledModuleNames: Set<string>;
  };
  
 +type ExperimentalContextReuse = {
 +  rootDir: string;
 +  exclusions: Record<string, string>;
++  httpActions: boolean;
 +};
 +
 +const contextReuseExportName = "experimental_reuseContext";
-+const defaultContextReuseExport =
++const defaultDatabaseContextReuseExport =
 +  "export const experimental_reuseContext = true;\n";
++const defaultDatabaseAndHttpActionContextReuseExport =
++  "export const experimental_reuseContext = { queries: true, mutations: true, actions: false, httpActions: true };\n";
++
++type ContextReuseOutputPolicy = {
++  enabled: boolean;
++  httpActions: boolean;
++  entry: string;
++};
 +
 +function exportedName(identifier: Identifier | { value: string }): string {
 +  return "name" in identifier ? identifier.name : identifier.value;
@@ -386,26 +427,28 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..cd99fb8d5533cb47afc2bf0feb674fad
 +export async function applyDefaultContextReusePolicy(
 +  ctx: Context,
 +  source: string,
-+  enabled: boolean,
-+  entry: string,
++  policy: ContextReuseOutputPolicy,
 +): Promise<string> {
 +  if (exportsContextReuse(source)) {
 +    return await ctx.crash({
 +      exitCode: 1,
 +      errorType: "invalid filesystem data",
-+      printedMessage: `Cannot apply the default context-reuse policy to ${entry}: Entry modules must not export ${contextReuseExportName} when bundler.experimentalContextReuse owns the default policy.`,
++      printedMessage: `Cannot apply the default context-reuse policy to ${policy.entry}: Entry modules must not export ${contextReuseExportName} when bundler.experimentalContextReuse owns the default policy.`,
 +    });
 +  }
 +
-+  if (!enabled) {
++  if (!policy.enabled) {
 +    return source;
 +  }
 +
++  const contextReuseExport = policy.httpActions
++    ? defaultDatabaseAndHttpActionContextReuseExport
++    : defaultDatabaseContextReuseExport;
 +  const sourceMapComment = source.match(/\/\/# sourceMappingURL=[^\n]*\n?$/u);
 +  if (sourceMapComment === null || sourceMapComment.index === undefined) {
-+    return `${source.endsWith("\n") ? source : `${source}\n`}${defaultContextReuseExport}`;
++    return `${source.endsWith("\n") ? source : `${source}\n`}${contextReuseExport}`;
 +  }
-+  return `${source.slice(0, sourceMapComment.index)}${defaultContextReuseExport}${source.slice(sourceMapComment.index)}`;
++  return `${source.slice(0, sourceMapComment.index)}${contextReuseExport}${source.slice(sourceMapComment.index)}`;
 +}
 +
 +function normalizedEntryPath(rootDir: string, entryPoint: string): string {
@@ -418,7 +461,7 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..cd99fb8d5533cb47afc2bf0feb674fad
  async function doEsbuild({
    ctx,
    dir,
-@@ -190,6 +266,7 @@ export async function bundle({
+@@ -190,6 +277,7 @@ export async function bundle({
    extraConditions = [],
    includeSourcesContent = false,
    splitting,
@@ -426,7 +469,7 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..cd99fb8d5533cb47afc2bf0feb674fad
  }: {
    ctx: Context;
    dir: string;
-@@ -201,6 +278,7 @@ export async function bundle({
+@@ -201,6 +289,7 @@ export async function bundle({
    extraConditions?: string[];
    includeSourcesContent?: boolean;
    splitting?: boolean;
@@ -434,14 +477,11 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..cd99fb8d5533cb47afc2bf0feb674fad
  }): Promise<{
    modules: Bundle[];
    externalDependencies: Map<string, string>;
-@@ -239,6 +317,53 @@ export async function bundle({
+@@ -239,6 +328,51 @@ export async function bundle({
    const sourceMaps = new Map();
    const modules: Bundle[] = [];
    const environment = platform === "node" ? "node" : "isolate";
-+  const contextReuseOutputPolicy = new Map<
-+    string,
-+    { enabled: boolean; entry: string }
-+  >();
++  const contextReuseOutputPolicy = new Map<string, ContextReuseOutputPolicy>();
 +  if (experimentalContextReuse !== undefined) {
 +    const unmatchedExcludedEntries = new Set(
 +      Object.keys(experimentalContextReuse.exclusions).map((entry) =>
@@ -477,6 +517,7 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..cd99fb8d5533cb47afc2bf0feb674fad
 +        }
 +        contextReuseOutputPolicy.set(path.resolve(outputPath), {
 +          enabled,
++          httpActions: experimentalContextReuse.httpActions,
 +          entry: normalizedEntryPath(
 +            experimentalContextReuse.rootDir,
 +            entryPoint,
@@ -488,7 +529,7 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..cd99fb8d5533cb47afc2bf0feb674fad
    for (const outputFile of result.outputFiles) {
      const relPath = path.relative(path.normalize("out"), outputFile.path);
      if (path.extname(relPath) === ".map") {
-@@ -246,7 +371,19 @@ export async function bundle({
+@@ -246,7 +380,18 @@ export async function bundle({
        continue;
      }
      const posixRelPath = relPath.split(path.sep).join(path.posix.sep);
@@ -501,8 +542,7 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..cd99fb8d5533cb47afc2bf0feb674fad
 +      source = await applyDefaultContextReusePolicy(
 +        ctx,
 +        source,
-+        contextReusePolicy.enabled,
-+        contextReusePolicy.entry,
++        contextReusePolicy,
 +      );
 +    }
 +    modules.push({ path: posixRelPath, source, environment });
@@ -527,7 +567,7 @@ index 0d2b7ecf277d376f3d68f807be1d38149af06a24..0545b41c491bc6ba17e2f649a7dc3123
      );
    if (options.debugBundlePath) {
 diff --git a/src/cli/lib/components/definition/bundle.ts b/src/cli/lib/components/definition/bundle.ts
-index 31ea965da98b8586f230e2be7caf6a78354468c5..064002b675f6caf51986bffde1c3889c1c4ceb9d 100644
+index 31ea965da98b8586f230e2be7caf6a78354468c5..84ca37bf654440ce18a2dbcc8d1bef38ab9e82cb 100644
 --- a/src/cli/lib/components/definition/bundle.ts
 +++ b/src/cli/lib/components/definition/bundle.ts
 @@ -626,6 +626,7 @@ export async function bundleImplementations({
@@ -538,18 +578,19 @@ index 31ea965da98b8586f230e2be7caf6a78354468c5..064002b675f6caf51986bffde1c3889c
  }: {
    ctx: Context;
    rootComponentDirectory: ComponentDirectory;
-@@ -634,6 +635,10 @@ export async function bundleImplementations({
+@@ -634,6 +635,11 @@ export async function bundleImplementations({
    extraConditions: string[];
    verbose: boolean;
    includeSourcesContent?: boolean;
 +  experimentalContextReuse?: {
 +    default: true;
 +    exclusions: Record<string, string>;
++    httpActions: boolean;
 +  };
  }): Promise<{
    appImplementation: {
      schema: Bundle | null;
-@@ -684,6 +689,14 @@ export async function bundleImplementations({
+@@ -684,6 +690,15 @@ export async function bundleImplementations({
        platform: "browser",
        extraConditions,
        includeSourcesContent,
@@ -559,27 +600,29 @@ index 31ea965da98b8586f230e2be7caf6a78354468c5..064002b675f6caf51986bffde1c3889c
 +            experimentalContextReuse: {
 +              rootDir: path.resolve(rootComponentDirectory.path),
 +              exclusions: experimentalContextReuse.exclusions,
++              httpActions: experimentalContextReuse.httpActions,
 +            },
 +          }),
      });
  
      if (convexResult.externalDependencies.size !== 0) {
 diff --git a/src/cli/lib/config.ts b/src/cli/lib/config.ts
-index e8346558630246b45a16d673f9be9785e08d33f0..678f3657be23458ae523a4e52ca59b2cb1cfdcb4 100644
+index e8346558630246b45a16d673f9be9785e08d33f0..3c6ec0277e99f27e6726a076a855a7836caa6c5b 100644
 --- a/src/cli/lib/config.ts
 +++ b/src/cli/lib/config.ts
-@@ -95,6 +95,10 @@ export interface ProjectConfig {
+@@ -95,6 +95,11 @@ export interface ProjectConfig {
  
    bundler?: {
      includeSourcesContent?: boolean;
 +    experimentalContextReuse?: {
 +      default: true;
 +      exclusions: Record<string, string>;
++      httpActions: boolean;
 +    };
    };
  
    typescriptCompiler?: TypescriptCompiler;
-@@ -296,6 +300,35 @@ const BundlerSchema = z.object({
+@@ -296,6 +301,41 @@ const BundlerSchema = z.object({
      .describe(
        "Whether to include original source code in source maps. Set to false to reduce bundle size.",
      ),
@@ -606,6 +649,12 @@ index e8346558630246b45a16d673f9be9785e08d33f0..678f3657be23458ae523a4e52ca59b2c
 +        .describe(
 +          "Convex entry paths, relative to the functions directory, that must remain fresh, mapped to operator review reasons.",
 +        ),
++      httpActions: z
++        .boolean()
++        .default(false)
++        .describe(
++          "Allow HTTP actions in included root isolate entries to reuse initialized contexts. This requires a backend that supports typed context-reuse policy.",
++        ),
 +    })
 +    .strict()
 +    .optional()
@@ -615,7 +664,7 @@ index e8346558630246b45a16d673f9be9785e08d33f0..678f3657be23458ae523a4e52ca59b2c
  });
  
  const AiFilesSchema = z.object({
-@@ -635,6 +668,15 @@ export async function configFromProjectConfig(
+@@ -635,6 +675,17 @@ export async function configFromProjectConfig(
      entryPoints: entryPoints.isolate,
      generateSourceMaps: true,
      platform: "browser",
@@ -626,6 +675,8 @@ index e8346558630246b45a16d673f9be9785e08d33f0..678f3657be23458ae523a4e52ca59b2c
 +            rootDir: baseDir,
 +            exclusions:
 +              projectConfig.bundler.experimentalContextReuse.exclusions,
++            httpActions:
++              projectConfig.bundler.experimentalContextReuse.httpActions,
 +          },
 +        }),
    });

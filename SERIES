@@ -2,9 +2,9 @@
 0001-client-retry-write-conflict-mutations.patch b1c2bcb07ac2209819a9dbf9ae4228b398c64a45
 0002-sync-add-degradable-query-pressure-protocol.patch 25787161ff9931154bc4ab8cf83134abdf248b25
 0003-react-expose-local-query-result-removal.patch 8dd2b9485bd39f587d62fa6263333ade57af359a
-0004-bundler-support-default-database-context-reuse.patch c2abaf2f96b606d788c50b8211993d67cabfcdd4
-0005-cli-support-module-scoped-local-Node-pools.patch c1f4cbc3a6b2318fd2fdb12b6cdacbb6e2a5a65c
-0006-codegen-use-non-committing-deployment-analysis.patch c24c877bf145ee95ca96cdda7035cc8173b448be
-0007-packaging-build-SHA-derived-peer-compatible-package.patch 1061b6d9ec662663ad909af0529d5a0d95e328a3
-0008-packages-colocate-published-Convex-archives.patch b5b21bd17b473a6fa4a2c14b98af71ef73f80282
-0009-http-client-classify-pre-execution-HTTP-rejections.patch 94738efee58bfa44c7bbcbc95f9d30493ba83ca1
+0004-bundler-support-centralized-context-reuse-policy.patch f17222eea27062e67abdb748dd4ca0744ff2560b
+0005-cli-support-module-scoped-local-Node-pools.patch 007f4c77c8548c654b496fa73db3f4d626e87f54
+0006-codegen-use-non-committing-deployment-analysis.patch 43dafbd9a9f092d86e3f4533bcb898972bbf5be3
+0007-packaging-build-SHA-derived-peer-compatible-package.patch 3fb4628578ebff1f84b6d88a8536cb75ff3d12e3
+0008-packages-colocate-published-Convex-archives.patch feb21cc60499a62656666351118eb8efb47d1a1f
+0009-http-client-classify-pre-execution-HTTP-rejections.patch 785d029aadfd49a7fe492b5a3237e5f2e09bb069

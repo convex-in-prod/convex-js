@@ -9,8 +9,8 @@ Keep the source package name and version unchanged in Git. Build metadata identi
 ---
  .convex-in-prod-upstream                   |   1 +
  .github/workflows/build-convex-in-prod.yml | 152 +++++++++++++++++++++
- patches/README.md                          |  97 +++++++++++++
- 3 files changed, 250 insertions(+)
+ patches/README.md                          |  99 ++++++++++++++
+ 3 files changed, 252 insertions(+)
  create mode 100644 .convex-in-prod-upstream
  create mode 100644 .github/workflows/build-convex-in-prod.yml
  create mode 100644 patches/README.md
@@ -182,10 +182,10 @@ index 0000000000000000000000000000000000000000..ab69dc289c5b7b9a104a8ac2c022ebc4
 +          NODE
 diff --git a/patches/README.md b/patches/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..69f313bbcbad9afb5ac403ba139dc41569cf65e0
+index 0000000000000000000000000000000000000000..54286775609c3f4f23c2b542e449230cfe55208f
 --- /dev/null
 +++ b/patches/README.md
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,99 @@
 +# Convex-In-Prod Patch Stack
 +
 +The fork's `main` branch carries a short generic patch stack over the exact
@@ -231,12 +231,14 @@ index 0000000000000000000000000000000000000000..69f313bbcbad9afb5ac403ba139dc415
 +one-shot retries and resumed subscriptions on the actual sync transition instead
 +of fixed delays or access to internal client state.
 +
-+### Default database-context reuse during bundling
++### Default context reuse during bundling
 +
 +Applications that have reviewed their database-UDF graphs may make the upstream
 +`experimental_reuseContext` export a bundle-time default and retain a small,
-+reasoned exclusion map. The setting is disabled by default and does not place
-+application module names in backend logic. See
++reasoned exclusion map. With a backend that accepts typed context-reuse policy,
++the same centralized setting can also enable reviewed HTTP-action graphs while
++ordinary actions remain fresh. Both settings are disabled by default and do not
++place application module names in backend logic. See
 +[`default_database_context_reuse/README.md`](default_database_context_reuse/README.md).
 +
 +### Module-scoped Node pools

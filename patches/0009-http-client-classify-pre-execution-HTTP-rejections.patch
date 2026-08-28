@@ -29,7 +29,7 @@ index 0b7867752462858b37dba6fc735b121379caa92c..a5f2940c0429cdd2c3070d383f5a9596
  ## 1.44.0
  
 diff --git a/patches/README.md b/patches/README.md
-index 4a869b6883cf7a6cbac7fae91f8f713a99da2072..21c9928adb23ab0d49ebb8cae702a13f2378e66a 100644
+index db5142ddca55526b95e7163c617a33919f050b23..8c3b0630c97dff40a97d2ee93e42d37e2bd895d1 100644
 --- a/patches/README.md
 +++ b/patches/README.md
 @@ -12,8 +12,32 @@ The commits are the source authority. Applications consume an immutable package

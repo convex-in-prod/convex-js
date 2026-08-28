@@ -177,7 +177,7 @@ index 0000000000000000000000000000000000000000..5506beb91a83daf7d34c9dd7baa25a20
 +  });
 +});
 diff --git a/src/bundler/index.ts b/src/bundler/index.ts
-index cd99fb8d5533cb47afc2bf0feb674fad1cd348a3..165f9ebf843042ad44f9f2246b9cea1432a92796 100644
+index b8f1317c68b38cc3b06c47da0664e2e7463d0328..e872d0a7a8fff43904f9eec740bba552feb0c41c 100644
 --- a/src/bundler/index.ts
 +++ b/src/bundler/index.ts
 @@ -46,19 +46,21 @@ export function* walkDir(
@@ -203,7 +203,7 @@ index cd99fb8d5533cb47afc2bf0feb674fad1cd348a3..165f9ebf843042ad44f9f2246b9cea14
  }
  
  type EsBuildResult = esbuild.BuildResult & {
-@@ -267,6 +269,7 @@ export async function bundle({
+@@ -278,6 +280,7 @@ export async function bundle({
    includeSourcesContent = false,
    splitting,
    experimentalContextReuse,
@@ -211,7 +211,7 @@ index cd99fb8d5533cb47afc2bf0feb674fad1cd348a3..165f9ebf843042ad44f9f2246b9cea14
  }: {
    ctx: Context;
    dir: string;
-@@ -279,6 +282,7 @@ export async function bundle({
+@@ -290,6 +293,7 @@ export async function bundle({
    includeSourcesContent?: boolean;
    splitting?: boolean;
    experimentalContextReuse?: ExperimentalContextReuse;
@@ -219,7 +219,7 @@ index cd99fb8d5533cb47afc2bf0feb674fad1cd348a3..165f9ebf843042ad44f9f2246b9cea14
  }): Promise<{
    modules: Bundle[];
    externalDependencies: Map<string, string>;
-@@ -317,6 +321,13 @@ export async function bundle({
+@@ -328,6 +332,13 @@ export async function bundle({
    const sourceMaps = new Map();
    const modules: Bundle[] = [];
    const environment = platform === "node" ? "node" : "isolate";
@@ -230,11 +230,11 @@ index cd99fb8d5533cb47afc2bf0feb674fad1cd348a3..165f9ebf843042ad44f9f2246b9cea14
 +    ]),
 +  );
 +  const assignedNodePoolEntryPoints = new Set<string>();
-   const contextReuseOutputPolicy = new Map<
-     string,
-     { enabled: boolean; entry: string }
-@@ -383,7 +394,33 @@ export async function bundle({
-         contextReusePolicy.entry,
+   const contextReuseOutputPolicy = new Map<string, ContextReuseOutputPolicy>();
+   if (experimentalContextReuse !== undefined) {
+     const unmatchedExcludedEntries = new Set(
+@@ -391,7 +402,33 @@ export async function bundle({
+         contextReusePolicy,
        );
      }
 -    modules.push({ path: posixRelPath, source, environment });
@@ -268,7 +268,7 @@ index cd99fb8d5533cb47afc2bf0feb674fad1cd348a3..165f9ebf843042ad44f9f2246b9cea14
    }
    for (const module of modules) {
      const sourceMapPath = module.path + ".map";
-@@ -636,13 +673,16 @@ export async function entryPoints(
+@@ -644,13 +681,16 @@ export async function entryPoints(
  
  // A fallback regex in case we fail to parse the AST.
  export const useNodeDirectiveRegex = /^\s*("|')use node("|');?\s*$/;
@@ -287,7 +287,7 @@ index cd99fb8d5533cb47afc2bf0feb674fad1cd348a3..165f9ebf843042ad44f9f2246b9cea14
    }
  
    // We parse the AST here to extract the "use node" declaration. This is more
-@@ -656,27 +696,26 @@ function hasUseNodeDirective(ctx: Context, fpath: string): boolean {
+@@ -664,27 +704,26 @@ function hasUseNodeDirective(ctx: Context, fpath: string): boolean {
        // here too.
        plugins: ["jsx", "typescript"],
      });
@@ -324,7 +324,7 @@ index cd99fb8d5533cb47afc2bf0feb674fad1cd348a3..165f9ebf843042ad44f9f2246b9cea14
    }
  }
  
-@@ -694,7 +733,41 @@ async function determineEnvironment(
+@@ -702,7 +741,41 @@ async function determineEnvironment(
  ): Promise<ModuleEnvironment> {
    const relPath = path.relative(dir, fpath);
  
@@ -367,7 +367,7 @@ index cd99fb8d5533cb47afc2bf0feb674fad1cd348a3..165f9ebf843042ad44f9f2246b9cea14
    if (useNodeDirectiveFound) {
      if (mustBeIsolate(relPath)) {
        return await ctx.crash({
-@@ -703,7 +776,7 @@ async function determineEnvironment(
+@@ -711,7 +784,7 @@ async function determineEnvironment(
          printedMessage: `"use node" directive is not allowed for ${relPath}.`,
        });
      }
@@ -376,7 +376,7 @@ index cd99fb8d5533cb47afc2bf0feb674fad1cd348a3..165f9ebf843042ad44f9f2246b9cea14
    }
  
    const actionsPrefix = actionsDir + path.sep;
-@@ -721,14 +794,18 @@ async function determineEnvironment(
+@@ -729,14 +802,18 @@ async function determineEnvironment(
  export async function entryPointsByEnvironment(ctx: Context, dir: string) {
    const isolate = [];
    const node = [];
@@ -520,10 +520,10 @@ index 0545b41c491bc6ba17e2f649a7dc3123804607b1..d9ad10aa21d05b978abf4ac2dda353af
          nodeCount += 1;
        }
 diff --git a/src/cli/lib/components/definition/bundle.ts b/src/cli/lib/components/definition/bundle.ts
-index 064002b675f6caf51986bffde1c3889c1c4ceb9d..d5f5e35df520a5aa5584394215d47ac78b72cbe5 100644
+index 84ca37bf654440ce18a2dbcc8d1bef38ab9e82cb..7ded319d58dac723d5815ca623d98490790438ef 100644
 --- a/src/cli/lib/components/definition/bundle.ts
 +++ b/src/cli/lib/components/definition/bundle.ts
-@@ -719,6 +719,7 @@ export async function bundleImplementations({
+@@ -721,6 +721,7 @@ export async function bundleImplementations({
          ctx,
          dir: resolvedPath,
          entryPoints: entryPoints.node,
@@ -531,7 +531,7 @@ index 064002b675f6caf51986bffde1c3889c1c4ceb9d..d5f5e35df520a5aa5584394215d47ac7
          generateSourceMaps: true,
          platform: "node",
          chunksFolder: path.join("_deps", "node"),
-@@ -754,6 +755,7 @@ export async function bundleImplementations({
+@@ -756,6 +757,7 @@ export async function bundleImplementations({
            ctx,
            dir: resolvedPath,
            entryPoints: entryPoints.node,
@@ -540,10 +540,10 @@ index 064002b675f6caf51986bffde1c3889c1c4ceb9d..d5f5e35df520a5aa5584394215d47ac7
            platform: "node",
            chunksFolder: path.join("_deps", "node"),
 diff --git a/src/cli/lib/config.ts b/src/cli/lib/config.ts
-index 678f3657be23458ae523a4e52ca59b2cb1cfdcb4..d5f5a65002a427e21032d677033bf5b54ed0c28b 100644
+index 3c6ec0277e99f27e6726a076a855a7836caa6c5b..425ffea3050498b98808233ca7db5cccc8d5c21e 100644
 --- a/src/cli/lib/config.ts
 +++ b/src/cli/lib/config.ts
-@@ -693,6 +693,7 @@ export async function configFromProjectConfig(
+@@ -702,6 +702,7 @@ export async function configFromProjectConfig(
      ctx,
      dir: baseDir,
      entryPoints: entryPoints.node,
