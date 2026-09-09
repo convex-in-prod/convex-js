@@ -550,10 +550,10 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..b8f1317c68b38cc3b06c47da0664e2e7
    for (const module of modules) {
      const sourceMapPath = module.path + ".map";
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index 0d2b7ecf277d376f3d68f807be1d38149af06a24..0545b41c491bc6ba17e2f649a7dc3123804607b1 100644
+index 598c6127455c29dd1286fd26f2e3c795684ccfc0..894605b3ab072194e6a8346e6b29da1c481b2f1e 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
-@@ -366,6 +366,12 @@ async function startComponentsPushAndCodegen(
+@@ -372,6 +372,12 @@ async function startComponentsPushAndCodegen(
          verbose: options.verbose,
          includeSourcesContent:
            projectConfig.bundler?.includeSourcesContent ?? false,

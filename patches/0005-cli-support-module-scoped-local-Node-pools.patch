@@ -398,7 +398,7 @@ index b8f1317c68b38cc3b06c47da0664e2e7463d0328..e872d0a7a8fff43904f9eec740bba552
 +  return { isolate, node, nodePools };
  }
 diff --git a/src/cli/deploy.ts b/src/cli/deploy.ts
-index 4dbc3542906a149ea824ddd5dde2568e42408bc4..81fd83a239f9133c19fc1f3712479cd88aac2cdc 100644
+index aa6f3d863f0ea179d87508ee4e69e41aac5ad9ae..00d79dda73af68ffe32d610c113ecb5c4eb5f4d5 100644
 --- a/src/cli/deploy.ts
 +++ b/src/cli/deploy.ts
 @@ -238,6 +238,7 @@ async function deployToNewPreviewDeployment(
@@ -409,15 +409,15 @@ index 4dbc3542906a149ea824ddd5dde2568e42408bc4..81fd83a239f9133c19fc1f3712479cd8
    },
  ) {
    const previewName = options.previewName ?? null;
-@@ -334,6 +335,7 @@ async function deployToNewPreviewDeployment(
-     pushAllModules: !!options.pushAllModules,
+@@ -335,6 +336,7 @@ async function deployToNewPreviewDeployment(
      largeIndexDeletionCheck: "no verification", // fine for preview deployments
+     warnOnSlowSchemaValidation: true,
      message: options.message,
 +    forceNodeCutover: !!options.forceNodeCutover,
    };
    showSpinner(`Deploying to ${previewUrl}...`);
    await runPush(ctx, pushOptions);
-@@ -379,6 +381,7 @@ async function deployToExistingDeployment(
+@@ -380,6 +382,7 @@ async function deployToExistingDeployment(
      skipWorkosCheck?: boolean | undefined;
      allowDeletingLargeIndexes: boolean;
      message: string | null;
@@ -449,18 +449,18 @@ index 8da9f8ee16b46e58d25bce70e39cd1212e7e51bb..8d3a248837e3fe2bc7e941dda6d46945
        new Option(
          "-y, --yes",
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index 0545b41c491bc6ba17e2f649a7dc3123804607b1..d9ad10aa21d05b978abf4ac2dda353af2ac3d617 100644
+index 894605b3ab072194e6a8346e6b29da1c481b2f1e..0a7dba27d9abac4946d8e8f95ee53ef35b2b069c 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
-@@ -76,6 +76,7 @@ export type PushOptions = {
-   logManager?: LogManager | undefined;
-   largeIndexDeletionCheck: LargeIndexDeletionCheck;
+@@ -81,6 +81,7 @@ export type PushOptions = {
+   // runs never deploy (e.g. codegen).
+   warnOnSlowSchemaValidation: boolean;
    message: string | null;
 +  forceNodeCutover: boolean;
  };
  
  export async function runCodegen(
-@@ -150,6 +151,7 @@ export function hash(bundle: Bundle) {
+@@ -155,6 +156,7 @@ export function hash(bundle: Bundle) {
  function isModuleTheSame(newBundle: Bundle, oldBundleHash: BundleHash) {
    return (
      newBundle.environment === oldBundleHash.environment &&
@@ -468,7 +468,7 @@ index 0545b41c491bc6ba17e2f649a7dc3123804607b1..d9ad10aa21d05b978abf4ac2dda353af
      hash(newBundle) === oldBundleHash.hash
    );
  }
-@@ -170,6 +172,7 @@ export function partitionModulesByChanges(
+@@ -175,6 +177,7 @@ export function partitionModulesByChanges(
      .map((func) => ({
        path: func.path,
        environment: func.environment,
@@ -476,15 +476,15 @@ index 0545b41c491bc6ba17e2f649a7dc3123804607b1..d9ad10aa21d05b978abf4ac2dda353af
        sha256: hash(func),
      }));
    const changedModules = functions.filter((newBundle) => {
-@@ -230,6 +233,7 @@ async function startComponentsPushAndCodegen(
-     debugNodeApis: boolean;
+@@ -236,6 +239,7 @@ async function startComponentsPushAndCodegen(
      largeIndexDeletionCheck: LargeIndexDeletionCheck;
+     warnOnSlowSchemaValidation: boolean;
      codegenOnlyThisComponent?: string | undefined;
 +    forceNodeCutover?: boolean | undefined;
    },
  ): Promise<StartPushResponse | null> {
    const convexDir = await getFunctionsDirectoryPath(ctx);
-@@ -469,6 +473,22 @@ async function startComponentsPushAndCodegen(
+@@ -486,6 +490,22 @@ async function startComponentsPushAndCodegen(
      startPush(ctx, span, startPushRequest, options),
    );
  
@@ -507,7 +507,7 @@ index 0545b41c491bc6ba17e2f649a7dc3123804607b1..d9ad10aa21d05b978abf4ac2dda353af
    if (options.verbose) {
      logMessage("startPush: " + JSON.stringify(startPushResponse, null, 2));
    }
-@@ -564,7 +584,10 @@ function logStartPushSizes(span: Span, startPushRequest: StartPushRequest) {
+@@ -581,7 +601,10 @@ function logStartPushSizes(span: Span, startPushRequest: StartPushRequest) {
        if (module.environment === "isolate") {
          v8Size += module.source.length + (module.sourceMap ?? "").length;
          v8Count += 1;
@@ -552,7 +552,7 @@ index 3c6ec0277e99f27e6726a076a855a7836caa6c5b..425ffea3050498b98808233ca7db5ccc
      platform: "node",
      chunksFolder: path.join("_deps", "node"),
 diff --git a/src/cli/lib/deploy2.ts b/src/cli/lib/deploy2.ts
-index 8f278503e4518d98fdaa4c51262c068dfcb56f94..0b5c7e3ec38841daa31e434df4fce2a57cb20f56 100644
+index d275b0b8e2bb89671ec3a7c42f7e7ea4175f3a32..5e89501e7900116935f193b8b8ce08095ebc87fd 100644
 --- a/src/cli/lib/deploy2.ts
 +++ b/src/cli/lib/deploy2.ts
 @@ -11,6 +11,7 @@ import { spawnSync } from "child_process";
@@ -563,7 +563,7 @@ index 8f278503e4518d98fdaa4c51262c068dfcb56f94..0b5c7e3ec38841daa31e434df4fce2a5
    typedDeploymentClient,
  } from "./utils/utils.js";
  import {
-@@ -304,6 +305,7 @@ export async function finishPush(
+@@ -358,6 +359,7 @@ export async function finishPush(
      deploymentName: string | null;
      deploymentType?: DeploymentType;
      message: string | null;
@@ -571,7 +571,7 @@ index 8f278503e4518d98fdaa4c51262c068dfcb56f94..0b5c7e3ec38841daa31e434df4fce2a5
    },
  ): Promise<FinishPushDiff> {
    changeSpinner("Finalizing push...");
-@@ -316,6 +318,8 @@ export async function finishPush(
+@@ -370,6 +372,8 @@ export async function finishPush(
      startPush,
      dryRun: options.dryRun,
      message: options.message,
@@ -580,7 +580,7 @@ index 8f278503e4518d98fdaa4c51262c068dfcb56f94..0b5c7e3ec38841daa31e434df4fce2a5
    };
    try {
      const response = await fetch("/api/deploy2/finish_push", {
-@@ -329,6 +333,17 @@ export async function finishPush(
+@@ -383,6 +387,17 @@ export async function finishPush(
      });
      return finishPushDiff.parse(await response.json());
    } catch (error: unknown) {
@@ -598,7 +598,7 @@ index 8f278503e4518d98fdaa4c51262c068dfcb56f94..0b5c7e3ec38841daa31e434df4fce2a5
      return await handlePushConfigError(
        ctx,
        error,
-@@ -405,6 +420,7 @@ export async function deployToDeployment(
+@@ -459,6 +474,7 @@ export async function deployToDeployment(
      skipWorkosCheck?: boolean | undefined;
      allowDeletingLargeIndexes: boolean;
      message: string | null;
@@ -606,9 +606,9 @@ index 8f278503e4518d98fdaa4c51262c068dfcb56f94..0b5c7e3ec38841daa31e434df4fce2a5
    },
  ) {
    const { url, adminKey } = credentials;
-@@ -454,6 +470,7 @@ export async function deployToDeployment(
-       ? "has confirmation"
+@@ -509,6 +525,7 @@ export async function deployToDeployment(
        : "ask for confirmation",
+     warnOnSlowSchemaValidation: true,
      message: options.message,
 +    forceNodeCutover: !!options.forceNodeCutover,
    };
@@ -720,7 +720,7 @@ index b23da979aa095358a272dd711f3a554e7a208cee..932289ab1575347970e67915a69c4ae8
  export type StartPushResponse = z.infer<typeof startPushResponse>;
  
 diff --git a/src/cli/lib/dev.ts b/src/cli/lib/dev.ts
-index b3259cd9bf0a7b1a9892cb2764552e993d4f4c9b..92fa9f521bd2f64b6b8b93316d513f7f4b14cad1 100644
+index ff0421a339f72b1df3d893f12600bf52e3f8f465..6e0cdc1a060308554a6762f5c64c887917b2d24b 100644
 --- a/src/cli/lib/dev.ts
 +++ b/src/cli/lib/dev.ts
 @@ -138,6 +138,7 @@ export async function devAgainstDeployment(
@@ -732,7 +732,7 @@ index b3259cd9bf0a7b1a9892cb2764552e993d4f4c9b..92fa9f521bd2f64b6b8b93316d513f7f
          typecheckComponents: devOptions.typecheckComponents,
          debug: false,
 diff --git a/src/cli/lib/run.ts b/src/cli/lib/run.ts
-index 80910b35995cfcc80774910b2af0ef53dc6df83f..1499832e22a5d6d0c04589d23aacdf6bc9dc2481 100644
+index b4e770c4131a561b53d8675b5ab57e1b1ec593cd..477bd93fa73f3c6962932d8df8ca6a1811f34b89 100644
 --- a/src/cli/lib/run.ts
 +++ b/src/cli/lib/run.ts
 @@ -527,6 +527,7 @@ export async function pushToDeployment(
