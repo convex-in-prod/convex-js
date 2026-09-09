@@ -26,8 +26,9 @@ To publish a new archive:
 2. Download its artifact and verify the embedded `convexInProd` provenance,
    package version, SHA-512 checksum, and integrity value.
 3. Add a new source-SHA directory and manifest in a separate `packages: publish`
-   commit. Keep the maintained source patch train below publication data
-   commits.
+   commit after its source changes. Later source changes may follow that
+   publication; they do not change the contents or identity of existing
+   archives.
 4. Update the Pages repository workflow to mirror packages from that exact
    publication commit, then verify the existing public URL byte-for-byte.
 
