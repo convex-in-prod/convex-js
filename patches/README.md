@@ -3,10 +3,11 @@
 The fork's `main` branch carries a short generic patch stack over the exact
 upstream commit recorded in `/.convex-in-prod-upstream`.
 
-The stack keeps one commit for each maintained semantic change, followed by one
-release-infrastructure commit that owns the upstream marker, complete patch
-index, and immutable package workflow. Packaging corrections belong in that
-final commit rather than as additional history-only patches.
+The stack keeps semantic changes separate from release infrastructure and
+archive publication. Release infrastructure owns the upstream marker, patch
+index, and immutable package workflow. Later source and packaging corrections
+may follow archive publication commits; patch-history exports source changes
+while excluding `packages/convex/**` archive data.
 
 The commits are the source authority. Applications consume an immutable package
 produced from one exact commit; they do not install this Git branch or rewrite
