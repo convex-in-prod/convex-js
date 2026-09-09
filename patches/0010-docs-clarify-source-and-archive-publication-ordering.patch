@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Thu, 10 Sep 2026 03:38:21 +0800
+Subject: [PATCH 10/10] docs: clarify source and archive publication ordering
+
+Source updates can follow earlier immutable archive publications. Describe the history that the maintained exporter supports, while retaining separate publication commits and the prohibition on overwriting existing archives.
+---
+ packages/README.md | 4 ++--
+ patches/README.md  | 9 +++++----
+ 2 files changed, 7 insertions(+), 6 deletions(-)
+
+diff --git a/packages/README.md b/packages/README.md
+index 9c688c455b34ce0635c40cee94d434939daa4445..1226529cd542e93bcf2927c9e470b8099df1601f 100644
+--- a/packages/README.md
++++ b/packages/README.md
+@@ -26,8 +26,8 @@ To publish a new archive:
+ 2. Download its artifact and verify the embedded `convexInProd` provenance,
+    package version, SHA-512 checksum, and integrity value.
+ 3. Add a new source-SHA directory and manifest in a separate `packages: publish`
+-   commit. Keep the maintained source patch train below publication data
+-   commits.
++   commit after its source changes. Later source changes may follow that
++   publication; they do not change the contents or identity of existing archives.
+ 4. Update the Pages repository workflow to mirror packages from that exact
+    publication commit, then verify the existing public URL byte-for-byte.
+ 
+diff --git a/patches/README.md b/patches/README.md
+index 8c3b0630c97dff40a97d2ee93e42d37e2bd895d1..bdab0933e3964a2fad2ab8a87f64b57682c57cc8 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -3,10 +3,11 @@
+ The fork's `main` branch carries a short generic patch stack over the exact
+ upstream commit recorded in `/.convex-in-prod-upstream`.
+ 
+-The stack keeps one commit for each maintained semantic change, followed by one
+-release-infrastructure commit that owns the upstream marker, complete patch
+-index, and immutable package workflow. Packaging corrections belong in that
+-final commit rather than as additional history-only patches.
++The stack keeps semantic changes separate from release infrastructure and
++archive publication. Release infrastructure owns the upstream marker, patch
++index, and immutable package workflow. Later source and packaging corrections
++may follow archive publication commits; patch-history exports source changes
++while excluding `packages/convex/**` archive data.
+ 
+ The commits are the source authority. Applications consume an immutable package
+ produced from one exact commit; they do not install this Git branch or rewrite

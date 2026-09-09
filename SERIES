@@ -8,3 +8,4 @@
 0007-packaging-build-SHA-derived-peer-compatible-package.patch 2c4f3a2e7356d8904eca61e8a81ffb87f37c8bb9
 0008-packages-colocate-published-Convex-archives.patch b82edb2ecde000b1c467933ff04bcaf0d3e884e6
 0009-http-client-classify-pre-execution-HTTP-rejections.patch c54a17505f744e42bcc4784fa27c48f86a68acfe
+0010-docs-clarify-source-and-archive-publication-ordering.patch d16b1bdd32d1b00903dc7614d2d710f9722142a1
