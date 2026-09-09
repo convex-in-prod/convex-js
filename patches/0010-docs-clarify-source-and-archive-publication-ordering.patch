@@ -5,22 +5,23 @@ Subject: [PATCH 10/10] docs: clarify source and archive publication ordering
 
 Source updates can follow earlier immutable archive publications. Describe the history that the maintained exporter supports, while retaining separate publication commits and the prohibition on overwriting existing archives.
 ---
- packages/README.md | 4 ++--
+ packages/README.md | 5 +++--
  patches/README.md  | 9 +++++----
- 2 files changed, 7 insertions(+), 6 deletions(-)
+ 2 files changed, 8 insertions(+), 6 deletions(-)
 
 diff --git a/packages/README.md b/packages/README.md
-index 9c688c455b34ce0635c40cee94d434939daa4445..1226529cd542e93bcf2927c9e470b8099df1601f 100644
+index 9c688c455b34ce0635c40cee94d434939daa4445..8fb0cac30496951cc757c8bb68477b08e0e4bb54 100644
 --- a/packages/README.md
 +++ b/packages/README.md
-@@ -26,8 +26,8 @@ To publish a new archive:
+@@ -26,8 +26,9 @@ To publish a new archive:
  2. Download its artifact and verify the embedded `convexInProd` provenance,
     package version, SHA-512 checksum, and integrity value.
  3. Add a new source-SHA directory and manifest in a separate `packages: publish`
 -   commit. Keep the maintained source patch train below publication data
 -   commits.
 +   commit after its source changes. Later source changes may follow that
-+   publication; they do not change the contents or identity of existing archives.
++   publication; they do not change the contents or identity of existing
++   archives.
  4. Update the Pages repository workflow to mirror packages from that exact
     publication commit, then verify the existing public URL byte-for-byte.
  
