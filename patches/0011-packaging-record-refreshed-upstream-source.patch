@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Sat, 12 Sep 2026 14:09:46 +0800
-Subject: [PATCH 11/11] packaging: record refreshed upstream source
+Subject: [PATCH 11/12] packaging: record refreshed upstream source
 
 Record the exact upstream source revision used for the refreshed downstream train.
 ---

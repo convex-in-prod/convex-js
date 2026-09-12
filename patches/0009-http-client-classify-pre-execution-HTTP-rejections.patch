@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Thu, 20 Aug 2026 18:37:52 +0800
-Subject: [PATCH 09/11] http-client: classify pre-execution HTTP rejections
+Subject: [PATCH 09/12] http-client: classify pre-execution HTTP rejections
 
 Represent completed non-UDF HTTP failures with a public ConvexHttpError that retains the status, complete response text, and parsed JSON when the server declares valid JSON. Transport failures and incomplete bodies remain ordinary errors because they do not prove a server result.\n\nMirror the backend's reviewed rejected-before-execution short codes at the HTTP boundary, where the wire response currently omits the semantic category. Require the exact 503 status and structured code, and leave unknown or malformed responses unclassified so the execution guarantee fails closed.\n\nThis centralizes the compatibility contract for SDK consumers and avoids downstream response-message parsing or duplicated backend code lists.
 ---

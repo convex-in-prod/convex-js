@@ -10,3 +10,4 @@
 0009-http-client-classify-pre-execution-HTTP-rejections.patch 54e6d7c0fb037c1afb8c2ccc3b2f6718f37ed260
 0010-docs-clarify-source-and-archive-publication-ordering.patch c37867bc736ff66fbfa6c904e4d956d469a3b8a1
 0011-packaging-record-refreshed-upstream-source.patch c6a66139cd4a5de27402b3fd2a217f9e37efb774
+0012-values-remove-retained-UTF-8-comparison-scratch.patch ee8ca00e0e70c3db6f9cf4b87b178d64c9f116f5

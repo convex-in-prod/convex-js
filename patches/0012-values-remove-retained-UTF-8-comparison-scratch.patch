@@ -1,0 +1,260 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Sat, 12 Sep 2026 15:04:41 +0800
+Subject: [PATCH 12/12] values: remove retained UTF-8 comparison scratch
+
+Keep UTF-8 value ordering request-local so reusable function contexts do not retain bytes derived from an earlier invocation. Preserve lone-surrogate ordering and document the downstream context-reuse compatibility change.
+---
+ CHANGELOG.md                    |   3 +
+ patches/README.md               |   8 +++
+ src/values/compare_utf8.test.ts |  69 ++++++++++++++++++
+ src/values/compare_utf8.ts      | 124 ++------------------------------
+ 4 files changed, 84 insertions(+), 120 deletions(-)
+ create mode 100644 src/values/compare_utf8.test.ts
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 6baca5491838185d00d054914b4a858bf08832ac..f132cf74e4f3fd325320fc4196b44c0bb89b2a6b 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -27,6 +27,9 @@
+   failures. The error retains the HTTP status, response text, and parsed JSON
+   body when available, and identifies completed backend responses that prove
+   function execution was rejected before it started.
++- UTF-8 value comparison no longer retains request-derived scratch bytes in
++  module state. String ordering, including the established handling of lone
++  UTF-16 surrogates, is unchanged.
+ 
+ ## 1.44.0
+ 
+diff --git a/patches/README.md b/patches/README.md
+index bdab0933e3964a2fad2ab8a87f64b57682c57cc8..20ae75374561e27144ee04fedf90fa3cacf120d3 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -85,6 +85,14 @@ ordinary actions remain fresh. Both settings are disabled by default and do not
+ place application module names in backend logic. See
+ [`default_database_context_reuse/README.md`](default_database_context_reuse/README.md).
+ 
++### Stateless UTF-8 value comparison
++
++UTF-8 value comparison keeps all request-derived comparison state local to the
++invocation. It preserves the established ordering for well-formed strings and
++lone UTF-16 surrogates without module-scoped scratch arrays. This allows a
++reviewed reusable database-function module context to retain the comparator code
++without retaining bytes derived from an earlier request.
++
+ ### Module-scoped Node pools
+ 
+ Applications may annotate Node modules with a bounded local-pool declaration.
+diff --git a/src/values/compare_utf8.test.ts b/src/values/compare_utf8.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d65b870bb6edf27867f44e97d06521103e6ee79c
+--- /dev/null
++++ b/src/values/compare_utf8.test.ts
+@@ -0,0 +1,69 @@
++import { expect, test } from "vitest";
++
++import { compareUTF8 } from "./compare_utf8.js";
++
++const encoder = new TextEncoder();
++
++function compareEncoded(left: string, right: string): number {
++  const leftBytes = encoder.encode(left);
++  const rightBytes = encoder.encode(right);
++  const length = Math.min(leftBytes.length, rightBytes.length);
++  for (let index = 0; index < length; index += 1) {
++    const difference = leftBytes[index] - rightBytes[index];
++    if (difference !== 0) return difference;
++  }
++  return leftBytes.length - rightBytes.length;
++}
++
++test("compares strings by their UTF-8 byte order", () => {
++  const values = [
++    "",
++    "a",
++    "\u007f",
++    "\u0080",
++    "é",
++    "éa",
++    "éb",
++    "é",
++    "\u07ff",
++    "\u0800",
++    "€",
++    "中",
++    "\ud7ff",
++    "\ue000",
++    "\uffff",
++    "𐀀",
++    "😀",
++    "😀a",
++    "😀b",
++    "\u{10ffff}",
++  ];
++  for (const left of values) {
++    for (const right of values) {
++      expect(Math.sign(compareUTF8(left, right))).toBe(
++        Math.sign(compareEncoded(left, right)),
++      );
++    }
++  }
++});
++
++test("retains the established ordering of lone UTF-16 surrogates", () => {
++  const values = [
++    "\ud7ff",
++    "\ud800",
++    "\ud801",
++    "\udbff",
++    "\udc00",
++    "\udfff",
++    "\ue000",
++    "\ufffd",
++    "\ud800\udc00",
++  ];
++  for (const [leftIndex, left] of values.entries()) {
++    for (const [rightIndex, right] of values.entries()) {
++      expect(Math.sign(compareUTF8(left, right))).toBe(
++        Math.sign(leftIndex - rightIndex),
++      );
++    }
++  }
++});
+diff --git a/src/values/compare_utf8.ts b/src/values/compare_utf8.ts
+index 549c649dadeb2f2117012025b0d196cde366d4df..31b5006c2195394e676d88b8ffa3a4093dfaa7b7 100644
+--- a/src/values/compare_utf8.ts
++++ b/src/values/compare_utf8.ts
+@@ -21,129 +21,13 @@ export function compareUTF8(a: string, b: string): number {
+     const aCodePoint = a.codePointAt(i)!;
+     const bCodePoint = b.codePointAt(i)!;
+     if (aCodePoint !== bCodePoint) {
+-      // Code points below 0x80 are represented the same way in UTF-8 as in
+-      // UTF-16.
+-      if (aCodePoint < 0x80 && bCodePoint < 0x80) {
+-        return aCodePoint - bCodePoint;
+-      }
+-
+-      // get the UTF-8 bytes for the code points
+-      const aLength = utf8Bytes(aCodePoint, aBytes);
+-      const bLength = utf8Bytes(bCodePoint, bBytes);
+-      return compareArrays(aBytes, aLength, bBytes, bLength);
++      // UTF-8 preserves code point order. This also preserves the previous
++      // ordering of lone surrogate code units, which codePointAt returns as-is.
++      return aCodePoint - bCodePoint;
+     }
+ 
+-    i += utf16LengthForCodePoint(aCodePoint);
++    i += aCodePoint > 0xffff ? 2 : 1;
+   }
+ 
+   return aLength - bLength;
+ }
+-
+-/**
+- * @param {number[]} a
+- * @param {number} aLength
+- * @param {number[]} b
+- * @param {number} bLength
+- * @returns {number}
+- */
+-function compareArrays(
+-  a: number[],
+-  aLength: number,
+-  b: number[],
+-  bLength: number,
+-) {
+-  const length = Math.min(aLength, bLength);
+-  for (let i = 0; i < length; i++) {
+-    const aValue = a[i];
+-    const bValue = b[i];
+-    if (aValue !== bValue) {
+-      return aValue - bValue;
+-    }
+-  }
+-  return aLength - bLength;
+-}
+-
+-/**
+- * @param {number} aCodePoint
+- * @returns {number}
+- */
+-export function utf16LengthForCodePoint(aCodePoint: number) {
+-  return aCodePoint > 0xffff ? 2 : 1;
+-}
+-
+-// 2 preallocated arrays for utf8Bytes.
+-const arr = () => Array.from({ length: 4 }, () => 0);
+-const aBytes = arr();
+-const bBytes = arr();
+-
+-/**
+- * @param {number} codePoint
+- * @param {number[]} bytes
+- * @returns {number}
+- */
+-function utf8Bytes(codePoint: number, bytes: number[]) {
+-  if (codePoint < 0x80) {
+-    bytes[0] = codePoint;
+-    return 1;
+-  }
+-
+-  let count;
+-  let offset;
+-
+-  if (codePoint <= 0x07ff) {
+-    count = 1;
+-    offset = 0xc0;
+-  } else if (codePoint <= 0xffff) {
+-    count = 2;
+-    offset = 0xe0;
+-  } else if (codePoint <= 0x10ffff) {
+-    count = 3;
+-    offset = 0xf0;
+-  } else {
+-    throw new Error("Invalid code point");
+-  }
+-
+-  bytes[0] = (codePoint >> (6 * count)) + offset;
+-  let i = 1;
+-  for (; count > 0; count--) {
+-    const temp = codePoint >> (6 * (count - 1));
+-    bytes[i++] = 0x80 | (temp & 0x3f);
+-  }
+-  return i;
+-}
+-
+-/**
+- * @param {string} a
+- * @param {string} b
+- * @returns {boolean}
+- */
+-export function greaterThan(a: string, b: string) {
+-  return compareUTF8(a, b) > 0;
+-}
+-
+-/**
+- * @param {string} a
+- * @param {string} b
+- * @returns {boolean}
+- */
+-export function greaterThanEq(a: string, b: string) {
+-  return compareUTF8(a, b) >= 0;
+-}
+-
+-/**
+- * @param {string} a
+- * @param {string} b
+- * @returns {boolean}
+- */
+-export function lessThan(a: string, b: string) {
+-  return compareUTF8(a, b) < 0;
+-}
+-
+-/**
+- * @param {string} a
+- * @param {string} b
+- * @returns {boolean}
+- */
+-export function lessThanEq(a: string, b: string) {
+-  return compareUTF8(a, b) <= 0;
+-}
