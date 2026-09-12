@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Thu, 20 Aug 2026 18:37:52 +0800
-Subject: [PATCH 09/10] http-client: classify pre-execution HTTP rejections
+Subject: [PATCH 09/11] http-client: classify pre-execution HTTP rejections
 
 Represent completed non-UDF HTTP failures with a public ConvexHttpError that retains the status, complete response text, and parsed JSON when the server declares valid JSON. Transport failures and incomplete bodies remain ordinary errors because they do not prove a server result.\n\nMirror the backend's reviewed rejected-before-execution short codes at the HTTP boundary, where the wire response currently omits the semantic category. Require the exact 503 status and structured code, and leave unknown or malformed responses unclassified so the execution guarantee fails closed.\n\nThis centralizes the compatibility contract for SDK consumers and avoids downstream response-message parsing or duplicated backend code lists.
 ---
@@ -14,10 +14,10 @@ Represent completed non-UDF HTTP failures with a public ConvexHttpError that ret
  create mode 100644 src/browser/http_client.test.ts
 
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 0b7867752462858b37dba6fc735b121379caa92c..a5f2940c0429cdd2c3070d383f5a9596a321b189 100644
+index a0b423e43e21dc40c921d6f2b3a94dbe6acd1057..6baca5491838185d00d054914b4a858bf08832ac 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -16,6 +16,10 @@
+@@ -23,6 +23,10 @@
    without committing pending schemas or indexes or starting index backfills. It
    reports an explicit error when the target backend's preflight response does
    not include code generation analysis.

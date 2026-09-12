@@ -1,11 +1,12 @@
 # patch-file source-commit
-0001-client-retry-write-conflict-mutations.patch 017c09b2343278e0fd5869826d568f2c5e0b4305
-0002-sync-add-degradable-query-pressure-protocol.patch 0440904578545eaaa2edbdd7c58180e10c5efd0b
-0003-react-expose-local-query-result-removal.patch ac6378b128576b273d7d4c395913bde44d412834
-0004-bundler-support-centralized-context-reuse-policy.patch 8e172d5dc7ea1fb8e21f6f696eff88e4144359ea
-0005-cli-support-module-scoped-local-Node-pools.patch f8415ca7be75e82c35f0411ab853cbfe01f27d4c
-0006-codegen-use-non-committing-deployment-analysis.patch 54e3fc5700c296575fcec83e03639fa98989e8ef
-0007-packaging-build-SHA-derived-peer-compatible-package.patch 2c4f3a2e7356d8904eca61e8a81ffb87f37c8bb9
-0008-packages-colocate-published-Convex-archives.patch b82edb2ecde000b1c467933ff04bcaf0d3e884e6
-0009-http-client-classify-pre-execution-HTTP-rejections.patch c54a17505f744e42bcc4784fa27c48f86a68acfe
-0010-docs-clarify-source-and-archive-publication-ordering.patch ba3ba0d903b30ef25989c7ff197ba4c55230372d
+0001-client-retry-write-conflict-mutations.patch 5ba40f74270ae6270607e41be9ba661a821c2ff8
+0002-sync-add-degradable-query-pressure-protocol.patch fc3bf243becf1561c459c2a361d99d05e85c8025
+0003-react-expose-local-query-result-removal.patch 76177a122f21ff203dd693c4c04830d52bd1bb15
+0004-bundler-support-centralized-context-reuse-policy.patch 9a8cef3755c2ec56575998dbcd59edb782dad41a
+0005-cli-support-module-scoped-local-Node-pools.patch 1a76881d6483bccc3a87f02384572616f063aff2
+0006-codegen-use-non-committing-deployment-analysis.patch 80a897cf26a830d2eaa3d918fc8e2b26518a62f8
+0007-packaging-build-SHA-derived-peer-compatible-package.patch 85a8fe9455a49eea1c68f09c570d12a53ef81468
+0008-packages-colocate-published-Convex-archives.patch 666bb4e8068a318c0094cc7dddbf1c2b91772542
+0009-http-client-classify-pre-execution-HTTP-rejections.patch 54e6d7c0fb037c1afb8c2ccc3b2f6718f37ed260
+0010-docs-clarify-source-and-archive-publication-ordering.patch c37867bc736ff66fbfa6c904e4d956d469a3b8a1
+0011-packaging-record-refreshed-upstream-source.patch c6a66139cd4a5de27402b3fd2a217f9e37efb774

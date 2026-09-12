@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Fri, 14 Aug 2026 11:52:23 +0800
-Subject: [PATCH 06/10] codegen: use non-committing deployment analysis
+Subject: [PATCH 06/11] codegen: use non-committing deployment analysis
 
 Route standalone codegen through evaluate_push with an explicit analysis request instead of beginning the start_push deployment lifecycle. Refuse older backend responses without analysis rather than falling back to a request that can publish pending schema and index metadata.
 
@@ -22,10 +22,10 @@ Add response-decoder coverage, operator patch guidance, and an Unreleased change
  create mode 100644 src/cli/lib/deployApi/startPush.test.ts
 
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index cd505eaec31e6e203788e80f3c7838d18bb7878f..0b7867752462858b37dba6fc735b121379caa92c 100644
+index 7adb52117814c68541e8752cd122181bc6f49021..a0b423e43e21dc40c921d6f2b3a94dbe6acd1057 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -12,6 +12,10 @@
+@@ -19,6 +19,10 @@
    gateway.
  - Improved the error message when `npx convex export` fails because a snapshot
    export is already in progress.
@@ -584,7 +584,7 @@ index 0000000000000000000000000000000000000000..3f64c0ab1b8be5d30772393c778e7c36
 +  expect(parsed.analysis).toEqual({});
 +});
 diff --git a/src/cli/lib/deployApi/startPush.ts b/src/cli/lib/deployApi/startPush.ts
-index 932289ab1575347970e67915a69c4ae8111e3e65..2f0bf3029e608419ee63a8224663a7082aa9d5b0 100644
+index 7e9a9e4c7b69eca4a581e57b5bf294c4711aa550..6764902cf4f8b8312ad885e3c1c846454f2a39d1 100644
 --- a/src/cli/lib/deployApi/startPush.ts
 +++ b/src/cli/lib/deployApi/startPush.ts
 @@ -23,6 +23,8 @@ export const startPushRequest = looseObject({

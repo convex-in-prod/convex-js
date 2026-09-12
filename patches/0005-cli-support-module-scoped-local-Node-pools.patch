@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 12 Aug 2026 13:32:50 +0800
-Subject: [PATCH 05/10] cli: support module-scoped local Node pools
+Subject: [PATCH 05/11] cli: support module-scoped local Node pools
 
 Parse and preserve required module-scoped Node pool declarations through bundling and deployment metadata. Keep the declaration attached to the entry module, reject invalid or ambiguous combinations, and include dedicated-pool modules in Node bundle telemetry.
 
@@ -708,7 +708,7 @@ index e8ea18e8d88a822ba4b3ac5abdbec8ad9ec8cc38..b7860b91e21e6acc6988a348fce2c838
  
  export const nodeDependency = looseObject({
 diff --git a/src/cli/lib/deployApi/startPush.ts b/src/cli/lib/deployApi/startPush.ts
-index b23da979aa095358a272dd711f3a554e7a208cee..932289ab1575347970e67915a69c4ae8111e3e65 100644
+index 0d4d050161165366badcdf343bb2556ae78435fc..7e9a9e4c7b69eca4a581e57b5bf294c4711aa550 100644
 --- a/src/cli/lib/deployApi/startPush.ts
 +++ b/src/cli/lib/deployApi/startPush.ts
 @@ -45,6 +45,7 @@ export const startPushResponse = looseObject({

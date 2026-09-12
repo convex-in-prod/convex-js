@@ -1,0 +1,17 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Sat, 12 Sep 2026 14:09:46 +0800
+Subject: [PATCH 11/11] packaging: record refreshed upstream source
+
+Record the exact upstream source revision used for the refreshed downstream train.
+---
+ .convex-in-prod-upstream | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/.convex-in-prod-upstream b/.convex-in-prod-upstream
+index 5e34f21d45d2b5de53db23dd30dbe8d6c342d711..ae50e3c417314e4a7b47b8b2b49b78d208c3a5b1 100644
+--- a/.convex-in-prod-upstream
++++ b/.convex-in-prod-upstream
+@@ -1 +1 @@
+-b8462f832de00a353ae3f35b5b7664c63d5152ff
++da00c5cc463a40db208034df4b8296bb2d04aa1e
