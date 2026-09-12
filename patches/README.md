@@ -85,6 +85,14 @@ ordinary actions remain fresh. Both settings are disabled by default and do not
 place application module names in backend logic. See
 [`default_database_context_reuse/README.md`](default_database_context_reuse/README.md).
 
+### Stateless UTF-8 value comparison
+
+UTF-8 value comparison keeps all request-derived comparison state local to the
+invocation. It preserves the established ordering for well-formed strings and
+lone UTF-16 surrogates without module-scoped scratch arrays. This allows a
+reviewed reusable database-function module context to retain the comparator code
+without retaining bytes derived from an earlier request.
+
 ### Module-scoped Node pools
 
 Applications may annotate Node modules with a bounded local-pool declaration.
