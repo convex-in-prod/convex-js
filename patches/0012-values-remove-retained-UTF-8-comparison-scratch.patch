@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Sat, 12 Sep 2026 15:04:41 +0800
-Subject: [PATCH 12/12] values: remove retained UTF-8 comparison scratch
+Subject: [PATCH 12/13] values: remove retained UTF-8 comparison scratch
 
 Keep UTF-8 value ordering request-local so reusable function contexts do not retain bytes derived from an earlier invocation. Preserve lone-surrogate ordering and document the downstream context-reuse compatibility change.
 ---

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Mon, 20 Jul 2026 14:02:18 +0800
-Subject: [PATCH 04/12] bundler: support centralized context reuse policy
+Subject: [PATCH 04/13] bundler: support centralized context reuse policy
 
 Add a disabled-by-default root-application bundling policy that emits
 Convex's existing boolean experimental_reuseContext marker for isolate

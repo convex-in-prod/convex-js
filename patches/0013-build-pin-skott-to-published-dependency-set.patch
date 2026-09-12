@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Sat, 12 Sep 2026 15:08:20 +0800
+Subject: [PATCH 13/13] build: pin skott to published dependency set
+
+Keep the package workflow on the published skott release whose skott-webapp dependency resolves from the public registry. The floating newer release requested an unavailable skott-webapp version and prevented reproducible artifact builds.
+---
+ package.json | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/package.json b/package.json
+index 99899885e98841ad37c32c77e0cca8c13042d0b1..4df88b2759a8a3614e092bf9fdf01b7881976a67 100644
+--- a/package.json
++++ b/package.json
+@@ -333,7 +333,7 @@
+     "semver": "^7.6.0",
+     "serve-handler": "~6.1.6",
+     "shx": "~0.4.0",
+-    "skott": "~0.35.4",
++    "skott": "0.35.4",
+     "tar": "^7.5.21",
+     "tsx": "^4.19.4",
+     "typedoc": "^0.24.6",

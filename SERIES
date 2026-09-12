@@ -11,3 +11,4 @@
 0010-docs-clarify-source-and-archive-publication-ordering.patch c37867bc736ff66fbfa6c904e4d956d469a3b8a1
 0011-packaging-record-refreshed-upstream-source.patch c6a66139cd4a5de27402b3fd2a217f9e37efb774
 0012-values-remove-retained-UTF-8-comparison-scratch.patch ee8ca00e0e70c3db6f9cf4b87b178d64c9f116f5
+0013-build-pin-skott-to-published-dependency-set.patch 887bbbe5198279f90a63257430a59b7b29c13df9
