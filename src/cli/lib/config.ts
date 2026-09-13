@@ -100,6 +100,10 @@ export interface ProjectConfig {
       exclusions: Record<string, string>;
       httpActions: boolean;
     };
+    wasmCompilation?: {
+      default: false;
+      modules: string[];
+    };
   };
 
   typescriptCompiler?: TypescriptCompiler;
@@ -335,6 +339,37 @@ const BundlerSchema = z.object({
     .optional()
     .describe(
       "Make reusable contexts the default for root-application isolate entry modules by adding the upstream experimental_reuseContext export during bundling. Omit this setting to retain upstream explicit opt-in behavior.",
+    ),
+  wasmCompilation: z
+    .object({
+      default: z.literal(false),
+      modules: z
+        .array(
+          z
+            .string()
+            .refine(
+              (modulePath) =>
+                modulePath !== "" &&
+                !modulePath.includes("\\") &&
+                !path.posix.isAbsolute(modulePath) &&
+                path.posix.normalize(modulePath) === modulePath &&
+                modulePath !== ".." &&
+                !modulePath.startsWith("../") &&
+                !modulePath.endsWith(".js"),
+              "Wasm compilation module paths must be normalized generated API paths without a .js suffix.",
+            ),
+        )
+        .refine((modules) => new Set(modules).size === modules.length, {
+          message: "Wasm compilation module paths must be unique.",
+        })
+        .describe(
+          "Generated API module paths whose query and mutation routes receive optional Wasm artifacts. Unlisted modules remain V8-only.",
+        ),
+    })
+    .strict()
+    .optional()
+    .describe(
+      "Select a project-tracked subset of query and mutation modules for Wasm compilation. Runtime routing and shadow policy are configured separately.",
     ),
 });
 
