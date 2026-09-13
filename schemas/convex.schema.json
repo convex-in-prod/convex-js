@@ -202,6 +202,26 @@
           },
           "required": ["default"],
           "additionalProperties": false
+        },
+        "wasmCompilation": {
+          "type": "object",
+          "description": "Select a project-tracked subset of query and mutation modules for Wasm compilation. Runtime routing and shadow policy are configured separately.",
+          "properties": {
+            "default": {
+              "const": false
+            },
+            "modules": {
+              "type": "array",
+              "description": "Generated API module paths whose query and mutation routes receive optional Wasm artifacts. Unlisted modules remain V8-only.",
+              "items": {
+                "type": "string",
+                "pattern": "^(?!/)(?!\\.\\.?/)(?!.*\\\\)(?!.*\\.js$).+"
+              },
+              "uniqueItems": true
+            }
+          },
+          "required": ["default", "modules"],
+          "additionalProperties": false
         }
       }
     },
