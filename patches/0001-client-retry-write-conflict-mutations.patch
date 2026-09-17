@@ -3,17 +3,20 @@ From: Roman Leventov <leventov.ru@gmail.com>
 Date: Tue, 23 Jun 2026 17:40:29 +0800
 Subject: [PATCH 01/13] client: retry write conflict mutations
 
+Retry terminal optimistic-concurrency failures once across WebSocket mutations, HTTP mutations, and action-context mutation calls. Keep the existing configurable retry count and delay.
+
+Recognize the internal OCC name, the table-specific public message, and the generic system-table public message. Cover both public message forms through the thrown-error and failed-result classifiers.
 ---
- src/browser/http_client.ts              |  56 ++++++++++--
+ src/browser/http_client.ts              |  56 +++++++++--
  src/browser/sync/client.ts              |  38 ++++++--
- src/common/write_conflict_retry.test.ts |  88 ++++++++++++++++++
- src/common/write_conflict_retry.ts      | 117 ++++++++++++++++++++++++
+ src/common/write_conflict_retry.test.ts | 104 ++++++++++++++++++++
+ src/common/write_conflict_retry.ts      | 120 ++++++++++++++++++++++++
  src/nextjs/index.ts                     |  13 ++-
- src/react/client.ts                     |  26 +++++-
+ src/react/client.ts                     |  26 ++++-
  src/server/impl/actions_impl.ts         |  18 +++-
  src/server/impl/registration_impl.ts    |  19 +++-
  src/server/registration.ts              |   6 +-
- 9 files changed, 357 insertions(+), 24 deletions(-)
+ 9 files changed, 376 insertions(+), 24 deletions(-)
  create mode 100644 src/common/write_conflict_retry.test.ts
  create mode 100644 src/common/write_conflict_retry.ts
 
@@ -203,31 +206,44 @@ index 64d19dc759f32e3727ad8964aade81ee065490ac..218864d4e5d629d8a6437f775730deb9
    /**
 diff --git a/src/common/write_conflict_retry.test.ts b/src/common/write_conflict_retry.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..39b2d5428bfe70e64851e97c3383866032981f2e
+index 0000000000000000000000000000000000000000..69f81e28165edbdb47399ce03a8ea9a1c7cb5023
 --- /dev/null
 +++ b/src/common/write_conflict_retry.test.ts
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,104 @@
 +import { describe, expect, test, vi } from "vitest";
 +
 +import {
 +  isWriteConflictRetryableMessage,
++  isWriteConflictRetryableResult,
 +  retryOnWriteConflict,
 +  validateMaxWriteConflictRetries,
 +  validateWriteConflictRetryDelayMs,
 +} from "./write_conflict_retry.js";
++
++const writeConflictMessages = [
++  'Documents read from or written to the "users" table changed while this mutation was being run and on every subsequent retry.',
++  "Data read or written in this mutation changed while it was being run. Consider reducing the amount of data read by using indexed queries with selective index range expressions (https://docs.convex.dev/database/indexes/).",
++];
 +
 +describe("write conflict retries", () => {
 +  test("matches Convex write conflict messages", () => {
 +    expect(
 +      isWriteConflictRetryableMessage("OptimisticConcurrencyControlFailure"),
 +    ).toBe(true);
-+    expect(
-+      isWriteConflictRetryableMessage(
-+        'Documents read from or written to the "users" table changed while this mutation was being run and on every subsequent retry.',
-+      ),
-+    ).toBe(true);
++    for (const message of writeConflictMessages) {
++      expect(isWriteConflictRetryableMessage(message)).toBe(true);
++    }
 +    expect(isWriteConflictRetryableMessage("Validation failed")).toBe(false);
 +  });
++
++  test.each(writeConflictMessages)(
++    "matches write conflict results: %s",
++    (errorMessage) => {
++      expect(
++        isWriteConflictRetryableResult({ success: false, errorMessage }),
++      ).toBe(true);
++    },
++  );
 +
 +  test("validates retry counts", () => {
 +    expect(validateMaxWriteConflictRetries(undefined)).toBe(1);
@@ -255,28 +271,31 @@ index 0000000000000000000000000000000000000000..39b2d5428bfe70e64851e97c33838660
 +    ).toThrow("writeConflictRetryDelayMs must be a nonnegative number.");
 +  });
 +
-+  test("retries write conflict errors", async () => {
-+    vi.useFakeTimers();
-+    let calls = 0;
-+    const result = retryOnWriteConflict(
-+      async () => {
-+        calls += 1;
-+        if (calls === 1) {
-+          throw new Error("OptimisticConcurrencyControlFailure");
-+        }
-+        return "ok";
-+      },
-+      {
-+        maxWriteConflictRetries: 1,
-+        writeConflictRetryDelayMs: 2000,
-+      },
-+    );
++  test.each(writeConflictMessages)(
++    "retries write conflict errors: %s",
++    async (message) => {
++      vi.useFakeTimers();
++      let calls = 0;
++      const result = retryOnWriteConflict(
++        async () => {
++          calls += 1;
++          if (calls === 1) {
++            throw new Error(message);
++          }
++          return "ok";
++        },
++        {
++          maxWriteConflictRetries: 1,
++          writeConflictRetryDelayMs: 2000,
++        },
++      );
 +
-+    await vi.advanceTimersByTimeAsync(2000);
-+    await expect(result).resolves.toBe("ok");
-+    expect(calls).toBe(2);
-+    vi.useRealTimers();
-+  });
++      await vi.advanceTimersByTimeAsync(2000);
++      await expect(result).resolves.toBe("ok");
++      expect(calls).toBe(2);
++      vi.useRealTimers();
++    },
++  );
 +
 +  test("does not retry other errors", async () => {
 +    let calls = 0;
@@ -297,14 +316,16 @@ index 0000000000000000000000000000000000000000..39b2d5428bfe70e64851e97c33838660
 +});
 diff --git a/src/common/write_conflict_retry.ts b/src/common/write_conflict_retry.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..02a94ff7ea0e4f5ba0b7bb44a68f5c5a60d375a8
+index 0000000000000000000000000000000000000000..7a86ca4b4e102ba6fb31d6232de6aae0ad8eb2f4
 --- /dev/null
 +++ b/src/common/write_conflict_retry.ts
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,120 @@
 +const WRITE_CONFLICT_ERROR_TEXT = "OptimisticConcurrencyControlFailure";
 +const WRITE_CONFLICT_PUBLIC_ERROR_TEXT = "Documents read from or written to";
 +const WRITE_CONFLICT_PUBLIC_RETRY_TEXT =
 +  "changed while this mutation was being run and on every subsequent retry";
++const WRITE_CONFLICT_SYSTEM_ERROR_TEXT =
++  "Data read or written in this mutation changed while it was being run.";
 +
 +const DEFAULT_MAX_WRITE_CONFLICT_RETRIES = 1;
 +const DEFAULT_WRITE_CONFLICT_RETRY_DELAY_MS = 2000;
@@ -371,6 +392,7 @@ index 0000000000000000000000000000000000000000..02a94ff7ea0e4f5ba0b7bb44a68f5c5a
 +export function isWriteConflictRetryableMessage(message: string): boolean {
 +  return (
 +    message.includes(WRITE_CONFLICT_ERROR_TEXT) ||
++    message.includes(WRITE_CONFLICT_SYSTEM_ERROR_TEXT) ||
 +    (message.includes(WRITE_CONFLICT_PUBLIC_ERROR_TEXT) &&
 +      message.includes(WRITE_CONFLICT_PUBLIC_RETRY_TEXT))
 +  );
