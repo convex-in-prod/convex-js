@@ -104,6 +104,12 @@ export {
   internalQueryGeneric,
 } from "./impl/registration_impl.js";
 export { getServiceToken } from "./impl/actions_impl.js";
+export {
+  onNodePoolRetirement,
+  type NodePoolRetirementDeadline,
+  type NodePoolRetirementHandler,
+  type NodePoolRetirementReason,
+} from "./node_pool_retirement.js";
 export type {
   TransactionMetric,
   TransactionMetrics,
