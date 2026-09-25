@@ -19,6 +19,8 @@ import {
 import { validateArg, validateArgIsNonNegativeInteger } from "./validate.js";
 import { version } from "../../index.js";
 
+declare const Convex: { queryCollect?: true };
+
 const MAX_QUERY_OPERATORS = 256;
 
 type QueryOperator = { filter: JSONValue } | { limit: number };
@@ -313,6 +315,25 @@ export class QueryImpl implements Query<GenericTableInfo> {
   }
 
   async collect(): Promise<Array<any>> {
+    if (
+      this.state.type === "preparing" &&
+      typeof Convex !== "undefined" &&
+      Convex.queryCollect === true
+    ) {
+      const query = this.takeQuery();
+      try {
+        const rows = await performAsyncSyscall("1.0/queryCollect", {
+          query,
+          version,
+        });
+        if (!Array.isArray(rows)) {
+          throw new Error("Bulk query returned an invalid result");
+        }
+        return rows.map((row) => jsonToConvex(row));
+      } finally {
+        this.state = { type: "consumed" };
+      }
+    }
     const out: Value[] = [];
     for await (const item of this) {
       out.push(item);

@@ -51,11 +51,13 @@ jobs:
           upstream_base_sha="$(tr -d '\n' < .convex-in-prod-upstream)"
           git merge-base --is-ancestor "$upstream_base_sha" HEAD
 
+          # Published package manifests are immutable artifact records, not formatted source.
+
           mapfile -t format_files < <(
             git diff --name-only --diff-filter=ACMR "$upstream_base_sha" HEAD -- \
               '*.cjs' '*.css' '*.gql' '*.graphql' '*.html' '*.js' '*.json' \
               '*.json5' '*.jsx' '*.md' '*.mdx' '*.mjs' '*.scss' '*.ts' \
-              '*.tsx' '*.yaml' '*.yml'
+              '*.tsx' '*.yaml' '*.yml' ':(exclude)packages/convex/**'
           )
           if (( ${#format_files[@]} > 0 )); then
             # Upstream has no lockfile, so keep formatter upgrades from changing
@@ -65,7 +67,8 @@ jobs:
 
           mapfile -t lint_files < <(
             git diff --name-only --diff-filter=ACMR "$upstream_base_sha" HEAD -- \
-              '*.cjs' '*.js' '*.jsx' '*.mjs' '*.ts' '*.tsx'
+              '*.cjs' '*.js' '*.jsx' '*.mjs' '*.ts' '*.tsx' \
+              ':(exclude)packages/convex/**'
           )
           if (( ${#lint_files[@]} > 0 )); then
             npx eslint --no-warn-ignored "${lint_files[@]}"
