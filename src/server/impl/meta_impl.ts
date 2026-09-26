@@ -1,4 +1,4 @@
-import { jsonToConvex } from "../../values/index.js";
+import { jsonToConvexOwned } from "../../values/value.js";
 import {
   ActionMeta,
   MutationMeta,
@@ -23,7 +23,7 @@ async function getTransactionMetrics(): Promise<TransactionMetrics> {
     }
     throw e;
   }
-  return jsonToConvex(syscallJSON) as any;
+  return jsonToConvexOwned(syscallJSON) as any;
 }
 
 async function getFunctionMetadata(): Promise<{
@@ -45,7 +45,7 @@ async function getDeploymentMetadata(): Promise<DeploymentMetadata> {
     "1.0/getDeploymentMetadata",
     {},
   );
-  const result = jsonToConvex(syscallJSON) as any;
+  const result = jsonToConvexOwned(syscallJSON) as any;
   return {
     name: result.name,
     region: result.region ?? null,
@@ -55,7 +55,7 @@ async function getDeploymentMetadata(): Promise<DeploymentMetadata> {
 
 function getSnapshotTs(): bigint {
   const syscallJSON = performSyscall("1.0/getSnapshotTs", {});
-  return jsonToConvex(syscallJSON) as bigint;
+  return jsonToConvexOwned(syscallJSON) as bigint;
 }
 
 async function getRequestMetadata(): Promise<RequestMetadata> {

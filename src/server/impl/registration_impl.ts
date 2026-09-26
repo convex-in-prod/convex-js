@@ -2,11 +2,11 @@ import {
   ConvexError,
   convexToJson,
   GenericValidator,
-  jsonToConvex,
   v,
   Validator,
   Value,
 } from "../../values/index.js";
+import { jsonToConvexOwned } from "../../values/value.js";
 import { GenericDataModel } from "../data_model.js";
 import {
   ActionBuilder,
@@ -64,7 +64,7 @@ async function invokeMutation<
   // TODO(presley): Change the function signature and propagate the requestId from Rust.
   // Ok, to mock it out for now, since queries are only running in V8.
   const requestId = "";
-  const args = jsonToConvex(JSON.parse(argsStr));
+  const args = jsonToConvexOwned(JSON.parse(argsStr));
   const mutationCtx = {
     db: setupWriter(),
     auth: setupAuth(requestId),
@@ -349,7 +349,7 @@ async function invokeQuery<
   // TODO(presley): Change the function signature and propagate the requestId from Rust.
   // Ok, to mock it out for now, since queries are only running in V8.
   const requestId = "";
-  const args = jsonToConvex(JSON.parse(argsStr));
+  const args = jsonToConvexOwned(JSON.parse(argsStr));
   const queryCtx = {
     db: setupReader(),
     auth: setupAuth(requestId),
@@ -517,7 +517,7 @@ export const internalQueryGeneric: QueryBuilder<any, "internal"> = ((
 async function invokeAction<
   F extends (ctx: GenericActionCtx<GenericDataModel>, ...args: any) => any,
 >(func: F, requestId: string, argsStr: string, visibility: FunctionVisibility) {
-  const args = jsonToConvex(JSON.parse(argsStr));
+  const args = jsonToConvexOwned(JSON.parse(argsStr));
   const calls = setupActionCalls(requestId);
   const ctx = {
     ...calls,
@@ -785,5 +785,5 @@ async function runUdf(
     syscallArgs.transactionLimits = transactionLimits;
   }
   const result = await performAsyncSyscall("1.0/runUdf", syscallArgs);
-  return jsonToConvex(result);
+  return jsonToConvexOwned(result);
 }

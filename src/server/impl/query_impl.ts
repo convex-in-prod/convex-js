@@ -1,4 +1,5 @@
-import { Value, JSONValue, jsonToConvex } from "../../values/index.js";
+import { Value, JSONValue } from "../../values/index.js";
+import { jsonToConvexOwned } from "../../values/value.js";
 import { PaginationResult, PaginationOptions } from "../pagination.js";
 import { performAsyncSyscall, performSyscall } from "./syscall.js";
 import {
@@ -107,7 +108,7 @@ export class QueryInitializerImpl implements QueryInitializer<GenericTableInfo> 
     const syscallJSON = await performAsyncSyscall("1.0/count", {
       table: this.tableName,
     });
-    const syscallResult = jsonToConvex(syscallJSON) as number;
+    const syscallResult = jsonToConvexOwned(syscallJSON) as number;
     return syscallResult;
   }
 
@@ -269,7 +270,7 @@ export class QueryImpl implements Query<GenericTableInfo> {
     if (done) {
       this.closeQuery();
     }
-    const convexValue = jsonToConvex(value);
+    const convexValue = jsonToConvexOwned(value);
     return { value: convexValue, done };
   }
 
@@ -305,8 +306,11 @@ export class QueryImpl implements Query<GenericTableInfo> {
         maximumBytesRead: paginationOpts.maximumBytesRead,
         version,
       });
+    for (let index = 0; index < page.length; index++) {
+      page[index] = jsonToConvexOwned(page[index]);
+    }
     return {
-      page: page.map((json: string) => jsonToConvex(json)),
+      page,
       isDone,
       continueCursor,
       splitCursor,
@@ -329,7 +333,10 @@ export class QueryImpl implements Query<GenericTableInfo> {
         if (!Array.isArray(rows)) {
           throw new Error("Bulk query returned an invalid result");
         }
-        return rows.map((row) => jsonToConvex(row));
+        for (let index = 0; index < rows.length; index++) {
+          rows[index] = jsonToConvexOwned(rows[index]);
+        }
+        return rows;
       } finally {
         this.state = { type: "consumed" };
       }

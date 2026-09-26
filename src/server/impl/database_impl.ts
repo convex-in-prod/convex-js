@@ -1,9 +1,4 @@
-import {
-  convexToJson,
-  GenericId,
-  jsonToConvex,
-  Value,
-} from "../../values/index.js";
+import { convexToJson, GenericId, Value } from "../../values/index.js";
 import { performAsyncSyscall, performSyscall } from "./syscall.js";
 import {
   GenericDatabaseReader,
@@ -15,7 +10,11 @@ import { QueryInitializerImpl } from "./query_impl.js";
 import { GenericDataModel, GenericDocument } from "../data_model.js";
 import { validateArg } from "./validate.js";
 import { version } from "../../index.js";
-import { commitTsPlaceholder, patchValueToJson } from "../../values/value.js";
+import {
+  commitTsPlaceholder,
+  jsonToConvexOwned,
+  patchValueToJson,
+} from "../../values/value.js";
 
 async function get(
   table: string | undefined,
@@ -40,7 +39,7 @@ async function get(
   };
   const syscallJSON = await performAsyncSyscall("1.0/get", args);
 
-  return jsonToConvex(syscallJSON) as GenericDocument;
+  return jsonToConvexOwned(syscallJSON) as GenericDocument;
 }
 
 export function setupReader(): GenericDatabaseReader<GenericDataModel> {
@@ -77,7 +76,7 @@ export function setupReader(): GenericDatabaseReader<GenericDataModel> {
           table: tableName,
           idString: id,
         });
-        const syscallResult = jsonToConvex(syscallJSON) as any;
+        const syscallResult = jsonToConvexOwned(syscallJSON) as any;
         return syscallResult.id;
       },
       // We set the system reader on the next line
@@ -103,7 +102,7 @@ async function insert(tableName: string, value: any) {
     table: tableName,
     value: convexToJson(value),
   });
-  const syscallResult = jsonToConvex(syscallJSON) as any;
+  const syscallResult = jsonToConvexOwned(syscallJSON) as any;
   return syscallResult._id;
 }
 
