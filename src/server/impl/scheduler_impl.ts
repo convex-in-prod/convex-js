@@ -1,6 +1,6 @@
 import { convexToJson, Value } from "../../values/index.js";
 import { version } from "../../index.js";
-import { performAsyncSyscall } from "./syscall.js";
+import { performAsyncSyscall, performAsyncValueSyscall } from "./syscall.js";
 import { parseArgs } from "../../common/index.js";
 import { SchedulableFunctionReference, Scheduler } from "../scheduler.js";
 import { Id } from "../../values/value.js";
@@ -15,7 +15,12 @@ export function setupMutationScheduler(): Scheduler {
       args?: Record<string, Value>,
     ) => {
       const syscallArgs = runAfterSyscallArgs(delayMs, functionReference, args);
-      return await performAsyncSyscall("1.0/schedule", syscallArgs);
+      return await performAsyncValueSyscall(
+        "1.0/schedule",
+        syscallArgs,
+        () => ({ ...syscallArgs, args: convexToJson(syscallArgs.args) }),
+        (result) => result,
+      );
     },
     runAt: async (
       ms_since_epoch_or_date: number | Date,
@@ -27,12 +32,21 @@ export function setupMutationScheduler(): Scheduler {
         functionReference,
         args,
       );
-      return await performAsyncSyscall("1.0/schedule", syscallArgs);
+      return await performAsyncValueSyscall(
+        "1.0/schedule",
+        syscallArgs,
+        () => ({ ...syscallArgs, args: convexToJson(syscallArgs.args) }),
+        (result) => result,
+      );
     },
     cancel: async (id: Id<"_scheduled_functions">) => {
       validateArg(id, 1, "cancel", "id");
-      const args = { id: convexToJson(id) };
-      await performAsyncSyscall("1.0/cancel_job", args);
+      await performAsyncValueSyscall(
+        "1.0/cancel_job",
+        { id },
+        () => ({ id: convexToJson(id) }),
+        () => undefined,
+      );
     },
   };
 }
@@ -48,7 +62,10 @@ export function setupActionScheduler(requestId: string): Scheduler {
         requestId,
         ...runAfterSyscallArgs(delayMs, functionReference, args),
       };
-      return await performAsyncSyscall("1.0/actions/schedule", syscallArgs);
+      return await performAsyncSyscall("1.0/actions/schedule", {
+        ...syscallArgs,
+        args: convexToJson(syscallArgs.args),
+      });
     },
     runAt: async (
       ms_since_epoch_or_date: number | Date,
@@ -59,7 +76,10 @@ export function setupActionScheduler(requestId: string): Scheduler {
         requestId,
         ...runAtSyscallArgs(ms_since_epoch_or_date, functionReference, args),
       };
-      return await performAsyncSyscall("1.0/actions/schedule", syscallArgs);
+      return await performAsyncSyscall("1.0/actions/schedule", {
+        ...syscallArgs,
+        args: convexToJson(syscallArgs.args),
+      });
     },
     cancel: async (id: Id<"_scheduled_functions">) => {
       validateArg(id, 1, "cancel", "id");
@@ -93,7 +113,7 @@ function runAfterSyscallArgs(
   return {
     ...address,
     ts,
-    args: convexToJson(functionArgs),
+    args: functionArgs,
     version,
   };
 }
@@ -118,7 +138,7 @@ function runAtSyscallArgs(
   return {
     ...address,
     ts,
-    args: convexToJson(functionArgs),
+    args: functionArgs,
     version,
   };
 }

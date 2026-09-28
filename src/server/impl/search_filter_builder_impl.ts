@@ -1,4 +1,4 @@
-import { JSONValue, convexOrUndefinedToJson } from "../../values/value.js";
+import { QueryValue, queryValueArg } from "./query_value.js";
 import {
   FieldTypeFromFieldPath,
   GenericDocument,
@@ -20,7 +20,7 @@ export type SerializedSearchFilter =
   | {
       type: "Eq";
       fieldPath: string;
-      value: JSONValue;
+      value: QueryValue;
     };
 
 export class SearchFilterBuilderImpl
@@ -79,7 +79,7 @@ export class SearchFilterBuilderImpl
       this.filters.concat({
         type: "Eq",
         fieldPath: fieldName,
-        value: convexOrUndefinedToJson(value),
+        value: queryValueArg(value),
       }),
     );
   }

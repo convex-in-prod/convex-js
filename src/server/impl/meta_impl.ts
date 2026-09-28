@@ -8,12 +8,17 @@ import {
   TransactionMetrics,
   DeploymentMetadata,
 } from "../meta.js";
-import { performAsyncSyscall, performSyscall } from "./syscall.js";
+import { performAsyncValueSyscall, performSyscall } from "./syscall.js";
 
 async function getTransactionMetrics(): Promise<TransactionMetrics> {
-  let syscallJSON;
+  let metrics;
   try {
-    syscallJSON = await performAsyncSyscall("1.0/getTransactionMetrics", {});
+    metrics = await performAsyncValueSyscall<TransactionMetrics>(
+      "1.0/getTransactionMetrics",
+      {},
+      () => ({}),
+      (result) => jsonToConvexOwned(result) as TransactionMetrics,
+    );
   } catch (e: any) {
     if (e.message?.includes("Unknown async operation")) {
       throw new Error(
@@ -23,16 +28,21 @@ async function getTransactionMetrics(): Promise<TransactionMetrics> {
     }
     throw e;
   }
-  return jsonToConvexOwned(syscallJSON) as any;
+  return metrics;
 }
 
 async function getFunctionMetadata(): Promise<{
   name: string;
   componentPath: string;
 }> {
-  const { name, componentPath } = await performAsyncSyscall(
+  const { name, componentPath } = await performAsyncValueSyscall<{
+    name: string;
+    componentPath: string;
+  }>(
     "1.0/getFunctionMetadata",
     {},
+    () => ({}),
+    (result) => result,
   );
   return {
     name,
@@ -41,11 +51,12 @@ async function getFunctionMetadata(): Promise<{
 }
 
 async function getDeploymentMetadata(): Promise<DeploymentMetadata> {
-  const syscallJSON = await performAsyncSyscall(
+  const result = await performAsyncValueSyscall<DeploymentMetadata>(
     "1.0/getDeploymentMetadata",
     {},
+    () => ({}),
+    (result) => jsonToConvexOwned(result) as DeploymentMetadata,
   );
-  const result = jsonToConvexOwned(syscallJSON) as any;
   return {
     name: result.name,
     region: result.region ?? null,
@@ -60,7 +71,12 @@ function getSnapshotTs(): bigint {
 
 async function getRequestMetadata(): Promise<RequestMetadata> {
   const { ip, userAgent, requestId, scheduledFunctionId, authToken } =
-    await performAsyncSyscall("1.0/getRequestMetadata", {});
+    await performAsyncValueSyscall<RequestMetadata>(
+      "1.0/getRequestMetadata",
+      {},
+      () => ({}),
+      (result) => result,
+    );
   return { ip, userAgent, requestId, scheduledFunctionId, authToken };
 }
 

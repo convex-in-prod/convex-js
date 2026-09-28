@@ -1,5 +1,5 @@
-import { JSONValue, Value, NumericValue } from "../../values/index.js";
-import { convexOrUndefinedToJson } from "../../values/value.js";
+import { Value, NumericValue } from "../../values/index.js";
+import { QueryValue, queryValueArg } from "./query_value.js";
 import { GenericTableInfo } from "../data_model.js";
 import {
   Expression,
@@ -7,29 +7,36 @@ import {
   FilterBuilder,
 } from "../filter_builder.js";
 
+export type SerializedQueryExpression = {
+  [operator: string]:
+    | QueryValue
+    | SerializedQueryExpression
+    | SerializedQueryExpression[];
+};
+
 // The `any` type parameter in `Expression<any>` allows us to use this class
 // in place of any `Expression` type in `filterBuilderImpl`.
 export class ExpressionImpl extends Expression<any> {
-  private inner: JSONValue;
-  constructor(inner: JSONValue) {
+  private inner: SerializedQueryExpression;
+  constructor(inner: SerializedQueryExpression) {
     super();
     this.inner = inner;
   }
 
-  serialize(): JSONValue {
+  serialize(): SerializedQueryExpression {
     return this.inner;
   }
 }
 
 export function serializeExpression(
   expr: ExpressionOrValue<Value | undefined>,
-): JSONValue {
+): SerializedQueryExpression {
   if (expr instanceof ExpressionImpl) {
     return expr.serialize();
   } else {
-    // Assume that the expression is a literal Convex value, which we'll serialize
-    // to its JSON representation.
-    return { $literal: convexOrUndefinedToJson(expr as Value | undefined) };
+    // Capture the literal now so mutations after query construction cannot
+    // change the value observed when the query runs.
+    return { $literal: queryValueArg(expr as Value | undefined) };
   }
 }
 

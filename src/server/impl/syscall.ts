@@ -9,6 +9,10 @@ declare const Convex: {
     op: string,
     args: Record<string, any>,
   ) => Promise<string>;
+  asyncSyscallValueArgs?: (
+    op: string,
+    args: Record<string, unknown>,
+  ) => Promise<unknown>;
   jsSyscall: (op: string, args: Record<string, any>) => any;
 };
 /**
@@ -63,6 +67,31 @@ export async function performAsyncSyscall(
     throw new Error(e.message);
   }
   return JSON.parse(resultStr);
+}
+
+/** The Wasm value ABI returns SDK-visible values; V8 keeps the JSON syscall contract. */
+export async function performAsyncValueSyscall<T>(
+  op: string,
+  valueArgs: Record<string, unknown>,
+  jsonArgs: () => Record<string, unknown>,
+  fromJson: (value: any) => T,
+): Promise<T> {
+  if (
+    typeof Convex === "undefined" ||
+    Convex.asyncSyscallValueArgs === undefined
+  ) {
+    return fromJson(await performAsyncSyscall(op, jsonArgs()));
+  }
+  try {
+    return (await Convex.asyncSyscallValueArgs(op, valueArgs)) as T;
+  } catch (e: any) {
+    if (e.data !== undefined) {
+      const rethrown = new ConvexError(e.message);
+      rethrown.data = e.data;
+      throw rethrown;
+    }
+    throw new Error(e.message);
+  }
 }
 
 /**
