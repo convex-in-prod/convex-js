@@ -1,5 +1,5 @@
-import { JSONValue, Value } from "../../values/index.js";
-import { convexOrUndefinedToJson } from "../../values/value.js";
+import { Value } from "../../values/index.js";
+import { QueryValue, queryValueArg } from "./query_value.js";
 import { GenericDocument, GenericIndexFields } from "../data_model.js";
 import {
   IndexRange,
@@ -11,7 +11,7 @@ import {
 export type SerializedRangeExpression = {
   type: "Eq" | "Gt" | "Gte" | "Lt" | "Lte";
   fieldPath: string;
-  value: JSONValue;
+  value: QueryValue;
 };
 
 export class IndexRangeBuilderImpl
@@ -50,7 +50,7 @@ export class IndexRangeBuilderImpl
       this.rangeExpressions.concat({
         type: "Eq",
         fieldPath: fieldName,
-        value: convexOrUndefinedToJson(value),
+        value: queryValueArg(value),
       }),
     );
   }
@@ -61,7 +61,7 @@ export class IndexRangeBuilderImpl
       this.rangeExpressions.concat({
         type: "Gt",
         fieldPath: fieldName,
-        value: convexOrUndefinedToJson(value),
+        value: queryValueArg(value),
       }),
     );
   }
@@ -71,7 +71,7 @@ export class IndexRangeBuilderImpl
       this.rangeExpressions.concat({
         type: "Gte",
         fieldPath: fieldName,
-        value: convexOrUndefinedToJson(value),
+        value: queryValueArg(value),
       }),
     );
   }
@@ -81,7 +81,7 @@ export class IndexRangeBuilderImpl
       this.rangeExpressions.concat({
         type: "Lt",
         fieldPath: fieldName,
-        value: convexOrUndefinedToJson(value),
+        value: queryValueArg(value),
       }),
     );
   }
@@ -91,7 +91,7 @@ export class IndexRangeBuilderImpl
       this.rangeExpressions.concat({
         type: "Lte",
         fieldPath: fieldName,
-        value: convexOrUndefinedToJson(value),
+        value: queryValueArg(value),
       }),
     );
   }

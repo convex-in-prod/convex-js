@@ -5,7 +5,7 @@ import {
   FunctionReference,
   FunctionType,
 } from "../api.js";
-import { performAsyncSyscall } from "../impl/syscall.js";
+import { performAsyncValueSyscall } from "../impl/syscall.js";
 import { DefaultFunctionArgs } from "../registration.js";
 import {
   AppDefinitionAnalysis,
@@ -74,10 +74,16 @@ export async function createFunctionHandle<
   >,
 ): Promise<FunctionHandle<Type, Args, ReturnType>> {
   const address = getFunctionAddress(functionReference);
-  return await performAsyncSyscall("1.0/createFunctionHandle", {
+  const args = {
     ...address,
     version,
-  });
+  };
+  return await performAsyncValueSyscall(
+    "1.0/createFunctionHandle",
+    args,
+    () => args,
+    (result) => result,
+  );
 }
 
 interface ComponentExports {

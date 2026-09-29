@@ -6,25 +6,29 @@ import {
   StorageWriter,
 } from "../storage.js";
 import { version } from "../../index.js";
-import { performAsyncSyscall, performJsSyscall } from "./syscall.js";
+import { performAsyncValueSyscall, performJsSyscall } from "./syscall.js";
 import { validateArg } from "./validate.js";
 
 export function setupStorageReader(requestId: string): StorageReader {
   return {
     getUrl: async (storageId: FileStorageId) => {
       validateArg(storageId, 1, "getUrl", "storageId");
-      return await performAsyncSyscall("1.0/storageGetUrl", {
-        requestId,
-        version,
-        storageId,
-      });
+      const args = { requestId, version, storageId };
+      return await performAsyncValueSyscall(
+        "1.0/storageGetUrl",
+        args,
+        () => args,
+        (result) => result,
+      );
     },
     getMetadata: async (storageId: FileStorageId): Promise<FileMetadata> => {
-      return await performAsyncSyscall("1.0/storageGetMetadata", {
-        requestId,
-        version,
-        storageId,
-      });
+      const args = { requestId, version, storageId };
+      return await performAsyncValueSyscall<FileMetadata>(
+        "1.0/storageGetMetadata",
+        args,
+        () => args,
+        (result) => result,
+      );
     },
   };
 }
@@ -33,17 +37,22 @@ export function setupStorageWriter(requestId: string): StorageWriter {
   const reader = setupStorageReader(requestId);
   return {
     generateUploadUrl: async () => {
-      return await performAsyncSyscall("1.0/storageGenerateUploadUrl", {
-        requestId,
-        version,
-      });
+      const args = { requestId, version };
+      return await performAsyncValueSyscall(
+        "1.0/storageGenerateUploadUrl",
+        args,
+        () => args,
+        (result) => result,
+      );
     },
     delete: async (storageId: FileStorageId) => {
-      await performAsyncSyscall("1.0/storageDelete", {
-        requestId,
-        version,
-        storageId,
-      });
+      const args = { requestId, version, storageId };
+      await performAsyncValueSyscall(
+        "1.0/storageDelete",
+        args,
+        () => args,
+        () => undefined,
+      );
     },
     getUrl: reader.getUrl,
     getMetadata: reader.getMetadata,

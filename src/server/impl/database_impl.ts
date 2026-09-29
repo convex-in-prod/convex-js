@@ -1,10 +1,5 @@
-import {
-  convexToJson,
-  GenericId,
-  jsonToConvex,
-  Value,
-} from "../../values/index.js";
-import { performAsyncSyscall, performSyscall } from "./syscall.js";
+import { convexToJson, GenericId, Value } from "../../values/index.js";
+import { performAsyncValueSyscall, performSyscall } from "./syscall.js";
 import {
   GenericDatabaseReader,
   GenericDatabaseReaderWithTable,
@@ -15,7 +10,11 @@ import { QueryInitializerImpl } from "./query_impl.js";
 import { GenericDataModel, GenericDocument } from "../data_model.js";
 import { validateArg } from "./validate.js";
 import { version } from "../../index.js";
-import { commitTsPlaceholder, patchValueToJson } from "../../values/value.js";
+import {
+  commitTsPlaceholder,
+  jsonToConvexOwned,
+  patchValueToJson,
+} from "../../values/value.js";
 
 async function get(
   table: string | undefined,
@@ -32,15 +31,12 @@ async function get(
       }`,
     );
   }
-  const args = {
-    id: convexToJson(id),
-    isSystem,
-    version,
-    table,
-  };
-  const syscallJSON = await performAsyncSyscall("1.0/get", args);
-
-  return jsonToConvex(syscallJSON) as GenericDocument;
+  return await performAsyncValueSyscall<GenericDocument>(
+    "1.0/get",
+    { id, isSystem, version, table },
+    () => ({ id: convexToJson(id), isSystem, version, table }),
+    (result) => jsonToConvexOwned(result) as GenericDocument,
+  );
 }
 
 export function setupReader(): GenericDatabaseReader<GenericDataModel> {
@@ -77,7 +73,7 @@ export function setupReader(): GenericDatabaseReader<GenericDataModel> {
           table: tableName,
           idString: id,
         });
-        const syscallResult = jsonToConvex(syscallJSON) as any;
+        const syscallResult = jsonToConvexOwned(syscallJSON) as any;
         return syscallResult.id;
       },
       // We set the system reader on the next line
@@ -93,46 +89,58 @@ export function setupReader(): GenericDatabaseReader<GenericDataModel> {
   return r;
 }
 
-async function insert(tableName: string, value: any) {
+async function insert<TableName extends string>(
+  tableName: TableName,
+  value: any,
+): Promise<GenericId<TableName>> {
   if (tableName.startsWith("_")) {
     throw new Error("System tables (prefixed with `_`) are read-only.");
   }
   validateArg(tableName, 1, "insert", "table");
   validateArg(value, 2, "insert", "value");
-  const syscallJSON = await performAsyncSyscall("1.0/insert", {
-    table: tableName,
-    value: convexToJson(value),
-  });
-  const syscallResult = jsonToConvex(syscallJSON) as any;
-  return syscallResult._id;
+  const syscallResult = await performAsyncValueSyscall<{ _id: string }>(
+    "1.0/insert",
+    { table: tableName, value },
+    () => ({ table: tableName, value: convexToJson(value) }),
+    (result) => jsonToConvexOwned(result) as { _id: string },
+  );
+  return syscallResult._id as GenericId<TableName>;
 }
 
 async function patch(table: string | undefined, id: any, value: any) {
   validateArg(id, 1, "patch", "id");
   validateArg(value, 2, "patch", "value");
-  await performAsyncSyscall("1.0/shallowMerge", {
-    id: convexToJson(id),
-    value: patchValueToJson(value as Value),
-    table,
-  });
+  await performAsyncValueSyscall(
+    "1.0/shallowMerge",
+    { id, value, table },
+    () => ({
+      id: convexToJson(id),
+      value: patchValueToJson(value as Value),
+      table,
+    }),
+    () => undefined,
+  );
 }
 
 async function replace(table: string | undefined, id: any, value: any) {
   validateArg(id, 1, "replace", "id");
   validateArg(value, 2, "replace", "value");
-  await performAsyncSyscall("1.0/replace", {
-    id: convexToJson(id),
-    value: convexToJson(value),
-    table,
-  });
+  await performAsyncValueSyscall(
+    "1.0/replace",
+    { id, value, table },
+    () => ({ id: convexToJson(id), value: convexToJson(value), table }),
+    () => undefined,
+  );
 }
 
 async function delete_(table: string | undefined, id: any) {
   validateArg(id, 1, "delete", "id");
-  await performAsyncSyscall("1.0/remove", {
-    id: convexToJson(id),
-    table,
-  });
+  await performAsyncValueSyscall(
+    "1.0/remove",
+    { id, table },
+    () => ({ id: convexToJson(id), table }),
+    () => undefined,
+  );
 }
 
 export function setupWriter(): GenericDatabaseWriter<GenericDataModel> &
@@ -170,9 +178,9 @@ export function setupWriter(): GenericDatabaseWriter<GenericDataModel> &
   };
 }
 
-class TableReader {
+class TableReader<TableName extends string = string> {
   constructor(
-    protected readonly tableName: string,
+    protected readonly tableName: TableName,
     protected readonly isSystem: boolean,
   ) {}
 
@@ -195,7 +203,7 @@ class TableReader {
   }
 }
 
-class TableWriter extends TableReader {
+class TableWriter<TableName extends string> extends TableReader<TableName> {
   async insert(value: any) {
     return insert(this.tableName, value);
   }

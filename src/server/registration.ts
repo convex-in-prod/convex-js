@@ -508,6 +508,9 @@ export type RegisteredMutation<
   invokeMutation(argsStr: string): Promise<string>;
 
   /** @internal */
+  invokeMutationValue(args: Args): Promise<unknown>;
+
+  /** @internal */
   exportArgs(): string;
 
   /** @internal */
@@ -535,6 +538,9 @@ export type RegisteredQuery<
 
   /** @internal */
   invokeQuery(argsStr: string): Promise<string>;
+
+  /** @internal */
+  invokeQueryValue(args: Args): Promise<unknown>;
 
   /** @internal */
   exportArgs(): string;
