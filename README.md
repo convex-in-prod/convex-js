@@ -47,11 +47,9 @@ To reconstruct the source commits on a clean checkout at `UPSTREAM`:
 The apply command uses `git am`, retaining commit authors and messages, and
 then requires the resulting tree to equal `RESULT_TREE`.
 
-Immutable archives under `packages/convex/` remain authoritative in the normal
-source history and are excluded from this source patch series. This avoids
-duplicating compressed release artifacts on every refresh. Changes outside
-that artifact directory, including release tooling and documentation, remain
-part of the series.
+Immutable archives are owned by the distribution repository. The maintained source
+train and this generated series contain no package payloads; historical snapshots
+retain their original export rules and result trees.
 
 The generated patches deliberately use zeroed mail-header commit IDs. Source
 commit IDs remain in `SERIES`, while unchanged patch content stays stable across
