@@ -21,8 +21,8 @@
 ## 1.48.0
 
 - Convex deployments can now sign their own JWTs with an internally managed
-  key-pair. The `ctx.auth.signJwt` API is available in mutations. The JWTs
-  can be verified with the public key in the JWKS hosted at
+  key-pair. The `ctx.auth.signJwt` API is available in mutations. The JWTs can
+  be verified with the public key in the JWKS hosted at
   `${CONVEX_CLOUD_URL}/.well-known/jwks.json`.
 - `npx convex dev --verbose` and `npx convex deploy --verbose` no longer print
   environment variable values. The logged list of environment variables shows
@@ -35,8 +35,8 @@
   `--include-values` to print the values.
 
 - Fixed `npx convex ai-files install` and `npx convex ai-files update` reporting
-  success and exiting 0 when the guidelines download or the agent skills
-  install failed. They now exit with code 1.
+  success and exiting 0 when the guidelines download or the agent skills install
+  failed. They now exit with code 1.
 
 - `ctx.storage.store()` and `ctx.storage.get()` are now available in mutations,
   not just actions. Files stored and read in a mutation count toward its
@@ -149,6 +149,17 @@
   gateway.
 - Improved the error message when `npx convex export` fails because a snapshot
   export is already in progress.
+- `npx convex codegen` now obtains server analysis through deployment preflight
+  without committing pending schemas or indexes or starting index backfills. It
+  reports an explicit error when the target backend's preflight response does
+  not include code generation analysis.
+- `ConvexHttpClient` now throws `ConvexHttpError` for completed non-UDF HTTP
+  failures. The error retains the HTTP status, response text, and parsed JSON
+  body when available, and identifies completed backend responses that prove
+  function execution was rejected before it started.
+- UTF-8 value comparison no longer retains request-derived scratch bytes in
+  module state. String ordering, including the established handling of lone
+  UTF-16 surrogates, is unchanged.
 
 ## 1.44.0
 
