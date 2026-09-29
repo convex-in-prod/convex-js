@@ -1,8 +1,14 @@
-import { Value, JSONValue, jsonToConvex } from "../../values/index.js";
+import { Value } from "../../values/index.js";
+import { jsonToConvexOwned } from "../../values/value.js";
 import { PaginationResult, PaginationOptions } from "../pagination.js";
-import { performAsyncSyscall, performSyscall } from "./syscall.js";
+import {
+  ValueSyscall,
+  performAsyncValueSyscall,
+  performQueryStreamSyscall,
+} from "./syscall.js";
 import {
   filterBuilderImpl,
+  SerializedQueryExpression,
   serializeExpression,
 } from "./filter_builder_impl.js";
 import { Query, QueryInitializer } from "../query.js";
@@ -17,11 +23,17 @@ import {
   SerializedSearchFilter,
 } from "./search_filter_builder_impl.js";
 import { validateArg, validateArgIsNonNegativeInteger } from "./validate.js";
+import { QueryRecord, queryRecordBuilder } from "./query_value.js";
 import { version } from "../../index.js";
+
+declare const Convex: { queryCollect?: true };
 
 const MAX_QUERY_OPERATORS = 256;
 
-type QueryOperator = { filter: JSONValue } | { limit: number };
+type QueryOperator =
+  | QueryRecord
+  | { filter: SerializedQueryExpression }
+  | { limit: number };
 type Source =
   | { type: "FullTableScan"; tableName: string; order: "asc" | "desc" | null }
   | {
@@ -102,11 +114,12 @@ export class QueryInitializerImpl implements QueryInitializer<GenericTableInfo> 
 
   // This is internal API and should not be exposed to developers yet.
   async count(): Promise<number> {
-    const syscallJSON = await performAsyncSyscall("1.0/count", {
-      table: this.tableName,
-    });
-    const syscallResult = jsonToConvex(syscallJSON) as number;
-    return syscallResult;
+    return await performAsyncValueSyscall<number>(
+      ValueSyscall.Count,
+      [this.tableName],
+      () => ({ table: this.tableName }),
+      (result) => jsonToConvexOwned(result) as number,
+    );
   }
 
   filter(
@@ -194,7 +207,9 @@ export class QueryImpl implements Query<GenericTableInfo> {
       throwClosedError(this.state.type);
     }
     const query = this.state.query;
-    const { queryId } = performSyscall("1.0/queryStream", { query, version });
+    const queryId = performQueryStreamSyscall("open", query, version);
+    if (queryId === undefined)
+      throw new Error("Query stream did not return an ID");
     this.state = { type: "executing", queryId };
     return queryId;
   }
@@ -202,7 +217,7 @@ export class QueryImpl implements Query<GenericTableInfo> {
   private closeQuery() {
     if (this.state.type === "executing") {
       const queryId = this.state.queryId;
-      performSyscall("1.0/queryCleanup", { queryId });
+      performQueryStreamSyscall("close", queryId);
     }
     this.state = { type: "consumed" };
   }
@@ -234,16 +249,19 @@ export class QueryImpl implements Query<GenericTableInfo> {
         `Can't construct query with more than ${MAX_QUERY_OPERATORS} operators`,
       );
     }
-    query.operators.push({
-      filter: serializeExpression(predicate(filterBuilderImpl)),
-    });
+    const filter = serializeExpression(predicate(filterBuilderImpl));
+    const record = queryRecordBuilder();
+    query.operators.push(
+      record === undefined ? { filter } : record(28, filter),
+    );
     return new QueryImpl(query);
   }
 
   limit(n: number): any {
     validateArg(n, 1, "limit", "n");
     const query = this.takeQuery();
-    query.operators.push({ limit: n });
+    const record = queryRecordBuilder();
+    query.operators.push(record === undefined ? { limit: n } : record(29, n));
     return new QueryImpl(query);
   }
 
@@ -261,14 +279,22 @@ export class QueryImpl implements Query<GenericTableInfo> {
     // a `for await` statement.
     const queryId =
       this.state.type === "preparing" ? this.startQuery() : this.state.queryId;
-    const { value, done } = await performAsyncSyscall("1.0/queryStreamNext", {
-      queryId,
-    });
+    const { value, done } = await performAsyncValueSyscall<{
+      value: any;
+      done: boolean;
+    }>(
+      ValueSyscall.StreamNext,
+      [queryId],
+      () => ({ queryId }),
+      (result) => ({
+        value: jsonToConvexOwned(result.value),
+        done: result.done,
+      }),
+    );
     if (done) {
       this.closeQuery();
     }
-    const convexValue = jsonToConvex(value);
-    return { value: convexValue, done };
+    return { value, done };
   }
 
   return() {
@@ -293,26 +319,66 @@ export class QueryImpl implements Query<GenericTableInfo> {
     const cursor = paginationOpts.cursor;
     const endCursor = paginationOpts?.endCursor ?? null;
     const maximumRowsRead = paginationOpts.maximumRowsRead ?? null;
-    const { page, isDone, continueCursor, splitCursor, pageStatus } =
-      await performAsyncSyscall("1.0/queryPage", {
+    const maximumBytesRead = paginationOpts.maximumBytesRead;
+    return await performAsyncValueSyscall<PaginationResult<any>>(
+      ValueSyscall.Page,
+      [
         query,
         cursor,
         endCursor,
         pageSize,
         maximumRowsRead,
-        maximumBytesRead: paginationOpts.maximumBytesRead,
+        maximumBytesRead,
         version,
-      });
-    return {
-      page: page.map((json: string) => jsonToConvex(json)),
-      isDone,
-      continueCursor,
-      splitCursor,
-      pageStatus,
-    };
+      ],
+      () => ({
+        query,
+        cursor,
+        endCursor,
+        pageSize,
+        maximumRowsRead,
+        maximumBytesRead,
+        version,
+      }),
+      (result) => {
+        for (let index = 0; index < result.page.length; index++) {
+          result.page[index] = jsonToConvexOwned(result.page[index]);
+        }
+        return result;
+      },
+    );
   }
 
   async collect(): Promise<Array<any>> {
+    if (
+      this.state.type === "preparing" &&
+      typeof Convex !== "undefined" &&
+      Convex.queryCollect === true
+    ) {
+      const query = this.takeQuery();
+      try {
+        const rows = await performAsyncValueSyscall<any[]>(
+          ValueSyscall.Collect,
+          [query, version],
+          () => ({ query, version }),
+          (result) => {
+            if (!Array.isArray(result)) {
+              throw new Error("Bulk query returned an invalid result");
+            }
+            for (let index = 0; index < result.length; index++) {
+              result[index] = jsonToConvexOwned(result[index]);
+            }
+            return result;
+          },
+        );
+        if (!Array.isArray(rows)) {
+          throw new Error("Bulk query returned an invalid result");
+        }
+        return rows;
+      } finally {
+        this.state = { type: "consumed" };
+      }
+    }
     const out: Value[] = [];
     for await (const item of this) {
       out.push(item);
