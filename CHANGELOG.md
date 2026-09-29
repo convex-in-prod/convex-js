@@ -59,6 +59,17 @@
   gateway.
 - Improved the error message when `npx convex export` fails because a snapshot
   export is already in progress.
+- `npx convex codegen` now obtains server analysis through deployment preflight
+  without committing pending schemas or indexes or starting index backfills. It
+  reports an explicit error when the target backend's preflight response does
+  not include code generation analysis.
+- `ConvexHttpClient` now throws `ConvexHttpError` for completed non-UDF HTTP
+  failures. The error retains the HTTP status, response text, and parsed JSON
+  body when available, and identifies completed backend responses that prove
+  function execution was rejected before it started.
+- UTF-8 value comparison no longer retains request-derived scratch bytes in
+  module state. String ordering, including the established handling of lone
+  UTF-16 surrogates, is unchanged.
 
 ## 1.44.0
 
