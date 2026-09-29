@@ -16,6 +16,7 @@ import {
   findExactVersionAndDependencies,
 } from "./external.js";
 import { innerEsbuild, isEsbuildBuildError } from "./debugBundle.js";
+import { contextReuseGroups } from "./contextReuseGroups.js";
 export { nodeFs, RecordingFs } from "./fs.js";
 export type { Filesystem } from "./fs.js";
 
@@ -68,6 +69,98 @@ type EsBuildResult = esbuild.BuildResult & {
   // Set of bundled modules.
   bundledModuleNames: Set<string>;
 };
+
+type ExperimentalContextReuse = {
+  rootDir: string;
+  exclusions: Record<string, string>;
+  httpActions: boolean;
+};
+
+const contextReuseExportName = "experimental_reuseContext";
+const defaultDatabaseContextReuseExport =
+  "export const experimental_reuseContext = true;\n";
+const defaultDatabaseAndHttpActionContextReuseExport =
+  "export const experimental_reuseContext = { queries: true, mutations: true, actions: false, httpActions: true };\n";
+
+type ContextReuseOutputPolicy = {
+  enabled: boolean;
+  httpActions: boolean;
+  entry: string;
+  // Absent for entries that retain the existing per-module reuse contract.
+  initializationModule?: string;
+};
+
+function exportedName(identifier: Identifier | { value: string }): string {
+  return "name" in identifier ? identifier.name : identifier.value;
+}
+
+function exportsContextReuse(source: string): boolean {
+  const ast = parseAST(source, { sourceType: "module" });
+  return ast.program.body.some((statement) => {
+    if (statement.type !== "ExportNamedDeclaration") {
+      return false;
+    }
+    if (
+      statement.declaration?.type === "VariableDeclaration" &&
+      statement.declaration.declarations.some(
+        (declaration) =>
+          declaration.id.type === "Identifier" &&
+          declaration.id.name === contextReuseExportName,
+      )
+    ) {
+      return true;
+    }
+    if (
+      (statement.declaration?.type === "FunctionDeclaration" ||
+        statement.declaration?.type === "ClassDeclaration") &&
+      statement.declaration.id?.name === contextReuseExportName
+    ) {
+      return true;
+    }
+    return statement.specifiers.some(
+      (specifier) =>
+        specifier.type === "ExportSpecifier" &&
+        exportedName(specifier.exported) === contextReuseExportName,
+    );
+  });
+}
+
+export async function applyDefaultContextReusePolicy(
+  ctx: Context,
+  source: string,
+  policy: ContextReuseOutputPolicy,
+): Promise<string> {
+  if (exportsContextReuse(source)) {
+    return await ctx.crash({
+      exitCode: 1,
+      errorType: "invalid filesystem data",
+      printedMessage: `Cannot apply the default context-reuse policy to ${policy.entry}: Entry modules must not export ${contextReuseExportName} when bundler.experimentalContextReuse owns the default policy.`,
+    });
+  }
+
+  if (!policy.enabled) {
+    return source;
+  }
+
+  const contextReuseExport =
+    policy.initializationModule !== undefined
+      ? `export const experimental_reuseContext = { queries: true, mutations: true, actions: false, httpActions: ${policy.httpActions}, initializationModule: ${JSON.stringify(policy.initializationModule)} };\n`
+      : policy.httpActions
+        ? defaultDatabaseAndHttpActionContextReuseExport
+        : defaultDatabaseContextReuseExport;
+  const sourceMapComment = source.match(/\/\/# sourceMappingURL=[^\n]*\n?$/u);
+  if (sourceMapComment === null || sourceMapComment.index === undefined) {
+    return `${source.endsWith("\n") ? source : `${source}\n`}${contextReuseExport}`;
+  }
+  return `${source.slice(0, sourceMapComment.index)}${contextReuseExport}${source.slice(sourceMapComment.index)}`;
+}
+
+function normalizedEntryPath(rootDir: string, entryPoint: string): string {
+  return path
+    .relative(rootDir, entryPoint)
+    .split(path.sep)
+    .join(path.posix.sep);
+}
 
 async function doEsbuild({
   ctx,
@@ -190,6 +283,7 @@ export async function bundle({
   extraConditions = [],
   includeSourcesContent = false,
   splitting,
+  experimentalContextReuse,
 }: {
   ctx: Context;
   dir: string;
@@ -201,6 +295,7 @@ export async function bundle({
   extraConditions?: string[];
   includeSourcesContent?: boolean;
   splitting?: boolean;
+  experimentalContextReuse?: ExperimentalContextReuse;
 }): Promise<{
   modules: Bundle[];
   externalDependencies: Map<string, string>;
@@ -240,6 +335,74 @@ export async function bundle({
   const sourceMaps = new Map();
   const modules: Bundle[] = [];
   const environment = platform === "node" ? "node" : "isolate";
+  const contextReuseOutputPolicy = new Map<string, ContextReuseOutputPolicy>();
+  if (experimentalContextReuse !== undefined) {
+    const unmatchedExcludedEntries = new Set(
+      Object.keys(experimentalContextReuse.exclusions).map((entry) =>
+        entry.split(path.win32.sep).join(path.posix.sep),
+      ),
+    );
+    const reuseByEntryPoint = new Map(
+      entryPoints.map((entryPoint) => {
+        const resolvedEntryPoint = path.resolve(entryPoint);
+        const entry = normalizedEntryPath(
+          experimentalContextReuse.rootDir,
+          resolvedEntryPoint,
+        );
+        const excluded = unmatchedExcludedEntries.delete(entry);
+        return [resolvedEntryPoint, !excluded];
+      }),
+    );
+    if (unmatchedExcludedEntries.size > 0) {
+      return await ctx.crash({
+        exitCode: 1,
+        errorType: "invalid filesystem data",
+        printedMessage: `Context-reuse exclusions must name root isolate entries. Unmatched exclusions: ${[...unmatchedExcludedEntries].sort().join(", ")}`,
+      });
+    }
+    for (const [outputPath, output] of Object.entries(
+      result.metafile!.outputs,
+    )) {
+      if (output.entryPoint !== undefined) {
+        const entryPoint = path.resolve(output.entryPoint);
+        const enabled = reuseByEntryPoint.get(entryPoint);
+        if (enabled === undefined) {
+          continue;
+        }
+        contextReuseOutputPolicy.set(path.resolve(outputPath), {
+          enabled,
+          httpActions: experimentalContextReuse.httpActions,
+          entry: normalizedEntryPath(
+            experimentalContextReuse.rootDir,
+            entryPoint,
+          ),
+        });
+      }
+    }
+  }
+  if (platform === "browser" && experimentalContextReuse !== undefined) {
+    const { initializers, initializerByOutput } = await contextReuseGroups(
+      ctx,
+      result.outputFiles,
+      result.metafile!,
+      new Set(
+        [...contextReuseOutputPolicy]
+          .filter(([, policy]) => policy.enabled)
+          .map(([output]) => output),
+      ),
+      chunksFolder,
+    );
+    for (const [output, initializationModule] of initializerByOutput) {
+      contextReuseOutputPolicy.get(output)!.initializationModule =
+        initializationModule;
+    }
+    modules.push(
+      ...initializers.map((module) => ({
+        ...module,
+        environment: "isolate" as const,
+      })),
+    );
+  }
   for (const outputFile of result.outputFiles) {
     const relPath = path.relative(path.normalize("out"), outputFile.path);
     if (path.extname(relPath) === ".map") {
@@ -247,7 +410,18 @@ export async function bundle({
       continue;
     }
     const posixRelPath = relPath.split(path.sep).join(path.posix.sep);
-    modules.push({ path: posixRelPath, source: outputFile.text, environment });
+    let source = outputFile.text;
+    const contextReusePolicy = contextReuseOutputPolicy.get(
+      path.resolve(outputFile.path),
+    );
+    if (contextReusePolicy !== undefined) {
+      source = await applyDefaultContextReusePolicy(
+        ctx,
+        source,
+        contextReusePolicy,
+      );
+    }
+    modules.push({ path: posixRelPath, source, environment });
   }
   for (const module of modules) {
     const sourceMapPath = module.path + ".map";
