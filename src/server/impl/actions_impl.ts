@@ -5,6 +5,12 @@ import { parseArgs } from "../../common/index.js";
 import { FunctionReference } from "../../server/api.js";
 import { getFunctionAddress } from "../components/paths.js";
 import { validateArg } from "./validate.js";
+import {
+  isWriteConflictRetryableError,
+  retryOnWriteConflict,
+  validateWriteConflictRetryOptions,
+  WriteConflictRetryOptions,
+} from "../../common/write_conflict_retry.js";
 
 function syscallArgs(
   requestId: string,
@@ -35,10 +41,18 @@ export function setupActionCalls(requestId: string) {
     runMutation: async (
       mutation: FunctionReference<"mutation", "public" | "internal">,
       args?: Record<string, Value>,
+      options?: WriteConflictRetryOptions,
     ): Promise<any> => {
-      const result = await performAsyncSyscall(
-        "1.0/actions/mutation",
-        syscallArgs(requestId, mutation, args),
+      const writeConflictRetryOptions =
+        validateWriteConflictRetryOptions(options);
+      const result = await retryOnWriteConflict(
+        () =>
+          performAsyncSyscall(
+            "1.0/actions/mutation",
+            syscallArgs(requestId, mutation, args),
+          ),
+        writeConflictRetryOptions,
+        isWriteConflictRetryableError,
       );
       return jsonToConvex(result);
     },
