@@ -231,6 +231,15 @@ function validateObjectField(k: string) {
  * @public
  */
 export function jsonToConvex(value: JSONValue): Value {
+  return jsonToConvexInternal(value, false);
+}
+
+// Call only with a fresh JSON.parse result that has no other observers.
+export function jsonToConvexOwned(value: JSONValue): Value {
+  return jsonToConvexInternal(value, true);
+}
+
+function jsonToConvexInternal(value: JSONValue, owned: boolean): Value {
   if (value === null) {
     return value;
   }
@@ -244,14 +253,22 @@ export function jsonToConvex(value: JSONValue): Value {
     return value;
   }
   if (Array.isArray(value)) {
-    return value.map((value) => jsonToConvex(value));
+    if (owned) {
+      const output = value as Value[];
+      for (let index = 0; index < value.length; index++) {
+        output[index] = jsonToConvexInternal(value[index], true);
+      }
+      return output;
+    }
+    return value.map((item) => jsonToConvexInternal(item, false));
   }
   if (typeof value !== "object") {
     throw new Error(`Unexpected type of ${value as any}`);
   }
-  const entries = Object.entries(value);
-  if (entries.length === 1) {
-    const key = entries[0][0];
+  const ownedKeys = owned ? Object.keys(value) : undefined;
+  const entries = owned ? undefined : Object.entries(value);
+  if ((owned ? ownedKeys!.length : entries!.length) === 1) {
+    const key = owned ? ownedKeys![0] : entries![0][0];
     if (key === "$bytes") {
       if (typeof value.$bytes !== "string") {
         throw new Error(`Malformed $bytes field on ${value as any}`);
@@ -298,10 +315,32 @@ export function jsonToConvex(value: JSONValue): Value {
       );
     }
   }
+  if (owned) {
+    const out = value as Record<string, Value>;
+    for (const k of ownedKeys!) {
+      validateObjectField(k);
+      const previous = out[k] as JSONValue;
+      const decoded = jsonToConvexInternal(previous, true);
+      if (decoded !== previous) {
+        out[k] = decoded;
+      }
+    }
+    return out;
+  }
   const out: { [key: string]: Value } = {};
-  for (const [k, v] of Object.entries(value)) {
+  for (const [k, v] of entries!) {
     validateObjectField(k);
-    out[k] = jsonToConvex(v);
+    const decoded = jsonToConvexInternal(v, false);
+    if (k === "__proto__") {
+      Object.defineProperty(out, k, {
+        configurable: true,
+        enumerable: true,
+        value: decoded,
+        writable: true,
+      });
+    } else {
+      out[k] = decoded;
+    }
   }
   return out;
 }

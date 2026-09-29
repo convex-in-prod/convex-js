@@ -1,4 +1,10 @@
-import { JSONValue, convexOrUndefinedToJson } from "../../values/value.js";
+import {
+  QueryValue,
+  queryValueArg,
+  QueryRecord,
+  queryRecordBuilder,
+  queryValueRecordBuilder,
+} from "./query_value.js";
 import {
   FieldTypeFromFieldPath,
   GenericDocument,
@@ -12,6 +18,7 @@ import {
 import { validateArg } from "./validate.js";
 
 export type SerializedSearchFilter =
+  | QueryRecord
   | {
       type: "Search";
       fieldPath: string;
@@ -20,7 +27,7 @@ export type SerializedSearchFilter =
   | {
       type: "Eq";
       fieldPath: string;
-      value: JSONValue;
+      value: QueryValue;
     };
 
 export class SearchFilterBuilderImpl
@@ -29,9 +36,9 @@ export class SearchFilterBuilderImpl
     SearchFilterBuilder<GenericDocument, GenericSearchIndexConfig>,
     SearchFilterFinalizer<GenericDocument, GenericSearchIndexConfig>
 {
-  private filters: ReadonlyArray<SerializedSearchFilter>;
+  private filters: SerializedSearchFilter[];
   private isConsumed: boolean;
-  private constructor(filters: ReadonlyArray<SerializedSearchFilter>) {
+  private constructor(filters: SerializedSearchFilter[]) {
     super();
     this.filters = filters;
     this.isConsumed = false;
@@ -57,13 +64,15 @@ export class SearchFilterBuilderImpl
     validateArg(fieldName, 1, "search", "fieldName");
     validateArg(query, 2, "search", "query");
     this.consume();
-    return new SearchFilterBuilderImpl(
-      this.filters.concat({
-        type: "Search",
-        fieldPath: fieldName,
-        value: query,
-      }),
+    // Consumption transfers ownership to the successor; old wrappers cannot
+    // append to or export this array again.
+    const record = queryRecordBuilder();
+    this.filters.push(
+      record === undefined
+        ? { type: "Search", fieldPath: fieldName, value: query }
+        : record(26, fieldName, query),
     );
+    return new SearchFilterBuilderImpl(this.filters);
   }
   eq<FieldName extends string>(
     fieldName: FieldName,
@@ -75,16 +84,22 @@ export class SearchFilterBuilderImpl
       validateArg(value, 2, "search", "value");
     }
     this.consume();
-    return new SearchFilterBuilderImpl(
-      this.filters.concat({
-        type: "Eq",
-        fieldPath: fieldName,
-        value: convexOrUndefinedToJson(value),
-      }),
-    );
+    const valueRecord = queryValueRecordBuilder();
+    if (valueRecord !== undefined) {
+      this.filters.push(valueRecord(27, fieldName, value));
+    } else {
+      const captured = queryValueArg(value);
+      const record = queryRecordBuilder();
+      this.filters.push(
+        record === undefined
+          ? { type: "Eq", fieldPath: fieldName, value: captured }
+          : record(27, fieldName, captured),
+      );
+    }
+    return new SearchFilterBuilderImpl(this.filters);
   }
 
-  export() {
+  export(): ReadonlyArray<SerializedSearchFilter> {
     this.consume();
     return this.filters;
   }
