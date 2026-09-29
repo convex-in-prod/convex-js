@@ -96,6 +96,12 @@ export interface ProjectConfig {
 
   bundler?: {
     includeSourcesContent?: boolean;
+    experimentalContextReuse?: {
+      default: true;
+      exclusions: Record<string, string>;
+      httpActions: boolean;
+      actions?: { entries: string[]; grouping: boolean };
+    };
   };
 
   typescriptCompiler?: TypescriptCompiler;
@@ -296,6 +302,69 @@ const BundlerSchema = z.object({
     .default(false)
     .describe(
       "Whether to include original source code in source maps. Set to false to reduce bundle size.",
+    ),
+  experimentalContextReuse: z
+    .object({
+      default: z.literal(true),
+      exclusions: z
+        .record(
+          z
+            .string()
+            .refine(
+              (entry) =>
+                entry !== "" &&
+                !entry.includes("\\") &&
+                !path.posix.isAbsolute(entry) &&
+                path.posix.normalize(entry) === entry &&
+                entry !== ".." &&
+                !entry.startsWith("../"),
+              "Context-reuse exclusion paths must be normalized POSIX paths relative to the functions directory.",
+            ),
+          z.string().min(32),
+        )
+        .default({})
+        .describe(
+          "Convex entry paths, relative to the functions directory, that must remain fresh, mapped to operator review reasons.",
+        ),
+      httpActions: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Allow HTTP actions in included root isolate entries to reuse initialized contexts. This requires a backend that supports typed context-reuse policy.",
+        ),
+      actions: z
+        .object({
+          entries: z
+            .array(
+              z
+                .string()
+                .refine(
+                  (entry) =>
+                    entry !== "" &&
+                    !entry.includes("\\") &&
+                    !path.posix.isAbsolute(entry) &&
+                    path.posix.normalize(entry) === entry &&
+                    entry !== ".." &&
+                    !entry.startsWith("../"),
+                  "Action entries must be normalized POSIX paths relative to the functions directory.",
+                ),
+            )
+            .refine(
+              (entries) => new Set(entries).size === entries.length,
+              "Action entries must be unique.",
+            ),
+          grouping: z.boolean().default(true),
+        })
+        .strict()
+        .optional()
+        .describe(
+          "Ordinary isolate action entry graphs reviewed for context reuse. Omit to keep ordinary actions fresh. Group equivalent initialized graphs unless grouping is false.",
+        ),
+    })
+    .strict()
+    .optional()
+    .describe(
+      "Make reusable contexts the default for root-application isolate entry modules by adding the upstream experimental_reuseContext export during bundling. Omit this setting to retain upstream explicit opt-in behavior.",
     ),
 });
 
@@ -636,6 +705,24 @@ export async function configFromProjectConfig(
     entryPoints: entryPoints.isolate,
     generateSourceMaps: true,
     platform: "browser",
+    ...(projectConfig.bundler?.experimentalContextReuse === undefined
+      ? {}
+      : {
+          experimentalContextReuse: {
+            rootDir: baseDir,
+            exclusions:
+              projectConfig.bundler.experimentalContextReuse.exclusions,
+            httpActions:
+              projectConfig.bundler.experimentalContextReuse.httpActions,
+            ...(projectConfig.bundler.experimentalContextReuse.actions ===
+            undefined
+              ? {}
+              : {
+                  actions:
+                    projectConfig.bundler.experimentalContextReuse.actions,
+                }),
+          },
+        }),
   });
   if (verbose) {
     logMessage(
