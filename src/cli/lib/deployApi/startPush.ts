@@ -24,6 +24,8 @@ export const startPushRequest = looseObject({
 
   nodeVersion: z.optional(z.string()),
   nodeDefaultMemoryMb: z.optional(z.number()),
+  forCodegen: z.boolean().optional(),
+  includeAnalysis: z.boolean().optional(),
 });
 export type StartPushRequest = z.infer<typeof startPushRequest>;
 
@@ -34,6 +36,14 @@ export const schemaChange = looseObject({
 });
 export type SchemaChange = z.infer<typeof schemaChange>;
 
+const analysisByComponent = z.record(
+  componentDefinitionPath,
+  evaluatedComponentDefinition,
+);
+export type PushAnalysis = {
+  analysis: z.infer<typeof analysisByComponent>;
+};
+
 export const startPushResponse = looseObject({
   environmentVariables: z.record(z.string(), z.string()),
 
@@ -41,7 +51,7 @@ export const startPushResponse = looseObject({
   componentDefinitionPackages: z.record(componentDefinitionPath, sourcePackage),
 
   appAuth: z.array(authInfo),
-  analysis: z.record(componentDefinitionPath, evaluatedComponentDefinition),
+  analysis: analysisByComponent,
 
   app: checkedComponent,
 
@@ -115,6 +125,8 @@ export function startPushResponseForLogging(
 }
 
 export const evaluatePushResponse = looseObject({
+  // Older backends only returned schemaChange from this endpoint.
+  analysis: analysisByComponent.optional(),
   schemaChange,
 });
 export type EvaluatePushResponse = z.infer<typeof evaluatePushResponse>;

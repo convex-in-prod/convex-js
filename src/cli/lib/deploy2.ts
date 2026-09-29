@@ -163,6 +163,8 @@ async function pushCode(
     componentCount: request.componentDefinitions?.length ?? 0,
     hasDependencies: request.nodeDependencies?.length > 0,
     dryRun: request.dryRun,
+    forCodegen: request.forCodegen ?? false,
+    includeAnalysis: request.includeAnalysis ?? false,
   };
   logVerbose(`Push request summary: ${JSON.stringify(requestSummary)}`);
   const onError = (err: any) => {
@@ -204,10 +206,16 @@ async function pushCode(
       // eslint-disable-next-line no-restricted-syntax
       throw error;
     }
+    const defaultMessage =
+      endpoint === "/api/deploy2/evaluate_push"
+        ? "Error: Unable to evaluate push against " + options.url
+        : endpoint === "/api/deploy2/evaluate_schema"
+          ? "Error: Unable to evaluate schema against " + options.url
+          : "Error: Unable to start push to " + options.url;
     return await handlePushConfigError(
       ctx,
       error,
-      "Error: Unable to start push to " + options.url,
+      defaultMessage,
       options.deploymentName,
       {
         adminKey: request.adminKey,

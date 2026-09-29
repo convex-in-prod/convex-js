@@ -8,7 +8,7 @@ import {
   AnalyzedSchema,
   TableDefinition,
 } from "../lib/deployApi/componentDefinition.js";
-import { StartPushResponse } from "../lib/deployApi/startPush.js";
+import { PushAnalysis } from "../lib/deployApi/startPush.js";
 import { ConvexValidator } from "../lib/deployApi/validator.js";
 import { compareStrings, header } from "./common.js";
 import { validatorToType } from "./validator_helpers.js";
@@ -126,7 +126,7 @@ export function dynamicDataModelTS() {
 
 async function staticDataModelImpl(
   ctx: Context,
-  startPush: StartPushResponse,
+  pushAnalysis: PushAnalysis,
   rootComponent: ComponentDirectory,
   componentDirectory: ComponentDirectory,
   useTypeScript: boolean,
@@ -136,12 +136,12 @@ async function staticDataModelImpl(
     componentDirectory,
   );
 
-  const analysis = startPush.analysis[definitionPath];
+  const analysis = pushAnalysis.analysis[definitionPath];
   if (!analysis) {
     return await ctx.crash({
       exitCode: 1,
       errorType: "fatal",
-      printedMessage: `No analysis found for component ${definitionPath} orig: ${definitionPath}\nin\n${Object.keys(startPush.analysis).toString()}`,
+      printedMessage: `No analysis found for component ${definitionPath}. Available components: ${Object.keys(pushAnalysis.analysis).join(", ")}`,
     });
   }
   if (!analysis.schema) {
@@ -190,13 +190,13 @@ async function staticDataModelImpl(
 
 export async function staticDataModelDTS(
   ctx: Context,
-  startPush: StartPushResponse,
+  pushAnalysis: PushAnalysis,
   rootComponent: ComponentDirectory,
   componentDirectory: ComponentDirectory,
 ) {
   return staticDataModelImpl(
     ctx,
-    startPush,
+    pushAnalysis,
     rootComponent,
     componentDirectory,
     false,
@@ -206,13 +206,13 @@ export async function staticDataModelDTS(
 // Used for components and root
 export async function staticDataModelTS(
   ctx: Context,
-  startPush: StartPushResponse,
+  pushAnalysis: PushAnalysis,
   rootComponent: ComponentDirectory,
   componentDirectory: ComponentDirectory,
 ) {
   return staticDataModelImpl(
     ctx,
-    startPush,
+    pushAnalysis,
     rootComponent,
     componentDirectory,
     true,

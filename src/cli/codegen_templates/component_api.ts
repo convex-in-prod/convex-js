@@ -7,7 +7,7 @@ import {
   toComponentDefinitionPath,
   ComponentDefinitionPath,
 } from "../lib/components/definition/directoryStructure.js";
-import { StartPushResponse } from "../lib/deployApi/startPush.js";
+import { PushAnalysis } from "../lib/deployApi/startPush.js";
 import { importPath, moduleIdentifier } from "./api.js";
 import {
   apiComment,
@@ -83,7 +83,7 @@ export function componentApiStubTS() {
 
 export async function componentApiDTS(
   ctx: Context,
-  startPush: StartPushResponse,
+  pushAnalysis: PushAnalysis,
   rootComponent: ComponentDirectory,
   componentDirectory: ComponentDirectory,
   componentsMap: Map<string, ComponentDirectory>,
@@ -94,12 +94,12 @@ export async function componentApiDTS(
     componentDirectory,
   );
 
-  const analysis = startPush.analysis[definitionPath];
+  const analysis = pushAnalysis.analysis[definitionPath];
   if (!analysis) {
     return await ctx.crash({
       exitCode: 1,
       errorType: "fatal",
-      printedMessage: `No analysis found for component ${definitionPath} orig: ${definitionPath}\nin\n${Object.keys(startPush.analysis).toString()}`,
+      printedMessage: `No analysis found for component ${definitionPath}. Available components: ${Object.keys(pushAnalysis.analysis).join(", ")}`,
     });
   }
 
@@ -120,7 +120,7 @@ export async function componentApiDTS(
   lines.push(
     ...(await componentApiLines(
       ctx,
-      startPush,
+      pushAnalysis,
       analysis,
       rootComponent,
       componentDirectory,
@@ -161,7 +161,7 @@ export function childComponentImportPath({
 
 async function componentApiLines(
   ctx: Context,
-  startPush: StartPushResponse,
+  pushAnalysis: PushAnalysis,
   analysis: EvaluatedComponentDefinition,
   rootComponent: ComponentDirectory,
   componentDirectory: ComponentDirectory,
@@ -194,7 +194,7 @@ async function componentApiLines(
         `  "${childComponent.name}": import("${importPath}/_generated/component.js").ComponentApi<"${childComponent.name}">,`,
       );
     } else {
-      const childComponentAnalysis = startPush.analysis[childComponent.path];
+      const childComponentAnalysis = pushAnalysis.analysis[childComponent.path];
       if (!childComponentAnalysis) {
         return await ctx.crash({
           exitCode: 1,
@@ -216,7 +216,7 @@ async function componentApiLines(
 
 export async function componentTS(
   ctx: Context,
-  startPush: StartPushResponse,
+  pushAnalysis: PushAnalysis,
   rootComponent: ComponentDirectory,
   componentDirectory: ComponentDirectory,
 ) {
@@ -224,12 +224,12 @@ export async function componentTS(
     rootComponent,
     componentDirectory,
   );
-  const analysis = startPush.analysis[definitionPath];
+  const analysis = pushAnalysis.analysis[definitionPath];
   if (!analysis) {
     return await ctx.crash({
       exitCode: 1,
       errorType: "fatal",
-      printedMessage: `No analysis found for component ${definitionPath} orig: ${definitionPath}\nin\n${Object.keys(startPush.analysis).toString()}`,
+      printedMessage: `No analysis found for component ${definitionPath}. Available components: ${Object.keys(pushAnalysis.analysis).join(", ")}`,
     });
   }
 
@@ -266,7 +266,7 @@ export async function componentTS(
 
 export async function componentApiTSWithTypes(
   ctx: Context,
-  startPush: StartPushResponse,
+  pushAnalysis: PushAnalysis,
   rootComponent: ComponentDirectory,
   componentDirectory: ComponentDirectory,
   componentsMap: Map<string, ComponentDirectory>,
@@ -277,12 +277,12 @@ export async function componentApiTSWithTypes(
     componentDirectory,
   );
 
-  const analysis = startPush.analysis[definitionPath];
+  const analysis = pushAnalysis.analysis[definitionPath];
   if (!analysis) {
     return await ctx.crash({
       exitCode: 1,
       errorType: "fatal",
-      printedMessage: `No analysis found for component ${definitionPath} orig: ${definitionPath}\nin\n${Object.keys(startPush.analysis).toString()}`,
+      printedMessage: `No analysis found for component ${definitionPath}. Available components: ${Object.keys(pushAnalysis.analysis).join(", ")}`,
     });
   }
 
@@ -304,7 +304,7 @@ export async function componentApiTSWithTypes(
   lines.push(
     ...(await componentApiLines(
       ctx,
-      startPush,
+      pushAnalysis,
       analysis,
       rootComponent,
       componentDirectory,
