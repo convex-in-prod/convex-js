@@ -626,6 +626,7 @@ export async function bundleImplementations({
   extraConditions,
   verbose = false,
   includeSourcesContent = false,
+  experimentalContextReuse,
 }: {
   ctx: Context;
   rootComponentDirectory: ComponentDirectory;
@@ -634,6 +635,12 @@ export async function bundleImplementations({
   extraConditions: string[];
   verbose: boolean;
   includeSourcesContent?: boolean;
+  experimentalContextReuse?: {
+    default: true;
+    exclusions: Record<string, string>;
+    httpActions: boolean;
+    actions?: { entries: string[]; grouping: boolean };
+  };
 }): Promise<{
   appImplementation: {
     schema: Bundle | null;
@@ -699,6 +706,18 @@ export async function bundleImplementations({
       platform: "browser",
       extraConditions,
       includeSourcesContent,
+      ...(!isRoot || experimentalContextReuse === undefined
+        ? {}
+        : {
+            experimentalContextReuse: {
+              rootDir: path.resolve(rootComponentDirectory.path),
+              exclusions: experimentalContextReuse.exclusions,
+              httpActions: experimentalContextReuse.httpActions,
+              ...(experimentalContextReuse.actions === undefined
+                ? {}
+                : { actions: experimentalContextReuse.actions }),
+            },
+          }),
     });
 
     if (convexResult.externalDependencies.size !== 0) {
