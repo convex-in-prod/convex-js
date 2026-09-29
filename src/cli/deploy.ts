@@ -1,3 +1,7 @@
+import {
+  readNativeResidentActivation,
+  type NativeResidentActivation,
+} from "./lib/deployApi/nativeResident.js";
 import { chalkStderr } from "chalk";
 import { Command, Option } from "@commander-js/extra-typings";
 import { Context, oneoffContext } from "../bundler/context.js";
@@ -129,9 +133,20 @@ Same format as .env.local or .env files, and overrides them.`,
       "Skip the confirmation prompt when this push discards a staged table validator that is validating or already validated.",
     ),
   )
+  .addOption(
+    new Option(
+      "--native-resident <file>",
+      "Read an explicit native resident selection envelope for this function deployment.",
+    ),
+  )
   .showHelpAfterError()
   .action(async (cmdOptions) => {
     const ctx = await oneoffContext(cmdOptions);
+    // Read once before build commands or retries; they cannot replace publication intent.
+    const nativeResident =
+      cmdOptions.nativeResident === undefined
+        ? undefined
+        : await readNativeResidentActivation(ctx, cmdOptions.nativeResident);
 
     const deploymentSelection = await getDeploymentSelection(ctx, {
       ...cmdOptions,
@@ -192,6 +207,7 @@ Same format as .env.local or .env files, and overrides them.`,
         },
         {
           ...cmdOptions,
+          nativeResident,
           previewName: previewName ?? undefined,
           reuse,
           skipLargeIndexesCheck: cmdOptions.skipLargeIndexesCheck ?? false,
@@ -217,6 +233,7 @@ Same format as .env.local or .env files, and overrides them.`,
 
       await deployToExistingDeployment(ctx, deploymentSelection, {
         ...cmdOptions,
+        nativeResident,
         skipWorkosCheck: cmdOptions.skipWorkosCheck ?? false,
         skipLargeIndexesCheck: cmdOptions.skipLargeIndexesCheck ?? false,
         allowDeletingLargeIndexes:
@@ -256,6 +273,7 @@ async function deployToNewPreviewDeployment(
     skipLargeIndexesCheck: boolean;
     message: string | null;
     forceNodeCutover?: boolean | undefined;
+    nativeResident?: NativeResidentActivation | undefined;
   },
 ) {
   const previewName = options.previewName ?? null;
@@ -366,6 +384,7 @@ async function deployToNewPreviewDeployment(
     warnOnSlowSchemaValidation: true,
     message: options.message,
     forceNodeCutover: !!options.forceNodeCutover,
+    nativeResident: options.nativeResident,
   };
   showSpinner(`Deploying to ${previewUrl}...`);
   await runPush(ctx, pushOptions);
@@ -414,6 +433,7 @@ async function deployToExistingDeployment(
     allowUnstagingSchema: boolean;
     message: string | null;
     forceNodeCutover?: boolean | undefined;
+    nativeResident?: NativeResidentActivation | undefined;
   },
 ) {
   const deploymentToActOn = await loadSelectedDeploymentCredentials(

@@ -65,6 +65,9 @@ async function getDeploymentMetadata(): Promise<DeploymentMetadata> {
     name: result.name,
     region: result.region ?? null,
     class: result.class,
+    ...(result.nativeResident === undefined
+      ? {}
+      : { nativeResident: result.nativeResident }),
   };
 }
 
