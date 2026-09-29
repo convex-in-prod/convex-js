@@ -1,3 +1,7 @@
+import {
+  readNativeResidentActivation,
+  type NativeResidentActivation,
+} from "./lib/deployApi/nativeResident.js";
 import { chalkStderr } from "chalk";
 import { Command, Option } from "@commander-js/extra-typings";
 import { Context, oneoffContext } from "../bundler/context.js";
@@ -116,9 +120,20 @@ Same format as .env.local or .env files, and overrides them.`,
       .conflicts("preview-create")
       .conflicts("preview-name"),
   )
+  .addOption(
+    new Option(
+      "--native-resident <file>",
+      "Read an explicit native resident selection envelope for this function deployment.",
+    ),
+  )
   .showHelpAfterError()
   .action(async (cmdOptions) => {
     const ctx = await oneoffContext(cmdOptions);
+    // Read once before build commands or retries; they cannot replace publication intent.
+    const nativeResident =
+      cmdOptions.nativeResident === undefined
+        ? undefined
+        : await readNativeResidentActivation(ctx, cmdOptions.nativeResident);
 
     const deploymentSelection = await getDeploymentSelection(ctx, {
       ...cmdOptions,
@@ -179,6 +194,7 @@ Same format as .env.local or .env files, and overrides them.`,
         },
         {
           ...cmdOptions,
+          nativeResident,
           previewName: previewName ?? undefined,
           reuse,
           message: cmdOptions.message ?? getDefaultDeployMessage(),
@@ -203,6 +219,7 @@ Same format as .env.local or .env files, and overrides them.`,
 
       await deployToExistingDeployment(ctx, deploymentSelection, {
         ...cmdOptions,
+        nativeResident,
         skipWorkosCheck: cmdOptions.skipWorkosCheck ?? false,
         allowDeletingLargeIndexes:
           cmdOptions.allowDeletingLargeIndexes ?? false,
@@ -239,6 +256,7 @@ async function deployToNewPreviewDeployment(
     skipWorkosCheck?: boolean | undefined;
     message: string | null;
     forceNodeCutover?: boolean | undefined;
+    nativeResident?: NativeResidentActivation | undefined;
   },
 ) {
   const previewName = options.previewName ?? null;
@@ -337,6 +355,7 @@ async function deployToNewPreviewDeployment(
     warnOnSlowSchemaValidation: true,
     message: options.message,
     forceNodeCutover: !!options.forceNodeCutover,
+    nativeResident: options.nativeResident,
   };
   showSpinner(`Deploying to ${previewUrl}...`);
   await runPush(ctx, pushOptions);
@@ -383,6 +402,7 @@ async function deployToExistingDeployment(
     allowDeletingLargeIndexes: boolean;
     message: string | null;
     forceNodeCutover?: boolean | undefined;
+    nativeResident?: NativeResidentActivation | undefined;
   },
 ) {
   const deploymentToActOn = await loadSelectedDeploymentCredentials(

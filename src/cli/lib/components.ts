@@ -1,3 +1,4 @@
+import type { NativeResidentActivation } from "./deployApi/nativeResident.js";
 import path from "path";
 import { Context } from "../../bundler/context.js";
 import {
@@ -87,6 +88,7 @@ export type PushOptions = {
   warnOnSlowSchemaValidation: boolean;
   message: string | null;
   forceNodeCutover: boolean;
+  nativeResident?: NativeResidentActivation | undefined;
 };
 
 export async function runCodegen(
