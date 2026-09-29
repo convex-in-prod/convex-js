@@ -36,13 +36,16 @@ import {
 import {
   ActionRequest,
   MutationRequest,
+  QueryWorkloadClass,
   QueryId,
   QueryJournal,
   ServerMessage,
+  ServerPressure,
   RequestId,
   TS,
   UserIdentityAttributes,
 } from "./protocol.js";
+export type { QueryWorkloadClass, ServerPressure } from "./protocol.js";
 import { RemoteQuerySet } from "./remote_query_set.js";
 import { QueryToken, serializePathAndArgs } from "./udf_path_utils.js";
 import { ReconnectMetadata, WebSocketManager } from "./web_socket_manager.js";
@@ -59,11 +62,52 @@ import { ConvexError } from "../../values/errors.js";
 import { jwtDecode } from "../../vendor/jwt-decode/index.js";
 
 /**
+ * A handler for temporary server pressure affecting degradable reactive
+ * queries.
+ *
+ * The transition carrying the pressure is applied before this handler runs.
+ * Existing transition listeners run first; if one of them throws, this handler
+ * is not reached and the listener's existing error behavior is unchanged.
+ * Applications should present the affected connection as stale while keeping
+ * successful subscriptions mounted. The backend retains and retries only its
+ * deferred query set. Mutations and actions continue normally and are not
+ * degradable. Pressure epochs belong to one connection; applications retaining
+ * pressure state must also clear it when {@link ConnectionState.connectionCount}
+ * changes because a replacement backend worker cannot clear the old epoch.
+ *
+ * This handler should update application state synchronously. Returned promises
+ * are not awaited, but rejections and synchronous errors are logged and do not
+ * interrupt synchronization.
+ *
+ * @public
+ */
+export type ServerPressureHandler = (
+  pressure: ServerPressure,
+) => void | Promise<void>;
+
+/**
  * Options for {@link BaseConvexClient}.
  *
  * @public
  */
 export interface BaseConvexClientOptions {
+  /**
+   * Opts this client's root reactive queries into temporary degradation when
+   * the backend is configured to limit degradable query capacity.
+   *
+   * Omit this option to preserve normal query behavior. This setting does not
+   * apply to mutations or actions.
+   */
+  queryWorkloadClass?: QueryWorkloadClass;
+  /**
+   * Called after a server transition reports temporary pressure metadata for
+   * degradable reactive queries.
+   *
+   * Applications using lifecycle metadata should keep successful query
+   * subscriptions mounted and show visible stale state until the lifecycle
+   * reports `cleared`. Mutations and actions remain operational.
+   */
+  onServerPressure?: ServerPressureHandler;
   /**
    * Whether to prompt the user if they have unsaved changes pending
    * when navigating away or closing a web page.
@@ -287,6 +331,9 @@ export class BaseConvexClient {
   >();
   private nextConnectionStateSubscriberId: number = 0;
   private _lastPublishedConnectionState: ConnectionState | undefined;
+  private activeDegradableQueryPressure:
+    | { epoch: number; retried: boolean }
+    | undefined;
 
   /**
    * @param address - The url of your Convex deployment, often provided
@@ -310,6 +357,8 @@ export class BaseConvexClient {
       validateDeploymentUrl(address);
     }
     options = { ...options };
+    const queryWorkloadClass = options.queryWorkloadClass;
+    const onServerPressure = options.onServerPressure;
     const authRefreshTokenLeewaySeconds =
       options.authRefreshTokenLeewaySeconds ?? 10;
     let webSocketConstructor = options.webSocketConstructor;
@@ -427,11 +476,21 @@ export class BaseConvexClient {
         onOpen: (reconnectMetadata: ReconnectMetadata) => {
           // We have a new WebSocket!
           this.mark("convexWebSocketOpen");
+          // Pressure epochs belong to one backend sync worker. A reconnect
+          // creates a new worker. Reset before sending Connect so even a
+          // reentrant custom WebSocket cannot retry the replaced worker's
+          // epoch on the new connection.
+          this.activeDegradableQueryPressure = undefined;
+
           this.webSocketManager.sendMessage({
             ...reconnectMetadata,
             type: "Connect",
             sessionId: this._sessionId,
             maxObservedTimestamp: this.maxObservedTimestamp,
+            ...(queryWorkloadClass === undefined ? {} : { queryWorkloadClass }),
+            ...(queryWorkloadClass === "degradable"
+              ? { degradableQueryPressureVersion: 1 as const }
+              : {}),
           });
 
           // Throw out our remote query, reissue queries
@@ -478,7 +537,61 @@ export class BaseConvexClient {
               const completedRequests = this.requestManager.removeCompleted(
                 this.remoteQuerySet.timestamp(),
               );
+              const pressure = serverMessage.serverPressure;
+              if (pressure !== undefined) {
+                if ("state" in pressure) {
+                  switch (pressure.state) {
+                    case "active": {
+                      if (
+                        this.activeDegradableQueryPressure?.epoch !==
+                        pressure.epoch
+                      ) {
+                        this.activeDegradableQueryPressure = {
+                          epoch: pressure.epoch,
+                          retried: false,
+                        };
+                      }
+                      break;
+                    }
+                    case "cleared": {
+                      if (
+                        this.activeDegradableQueryPressure?.epoch ===
+                        pressure.epoch
+                      ) {
+                        this.activeDegradableQueryPressure = undefined;
+                      }
+                      break;
+                    }
+                    default: {
+                      pressure satisfies never;
+                    }
+                  }
+                }
+              }
+              // Apply all connection-local protocol state before application
+              // transition listeners run. The pressure callback still follows
+              // those listeners to preserve their established ordering.
               this.notifyOnQueryResultChanges(completedRequests);
+              if (pressure !== undefined) {
+                try {
+                  const result = onServerPressure?.(pressure);
+                  if (result !== undefined) {
+                    void Promise.resolve(result).catch((error) => {
+                      this.logger.error(
+                        "onServerPressure callback rejected:",
+                        error,
+                      );
+                    });
+                  }
+                } catch (error) {
+                  // Application pressure policy must not interrupt WebSocket
+                  // receive bookkeeping after the transition has been applied.
+                  this.logger.error(
+                    "onServerPressure callback threw an error:",
+                    error,
+                  );
+                }
+              }
               break;
             }
             case "MutationResponse": {
@@ -696,6 +809,50 @@ export class BaseConvexClient {
   clearAuth() {
     const message = this.state.clearAuth();
     this.webSocketManager.sendMessage(message);
+  }
+
+  /**
+   * Ask the backend to retry only the queries deferred in the current pressure
+   * epoch.
+   *
+   * @returns `true` only when this client accepted the first send for that
+   * epoch. Inactive, stale, duplicate, and temporarily unsendable retries
+   * return `false`.
+   * @throws When `epoch` is not a positive unsigned 32-bit integer.
+   *
+   * @public
+   */
+  retryDegradableQueries(epoch: number): boolean {
+    if (!Number.isSafeInteger(epoch) || epoch <= 0 || epoch > 0xffff_ffff) {
+      throw new Error(
+        "Degradable query pressure epoch must be a positive unsigned 32-bit integer.",
+      );
+    }
+    const activePressure = this.activeDegradableQueryPressure;
+    if (
+      activePressure === undefined ||
+      activePressure.epoch !== epoch ||
+      activePressure.retried
+    ) {
+      return false;
+    }
+    // Claim this epoch before calling into the WebSocket implementation so a
+    // reentrant custom implementation cannot send the same retry twice.
+    activePressure.retried = true;
+    const mightBeSent = this.webSocketManager.sendMessage({
+      type: "RetryDegradableQueries",
+      epoch,
+    });
+    const accepted =
+      mightBeSent && this.webSocketManager.socketState() === "ready";
+    if (!accepted && this.activeDegradableQueryPressure === activePressure) {
+      // `sendMessage` conservatively returns true when `WebSocket.send`
+      // throws because mutations may already have reached the server. A retry
+      // is epoch-idempotent, so keep it available after that failure or while
+      // the same socket is temporarily unable to send.
+      activePressure.retried = false;
+    }
+    return accepted;
   }
 
   /**
@@ -1167,6 +1324,8 @@ export interface BaseConvexClientInterface {
   setAdminAuth(value: string, fakeUserIdentity?: UserIdentityAttributes): void;
 
   clearAuth(): void;
+
+  retryDegradableQueries(epoch: number): boolean;
 
   subscribe(
     name: string,
