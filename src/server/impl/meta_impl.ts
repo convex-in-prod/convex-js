@@ -1,4 +1,4 @@
-import { jsonToConvex } from "../../values/index.js";
+import { jsonToConvexOwned } from "../../values/value.js";
 import {
   ActionMeta,
   MutationMeta,
@@ -8,12 +8,21 @@ import {
   TransactionMetrics,
   DeploymentMetadata,
 } from "../meta.js";
-import { performAsyncSyscall, performSyscall } from "./syscall.js";
+import {
+  ValueSyscall,
+  performAsyncValueSyscall,
+  performSyscall,
+} from "./syscall.js";
 
 async function getTransactionMetrics(): Promise<TransactionMetrics> {
-  let syscallJSON;
+  let metrics;
   try {
-    syscallJSON = await performAsyncSyscall("1.0/getTransactionMetrics", {});
+    metrics = await performAsyncValueSyscall<TransactionMetrics>(
+      ValueSyscall.TransactionMetrics,
+      [],
+      () => ({}),
+      (result) => jsonToConvexOwned(result) as TransactionMetrics,
+    );
   } catch (e: any) {
     if (e.message?.includes("Unknown async operation")) {
       throw new Error(
@@ -23,16 +32,21 @@ async function getTransactionMetrics(): Promise<TransactionMetrics> {
     }
     throw e;
   }
-  return jsonToConvex(syscallJSON) as any;
+  return metrics;
 }
 
 async function getFunctionMetadata(): Promise<{
   name: string;
   componentPath: string;
 }> {
-  const { name, componentPath } = await performAsyncSyscall(
-    "1.0/getFunctionMetadata",
-    {},
+  const { name, componentPath } = await performAsyncValueSyscall<{
+    name: string;
+    componentPath: string;
+  }>(
+    ValueSyscall.FunctionMetadata,
+    [],
+    () => ({}),
+    (result) => result,
   );
   return {
     name,
@@ -41,11 +55,12 @@ async function getFunctionMetadata(): Promise<{
 }
 
 async function getDeploymentMetadata(): Promise<DeploymentMetadata> {
-  const syscallJSON = await performAsyncSyscall(
-    "1.0/getDeploymentMetadata",
-    {},
+  const result = await performAsyncValueSyscall<DeploymentMetadata>(
+    ValueSyscall.DeploymentMetadata,
+    [],
+    () => ({}),
+    (result) => jsonToConvexOwned(result) as DeploymentMetadata,
   );
-  const result = jsonToConvex(syscallJSON) as any;
   return {
     name: result.name,
     region: result.region ?? null,
@@ -55,12 +70,17 @@ async function getDeploymentMetadata(): Promise<DeploymentMetadata> {
 
 function getSnapshotTs(): bigint {
   const syscallJSON = performSyscall("1.0/getSnapshotTs", {});
-  return jsonToConvex(syscallJSON) as bigint;
+  return jsonToConvexOwned(syscallJSON) as bigint;
 }
 
 async function getRequestMetadata(): Promise<RequestMetadata> {
   const { ip, userAgent, requestId, scheduledFunctionId, authToken } =
-    await performAsyncSyscall("1.0/getRequestMetadata", {});
+    await performAsyncValueSyscall<RequestMetadata>(
+      ValueSyscall.RequestMetadata,
+      [],
+      () => ({}),
+      (result) => result,
+    );
   return { ip, userAgent, requestId, scheduledFunctionId, authToken };
 }
 

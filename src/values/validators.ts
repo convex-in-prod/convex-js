@@ -32,14 +32,15 @@ abstract class BaseValidator<
 > {
   /**
    * Only for TypeScript, the TS type of the JS values validated
-   * by this validator.
+   * by this validator. Keep this declaration non-emitting: validators do not
+   * need an own runtime property for type inference.
    */
-  readonly type!: Type;
+  declare readonly type: Type;
   /**
    * Only for TypeScript, if this an Object validator, then
    * this is the TS type of its property names.
    */
-  readonly fieldPaths!: FieldPaths;
+  declare readonly fieldPaths: FieldPaths;
 
   /**
    * Whether this is an optional Object property value validator.
