@@ -8,7 +8,7 @@ Retain completed HTTP failures as typed evidence and classify explicit pre-execu
 
 Keep the existing configurable retry budget and delay. Action callbacks explicitly retain their established terminal-conflict message classifier. Cover physical attempt counts and preserve original errors for ambiguous outcomes.
 ---
- src/browser/http_client.test.ts         | 306 ++++++++++++++++++++++++
+ src/browser/http_client.test.ts         | 304 ++++++++++++++++++++++++
  src/browser/http_client.ts              | 171 ++++++++++++-
  src/browser/index.ts                    |   2 +-
  src/browser/sync/client.ts              |  38 ++-
@@ -19,17 +19,17 @@ Keep the existing configurable retry budget and delay. Action callbacks explicit
  src/server/impl/actions_impl.ts         |  20 +-
  src/server/impl/registration_impl.ts    |  19 +-
  src/server/registration.ts              |   6 +-
- 11 files changed, 799 insertions(+), 30 deletions(-)
+ 11 files changed, 797 insertions(+), 30 deletions(-)
  create mode 100644 src/browser/http_client.test.ts
  create mode 100644 src/common/write_conflict_retry.test.ts
  create mode 100644 src/common/write_conflict_retry.ts
 
 diff --git a/src/browser/http_client.test.ts b/src/browser/http_client.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..346674d29051423befddb10476eb16c682331ba5
+index 0000000000000000000000000000000000000000..d412156e3aa79d909739872b83d25ce98403b4f7
 --- /dev/null
 +++ b/src/browser/http_client.test.ts
-@@ -0,0 +1,306 @@
+@@ -0,0 +1,304 @@
 +import { describe, expect, test, vi } from "vitest";
 +import { makeFunctionReference } from "../server/api.js";
 +import { ConvexHttpClient, ConvexHttpError } from "./index.js";
@@ -247,15 +247,13 @@ index 0000000000000000000000000000000000000000..346674d29051423befddb10476eb16c6
 +  ] as const)(
 +    "does not replay %s",
 +    async (_name, status, body, contentType) => {
-+      const localFetch = vi
-+        .fn<typeof fetch>()
-+        .mockImplementation(
-+          async () =>
-+            new Response(body, {
-+              status,
-+              headers: { "content-type": contentType },
-+            }),
-+        );
++      const localFetch = vi.fn<typeof fetch>().mockImplementation(
++        async () =>
++          new Response(body, {
++            status,
++            headers: { "content-type": contentType },
++          }),
++      );
 +      const client = new ConvexHttpClient("https://non-occ.convex.cloud", {
 +        fetch: localFetch,
 +      });

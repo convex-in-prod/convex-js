@@ -12,10 +12,10 @@ Accept only normal or high priority for each mutation and carry the selected hin
  3 files changed, 204 insertions(+), 4 deletions(-)
 
 diff --git a/src/browser/http_client.test.ts b/src/browser/http_client.test.ts
-index 346674d29051423befddb10476eb16c682331ba5..4ed13e50f4fb88ed7c74428b2976278aa74a3ff1 100644
+index d412156e3aa79d909739872b83d25ce98403b4f7..95a34d39441e6d40d5552dea07213d69a744023d 100644
 --- a/src/browser/http_client.test.ts
 +++ b/src/browser/http_client.test.ts
-@@ -303,4 +303,172 @@ describe("ConvexHttpClient mutation retry evidence", () => {
+@@ -301,4 +301,172 @@ describe("ConvexHttpClient mutation retry evidence", () => {
      expect(localFetch).toHaveBeenCalledTimes(1);
    });
  
