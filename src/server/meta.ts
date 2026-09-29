@@ -103,6 +103,17 @@ export type DeploymentMetadata = {
    * The deployment class, e.g. `"s16"`, `"s256"`, `"d1024"`, or `"d2048"`.
    */
   class: "s16" | "s256" | "d1024" | "d2048";
+  /**
+   * Committed native resident selection in a query or mutation's transaction.
+   * `null` selects ordinary execution. Omitted for actions and backends without
+   * native resident support; omission does not establish selection authority.
+   */
+  nativeResident?: {
+    artifactSha256: string;
+    configurationSha256: string;
+    lifecycleProtocol: number;
+    applicationContract: string;
+  } | null;
 };
 
 /**
