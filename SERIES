@@ -12,3 +12,7 @@
 0011-packaging-record-refreshed-upstream-source.patch 9eff6dc43a02d4f9794d2c21a1473f7c718bb74b
 0012-values-remove-retained-UTF-8-comparison-scratch.patch 25e6052c721303f781b59866c998094a3ae2e6a8
 0013-build-pin-skott-to-published-dependency-set.patch 943cad470ad6ba19c55c1cbe665c73997789fc5f
+0014-server-expose-bounded-Node-pool-retirement.patch b84ea0f70be09575fbf4f6136b285d5681387ccf
+0015-sdk-use-bulk-collection-when-the-runtime-provides-it.patch 621387ab67c42d9bd5b9dd0d617acef5957323bb
+0016-sdk-reuse-owned-JSON-values-and-object-syscall-argum.patch e6601a85353d9dfda29a536aec3291dc62edf7eb
+0017-sdk-pass-Convex-values-through-the-typed-runtime-bou.patch bbd948f40b815e2d277977e4ffe3e56f35e3d879

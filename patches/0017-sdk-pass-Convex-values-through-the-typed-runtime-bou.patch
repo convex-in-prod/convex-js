@@ -1,0 +1,990 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Mon, 28 Sep 2026 12:47:30 +0800
+Subject: [PATCH 17/17] sdk: pass Convex values through the typed runtime
+ boundary
+
+Add a value-argument syscall hook for database reads and writes, query terminals, nested UDFs, scheduling, metadata, authentication, storage, and function handles. Capture query operands when builders are constructed so later caller mutation cannot change the request. Expose value-returning query and mutation invocation wrappers for the Wasm adapter while retaining the existing JSON syscall and registration behavior for V8.
+---
+ src/server/components/index.ts                | 12 ++-
+ src/server/impl/authentication_impl.ts        | 11 ++-
+ src/server/impl/database_impl.ts              | 77 ++++++++-------
+ src/server/impl/filter_builder_impl.ts        | 25 +++--
+ src/server/impl/index_range_builder_impl.ts   | 16 ++--
+ src/server/impl/meta_impl.ts                  | 32 +++++--
+ src/server/impl/query_impl.ts                 | 95 +++++++++++--------
+ src/server/impl/query_value.ts                | 24 +++++
+ src/server/impl/registration_impl.ts          | 43 +++++++--
+ src/server/impl/scheduler_impl.ts             | 38 ++++++--
+ src/server/impl/search_filter_builder_impl.ts |  6 +-
+ src/server/impl/storage_impl.ts               | 49 ++++++----
+ src/server/impl/syscall.ts                    | 29 ++++++
+ src/server/registration.ts                    |  6 ++
+ 14 files changed, 317 insertions(+), 146 deletions(-)
+ create mode 100644 src/server/impl/query_value.ts
+
+diff --git a/src/server/components/index.ts b/src/server/components/index.ts
+index 28448db74f35a1ec7926fe0e48f19d00199215ee..f41db3fe3cf2def6e14036f46d58a2eaf4e22234 100644
+--- a/src/server/components/index.ts
++++ b/src/server/components/index.ts
+@@ -5,7 +5,7 @@ import {
+   FunctionReference,
+   FunctionType,
+ } from "../api.js";
+-import { performAsyncSyscall } from "../impl/syscall.js";
++import { performAsyncValueSyscall } from "../impl/syscall.js";
+ import { DefaultFunctionArgs } from "../registration.js";
+ import {
+   AppDefinitionAnalysis,
+@@ -74,10 +74,16 @@ export async function createFunctionHandle<
+   >,
+ ): Promise<FunctionHandle<Type, Args, ReturnType>> {
+   const address = getFunctionAddress(functionReference);
+-  return await performAsyncSyscall("1.0/createFunctionHandle", {
++  const args = {
+     ...address,
+     version,
+-  });
++  };
++  return await performAsyncValueSyscall(
++    "1.0/createFunctionHandle",
++    args,
++    () => args,
++    (result) => result,
++  );
+ }
+ 
+ interface ComponentExports {
+diff --git a/src/server/impl/authentication_impl.ts b/src/server/impl/authentication_impl.ts
+index ece9af071fbaebcb38e008138dd25bce664339c6..ae8b7d65679c2a0d5f07dbc842d2773ba190bf5a 100644
+--- a/src/server/impl/authentication_impl.ts
++++ b/src/server/impl/authentication_impl.ts
+@@ -1,12 +1,15 @@
+ import { Auth } from "../authentication.js";
+-import { performAsyncSyscall } from "./syscall.js";
++import { performAsyncValueSyscall } from "./syscall.js";
+ 
+ export function setupAuth(requestId: string): Auth {
+   return {
+     getUserIdentity: async () => {
+-      return await performAsyncSyscall("1.0/getUserIdentity", {
+-        requestId,
+-      });
++      return await performAsyncValueSyscall(
++        "1.0/getUserIdentity",
++        { requestId },
++        () => ({ requestId }),
++        (result) => result,
++      );
+     },
+   };
+ }
+diff --git a/src/server/impl/database_impl.ts b/src/server/impl/database_impl.ts
+index d7c5801bc9b873dcf4e1135c773fe12bc8fa3d2c..11f169f29fc82abb90704c3e2826da908d0e0f2c 100644
+--- a/src/server/impl/database_impl.ts
++++ b/src/server/impl/database_impl.ts
+@@ -1,5 +1,5 @@
+ import { convexToJson, GenericId, Value } from "../../values/index.js";
+-import { performAsyncSyscall, performSyscall } from "./syscall.js";
++import { performAsyncValueSyscall, performSyscall } from "./syscall.js";
+ import {
+   GenericDatabaseReader,
+   GenericDatabaseReaderWithTable,
+@@ -31,15 +31,12 @@ async function get(
+       }`,
+     );
+   }
+-  const args = {
+-    id: convexToJson(id),
+-    isSystem,
+-    version,
+-    table,
+-  };
+-  const syscallJSON = await performAsyncSyscall("1.0/get", args);
+-
+-  return jsonToConvexOwned(syscallJSON) as GenericDocument;
++  return await performAsyncValueSyscall<GenericDocument>(
++    "1.0/get",
++    { id, isSystem, version, table },
++    () => ({ id: convexToJson(id), isSystem, version, table }),
++    (result) => jsonToConvexOwned(result) as GenericDocument,
++  );
+ }
+ 
+ export function setupReader(): GenericDatabaseReader<GenericDataModel> {
+@@ -92,46 +89,58 @@ export function setupReader(): GenericDatabaseReader<GenericDataModel> {
+   return r;
+ }
+ 
+-async function insert(tableName: string, value: any) {
++async function insert<TableName extends string>(
++  tableName: TableName,
++  value: any,
++): Promise<GenericId<TableName>> {
+   if (tableName.startsWith("_")) {
+     throw new Error("System tables (prefixed with `_`) are read-only.");
+   }
+   validateArg(tableName, 1, "insert", "table");
+   validateArg(value, 2, "insert", "value");
+-  const syscallJSON = await performAsyncSyscall("1.0/insert", {
+-    table: tableName,
+-    value: convexToJson(value),
+-  });
+-  const syscallResult = jsonToConvexOwned(syscallJSON) as any;
+-  return syscallResult._id;
++  const syscallResult = await performAsyncValueSyscall<{ _id: string }>(
++    "1.0/insert",
++    { table: tableName, value },
++    () => ({ table: tableName, value: convexToJson(value) }),
++    (result) => jsonToConvexOwned(result) as { _id: string },
++  );
++  return syscallResult._id as GenericId<TableName>;
+ }
+ 
+ async function patch(table: string | undefined, id: any, value: any) {
+   validateArg(id, 1, "patch", "id");
+   validateArg(value, 2, "patch", "value");
+-  await performAsyncSyscall("1.0/shallowMerge", {
+-    id: convexToJson(id),
+-    value: patchValueToJson(value as Value),
+-    table,
+-  });
++  await performAsyncValueSyscall(
++    "1.0/shallowMerge",
++    { id, value, table },
++    () => ({
++      id: convexToJson(id),
++      value: patchValueToJson(value as Value),
++      table,
++    }),
++    () => undefined,
++  );
+ }
+ 
+ async function replace(table: string | undefined, id: any, value: any) {
+   validateArg(id, 1, "replace", "id");
+   validateArg(value, 2, "replace", "value");
+-  await performAsyncSyscall("1.0/replace", {
+-    id: convexToJson(id),
+-    value: convexToJson(value),
+-    table,
+-  });
++  await performAsyncValueSyscall(
++    "1.0/replace",
++    { id, value, table },
++    () => ({ id: convexToJson(id), value: convexToJson(value), table }),
++    () => undefined,
++  );
+ }
+ 
+ async function delete_(table: string | undefined, id: any) {
+   validateArg(id, 1, "delete", "id");
+-  await performAsyncSyscall("1.0/remove", {
+-    id: convexToJson(id),
+-    table,
+-  });
++  await performAsyncValueSyscall(
++    "1.0/remove",
++    { id, table },
++    () => ({ id: convexToJson(id), table }),
++    () => undefined,
++  );
+ }
+ 
+ export function setupWriter(): GenericDatabaseWriter<GenericDataModel> &
+@@ -169,9 +178,9 @@ export function setupWriter(): GenericDatabaseWriter<GenericDataModel> &
+   };
+ }
+ 
+-class TableReader {
++class TableReader<TableName extends string = string> {
+   constructor(
+-    protected readonly tableName: string,
++    protected readonly tableName: TableName,
+     protected readonly isSystem: boolean,
+   ) {}
+ 
+@@ -194,7 +203,7 @@ class TableReader {
+   }
+ }
+ 
+-class TableWriter extends TableReader {
++class TableWriter<TableName extends string> extends TableReader<TableName> {
+   async insert(value: any) {
+     return insert(this.tableName, value);
+   }
+diff --git a/src/server/impl/filter_builder_impl.ts b/src/server/impl/filter_builder_impl.ts
+index 10fb3ea0e607cec6f086dfe1a47505af2fcfde0a..f68a7c035939d71857ec49afc3b8959d47095f54 100644
+--- a/src/server/impl/filter_builder_impl.ts
++++ b/src/server/impl/filter_builder_impl.ts
+@@ -1,5 +1,5 @@
+-import { JSONValue, Value, NumericValue } from "../../values/index.js";
+-import { convexOrUndefinedToJson } from "../../values/value.js";
++import { Value, NumericValue } from "../../values/index.js";
++import { QueryValue, queryValueArg } from "./query_value.js";
+ import { GenericTableInfo } from "../data_model.js";
+ import {
+   Expression,
+@@ -7,29 +7,36 @@ import {
+   FilterBuilder,
+ } from "../filter_builder.js";
+ 
++export type SerializedQueryExpression = {
++  [operator: string]:
++    | QueryValue
++    | SerializedQueryExpression
++    | SerializedQueryExpression[];
++};
++
+ // The `any` type parameter in `Expression<any>` allows us to use this class
+ // in place of any `Expression` type in `filterBuilderImpl`.
+ export class ExpressionImpl extends Expression<any> {
+-  private inner: JSONValue;
+-  constructor(inner: JSONValue) {
++  private inner: SerializedQueryExpression;
++  constructor(inner: SerializedQueryExpression) {
+     super();
+     this.inner = inner;
+   }
+ 
+-  serialize(): JSONValue {
++  serialize(): SerializedQueryExpression {
+     return this.inner;
+   }
+ }
+ 
+ export function serializeExpression(
+   expr: ExpressionOrValue<Value | undefined>,
+-): JSONValue {
++): SerializedQueryExpression {
+   if (expr instanceof ExpressionImpl) {
+     return expr.serialize();
+   } else {
+-    // Assume that the expression is a literal Convex value, which we'll serialize
+-    // to its JSON representation.
+-    return { $literal: convexOrUndefinedToJson(expr as Value | undefined) };
++    // Capture the literal now so mutations after query construction cannot
++    // change the value observed when the query runs.
++    return { $literal: queryValueArg(expr as Value | undefined) };
+   }
+ }
+ 
+diff --git a/src/server/impl/index_range_builder_impl.ts b/src/server/impl/index_range_builder_impl.ts
+index d0bc59047898f33eb588df94937ceb5e6b3668e5..7cd4fe5e39418c42b3d9836c8e2edfac2b68c924 100644
+--- a/src/server/impl/index_range_builder_impl.ts
++++ b/src/server/impl/index_range_builder_impl.ts
+@@ -1,5 +1,5 @@
+-import { JSONValue, Value } from "../../values/index.js";
+-import { convexOrUndefinedToJson } from "../../values/value.js";
++import { Value } from "../../values/index.js";
++import { QueryValue, queryValueArg } from "./query_value.js";
+ import { GenericDocument, GenericIndexFields } from "../data_model.js";
+ import {
+   IndexRange,
+@@ -11,7 +11,7 @@ import {
+ export type SerializedRangeExpression = {
+   type: "Eq" | "Gt" | "Gte" | "Lt" | "Lte";
+   fieldPath: string;
+-  value: JSONValue;
++  value: QueryValue;
+ };
+ 
+ export class IndexRangeBuilderImpl
+@@ -50,7 +50,7 @@ export class IndexRangeBuilderImpl
+       this.rangeExpressions.concat({
+         type: "Eq",
+         fieldPath: fieldName,
+-        value: convexOrUndefinedToJson(value),
++        value: queryValueArg(value),
+       }),
+     );
+   }
+@@ -61,7 +61,7 @@ export class IndexRangeBuilderImpl
+       this.rangeExpressions.concat({
+         type: "Gt",
+         fieldPath: fieldName,
+-        value: convexOrUndefinedToJson(value),
++        value: queryValueArg(value),
+       }),
+     );
+   }
+@@ -71,7 +71,7 @@ export class IndexRangeBuilderImpl
+       this.rangeExpressions.concat({
+         type: "Gte",
+         fieldPath: fieldName,
+-        value: convexOrUndefinedToJson(value),
++        value: queryValueArg(value),
+       }),
+     );
+   }
+@@ -81,7 +81,7 @@ export class IndexRangeBuilderImpl
+       this.rangeExpressions.concat({
+         type: "Lt",
+         fieldPath: fieldName,
+-        value: convexOrUndefinedToJson(value),
++        value: queryValueArg(value),
+       }),
+     );
+   }
+@@ -91,7 +91,7 @@ export class IndexRangeBuilderImpl
+       this.rangeExpressions.concat({
+         type: "Lte",
+         fieldPath: fieldName,
+-        value: convexOrUndefinedToJson(value),
++        value: queryValueArg(value),
+       }),
+     );
+   }
+diff --git a/src/server/impl/meta_impl.ts b/src/server/impl/meta_impl.ts
+index 2fe5f02356124be0487ae0600c4b1fb6d91ef752..2e2d8756d1abdb752a52021715bd2f9dc458ae74 100644
+--- a/src/server/impl/meta_impl.ts
++++ b/src/server/impl/meta_impl.ts
+@@ -8,12 +8,17 @@ import {
+   TransactionMetrics,
+   DeploymentMetadata,
+ } from "../meta.js";
+-import { performAsyncSyscall, performSyscall } from "./syscall.js";
++import { performAsyncValueSyscall, performSyscall } from "./syscall.js";
+ 
+ async function getTransactionMetrics(): Promise<TransactionMetrics> {
+-  let syscallJSON;
++  let metrics;
+   try {
+-    syscallJSON = await performAsyncSyscall("1.0/getTransactionMetrics", {});
++    metrics = await performAsyncValueSyscall<TransactionMetrics>(
++      "1.0/getTransactionMetrics",
++      {},
++      () => ({}),
++      (result) => jsonToConvexOwned(result) as TransactionMetrics,
++    );
+   } catch (e: any) {
+     if (e.message?.includes("Unknown async operation")) {
+       throw new Error(
+@@ -23,16 +28,21 @@ async function getTransactionMetrics(): Promise<TransactionMetrics> {
+     }
+     throw e;
+   }
+-  return jsonToConvexOwned(syscallJSON) as any;
++  return metrics;
+ }
+ 
+ async function getFunctionMetadata(): Promise<{
+   name: string;
+   componentPath: string;
+ }> {
+-  const { name, componentPath } = await performAsyncSyscall(
++  const { name, componentPath } = await performAsyncValueSyscall<{
++    name: string;
++    componentPath: string;
++  }>(
+     "1.0/getFunctionMetadata",
+     {},
++    () => ({}),
++    (result) => result,
+   );
+   return {
+     name,
+@@ -41,11 +51,12 @@ async function getFunctionMetadata(): Promise<{
+ }
+ 
+ async function getDeploymentMetadata(): Promise<DeploymentMetadata> {
+-  const syscallJSON = await performAsyncSyscall(
++  const result = await performAsyncValueSyscall<DeploymentMetadata>(
+     "1.0/getDeploymentMetadata",
+     {},
++    () => ({}),
++    (result) => jsonToConvexOwned(result) as DeploymentMetadata,
+   );
+-  const result = jsonToConvexOwned(syscallJSON) as any;
+   return {
+     name: result.name,
+     region: result.region ?? null,
+@@ -60,7 +71,12 @@ function getSnapshotTs(): bigint {
+ 
+ async function getRequestMetadata(): Promise<RequestMetadata> {
+   const { ip, userAgent, requestId, scheduledFunctionId, authToken } =
+-    await performAsyncSyscall("1.0/getRequestMetadata", {});
++    await performAsyncValueSyscall<RequestMetadata>(
++      "1.0/getRequestMetadata",
++      {},
++      () => ({}),
++      (result) => result,
++    );
+   return { ip, userAgent, requestId, scheduledFunctionId, authToken };
+ }
+ 
+diff --git a/src/server/impl/query_impl.ts b/src/server/impl/query_impl.ts
+index 0f14f59c5633517aa3c6fe249fccd35d8f6c1799..f880b962aadbc81e0816336a7e50a1ef8b5e6cb5 100644
+--- a/src/server/impl/query_impl.ts
++++ b/src/server/impl/query_impl.ts
+@@ -1,9 +1,10 @@
+-import { Value, JSONValue } from "../../values/index.js";
++import { Value } from "../../values/index.js";
+ import { jsonToConvexOwned } from "../../values/value.js";
+ import { PaginationResult, PaginationOptions } from "../pagination.js";
+-import { performAsyncSyscall, performSyscall } from "./syscall.js";
++import { performAsyncValueSyscall, performSyscall } from "./syscall.js";
+ import {
+   filterBuilderImpl,
++  SerializedQueryExpression,
+   serializeExpression,
+ } from "./filter_builder_impl.js";
+ import { Query, QueryInitializer } from "../query.js";
+@@ -24,7 +25,7 @@ declare const Convex: { queryCollect?: true };
+ 
+ const MAX_QUERY_OPERATORS = 256;
+ 
+-type QueryOperator = { filter: JSONValue } | { limit: number };
++type QueryOperator = { filter: SerializedQueryExpression } | { limit: number };
+ type Source =
+   | { type: "FullTableScan"; tableName: string; order: "asc" | "desc" | null }
+   | {
+@@ -105,11 +106,12 @@ export class QueryInitializerImpl implements QueryInitializer<GenericTableInfo>
+ 
+   // This is internal API and should not be exposed to developers yet.
+   async count(): Promise<number> {
+-    const syscallJSON = await performAsyncSyscall("1.0/count", {
+-      table: this.tableName,
+-    });
+-    const syscallResult = jsonToConvexOwned(syscallJSON) as number;
+-    return syscallResult;
++    return await performAsyncValueSyscall<number>(
++      "1.0/count",
++      { table: this.tableName },
++      () => ({ table: this.tableName }),
++      (result) => jsonToConvexOwned(result) as number,
++    );
+   }
+ 
+   filter(
+@@ -264,14 +266,22 @@ export class QueryImpl implements Query<GenericTableInfo> {
+     // a `for await` statement.
+     const queryId =
+       this.state.type === "preparing" ? this.startQuery() : this.state.queryId;
+-    const { value, done } = await performAsyncSyscall("1.0/queryStreamNext", {
+-      queryId,
+-    });
++    const { value, done } = await performAsyncValueSyscall<{
++      value: any;
++      done: boolean;
++    }>(
++      "1.0/queryStreamNext",
++      { queryId },
++      () => ({ queryId }),
++      (result) => ({
++        value: jsonToConvexOwned(result.value),
++        done: result.done,
++      }),
++    );
+     if (done) {
+       this.closeQuery();
+     }
+-    const convexValue = jsonToConvexOwned(value);
+-    return { value: convexValue, done };
++    return { value, done };
+   }
+ 
+   return() {
+@@ -296,26 +306,26 @@ export class QueryImpl implements Query<GenericTableInfo> {
+     const cursor = paginationOpts.cursor;
+     const endCursor = paginationOpts?.endCursor ?? null;
+     const maximumRowsRead = paginationOpts.maximumRowsRead ?? null;
+-    const { page, isDone, continueCursor, splitCursor, pageStatus } =
+-      await performAsyncSyscall("1.0/queryPage", {
+-        query,
+-        cursor,
+-        endCursor,
+-        pageSize,
+-        maximumRowsRead,
+-        maximumBytesRead: paginationOpts.maximumBytesRead,
+-        version,
+-      });
+-    for (let index = 0; index < page.length; index++) {
+-      page[index] = jsonToConvexOwned(page[index]);
+-    }
+-    return {
+-      page,
+-      isDone,
+-      continueCursor,
+-      splitCursor,
+-      pageStatus,
++    const syscallArgs = {
++      query,
++      cursor,
++      endCursor,
++      pageSize,
++      maximumRowsRead,
++      maximumBytesRead: paginationOpts.maximumBytesRead,
++      version,
+     };
++    return await performAsyncValueSyscall<PaginationResult<any>>(
++      "1.0/queryPage",
++      syscallArgs,
++      () => syscallArgs,
++      (result) => {
++        for (let index = 0; index < result.page.length; index++) {
++          result.page[index] = jsonToConvexOwned(result.page[index]);
++        }
++        return result;
++      },
++    );
+   }
+ 
+   async collect(): Promise<Array<any>> {
+@@ -326,16 +336,23 @@ export class QueryImpl implements Query<GenericTableInfo> {
+     ) {
+       const query = this.takeQuery();
+       try {
+-        const rows = await performAsyncSyscall("1.0/queryCollect", {
+-          query,
+-          version,
+-        });
++        const rows = await performAsyncValueSyscall<any[]>(
++          "1.0/queryCollect",
++          { query, version },
++          () => ({ query, version }),
++          (result) => {
++            if (!Array.isArray(result)) {
++              throw new Error("Bulk query returned an invalid result");
++            }
++            for (let index = 0; index < result.length; index++) {
++              result[index] = jsonToConvexOwned(result[index]);
++            }
++            return result;
++          },
++        );
+         if (!Array.isArray(rows)) {
+           throw new Error("Bulk query returned an invalid result");
+         }
+-        for (let index = 0; index < rows.length; index++) {
+-          rows[index] = jsonToConvexOwned(rows[index]);
+-        }
+         return rows;
+       } finally {
+         this.state = { type: "consumed" };
+diff --git a/src/server/impl/query_value.ts b/src/server/impl/query_value.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..35b94064a2121bca56e101860544f27a34f4bfde
+--- /dev/null
++++ b/src/server/impl/query_value.ts
+@@ -0,0 +1,24 @@
++import {
++  JSONValue,
++  Value,
++  convexOrUndefinedToJson,
++} from "../../values/value.js";
++
++declare const Convex: {
++  typedQueryArgs?: true;
++  captureQueryValue?: (value: Value) => ArrayBuffer;
++};
++
++export type QueryValue = JSONValue | ArrayBuffer | undefined;
++
++export function queryValueArg(value: Value | undefined): QueryValue {
++  if (typeof Convex === "undefined" || Convex.typedQueryArgs !== true) {
++    return convexOrUndefinedToJson(value);
++  }
++  if (value === undefined) return undefined;
++  if (Convex.captureQueryValue === undefined) {
++    throw new Error("Typed query value capture is unavailable");
++  }
++  // Query builders snapshot literals at construction, before callers can mutate them.
++  return Convex.captureQueryValue(value);
++}
+diff --git a/src/server/impl/registration_impl.ts b/src/server/impl/registration_impl.ts
+index 0db9226b81dad73a473e73458963df8be467864a..8795d5e1fc413c2525008bdfeaca0d0d5cc46201 100644
+--- a/src/server/impl/registration_impl.ts
++++ b/src/server/impl/registration_impl.ts
+@@ -37,7 +37,7 @@ import {
+   setupStorageWriter,
+ } from "./storage_impl.js";
+ import { parseArgs } from "../../common/index.js";
+-import { performAsyncSyscall } from "./syscall.js";
++import { performAsyncValueSyscall } from "./syscall.js";
+ import { asObjectValidator } from "../../values/validator.js";
+ import { getFunctionAddress } from "../components/paths.js";
+ import {
+@@ -61,10 +61,17 @@ function transactionLimitsForMutationRunMutation(options: any) {
+ async function invokeMutation<
+   F extends (ctx: GenericMutationCtx<GenericDataModel>, ...args: any) => any,
+ >(func: F, argsStr: string, visibility: FunctionVisibility) {
++  const args = jsonToConvexOwned(JSON.parse(argsStr));
++  const result = await invokeMutationValue(func, args as any, visibility);
++  return JSON.stringify(convexToJson(result));
++}
++
++async function invokeMutationValue<
++  F extends (ctx: GenericMutationCtx<GenericDataModel>, ...args: any) => any,
++>(func: F, args: any[], visibility: FunctionVisibility) {
+   // TODO(presley): Change the function signature and propagate the requestId from Rust.
+   // Ok, to mock it out for now, since queries are only running in V8.
+   const requestId = "";
+-  const args = jsonToConvexOwned(JSON.parse(argsStr));
+   const mutationCtx = {
+     db: setupWriter(),
+     auth: setupAuth(requestId),
+@@ -86,7 +93,7 @@ async function invokeMutation<
+   };
+   const result = await invokeFunction(func, mutationCtx, args as any);
+   validateReturnValue(result);
+-  return JSON.stringify(convexToJson(result === undefined ? null : result));
++  return result === undefined ? null : result;
+ }
+ 
+ export function validateReturnValue(v: any) {
+@@ -275,6 +282,8 @@ export const mutationGeneric: MutationBuilder<any, "public"> = ((
+   func.isMutation = true;
+   func.isPublic = true;
+   func.invokeMutation = (argsStr) => invokeMutation(handler, argsStr, "public");
++  func.invokeMutationValue = (args) =>
++    invokeMutationValue(handler, [args], "public");
+   func.exportArgs = exportArgs(functionDefinition);
+   func.exportReturns = exportReturns(functionDefinition);
+   func._handler = handler;
+@@ -337,6 +346,8 @@ export const internalMutationGeneric: MutationBuilder<any, "internal"> = ((
+   func.isInternal = true;
+   func.invokeMutation = (argsStr) =>
+     invokeMutation(handler, argsStr, "internal");
++  func.invokeMutationValue = (args) =>
++    invokeMutationValue(handler, [args], "internal");
+   func.exportArgs = exportArgs(functionDefinition);
+   func.exportReturns = exportReturns(functionDefinition);
+   func._handler = handler;
+@@ -346,10 +357,17 @@ export const internalMutationGeneric: MutationBuilder<any, "internal"> = ((
+ async function invokeQuery<
+   F extends (ctx: GenericQueryCtx<GenericDataModel>, ...args: any) => any,
+ >(func: F, argsStr: string, visibility: FunctionVisibility) {
++  const args = jsonToConvexOwned(JSON.parse(argsStr));
++  const result = await invokeQueryValue(func, args as any, visibility);
++  return JSON.stringify(convexToJson(result));
++}
++
++async function invokeQueryValue<
++  F extends (ctx: GenericQueryCtx<GenericDataModel>, ...args: any) => any,
++>(func: F, args: any[], visibility: FunctionVisibility) {
+   // TODO(presley): Change the function signature and propagate the requestId from Rust.
+   // Ok, to mock it out for now, since queries are only running in V8.
+   const requestId = "";
+-  const args = jsonToConvexOwned(JSON.parse(argsStr));
+   const queryCtx = {
+     db: setupReader(),
+     auth: setupAuth(requestId),
+@@ -366,7 +384,7 @@ async function invokeQuery<
+   };
+   const result = await invokeFunction(func, queryCtx, args as any);
+   validateReturnValue(result);
+-  return JSON.stringify(convexToJson(result === undefined ? null : result));
++  return result === undefined ? null : result;
+ }
+ 
+ /**
+@@ -440,6 +458,7 @@ export const queryGeneric: QueryBuilder<any, "public"> = ((
+   func.isQuery = true;
+   func.isPublic = true;
+   func.invokeQuery = (argsStr) => invokeQuery(handler, argsStr, "public");
++  func.invokeQueryValue = (args) => invokeQueryValue(handler, [args], "public");
+   func.exportArgs = exportArgs(functionDefinition);
+   func.exportReturns = exportReturns(functionDefinition);
+   func._handler = handler;
+@@ -508,6 +527,8 @@ export const internalQueryGeneric: QueryBuilder<any, "internal"> = ((
+   func.isInternal = true;
+   func.invokeQuery = (argsStr) =>
+     invokeQuery(handler as any, argsStr, "internal");
++  func.invokeQueryValue = (args) =>
++    invokeQueryValue(handler as any, [args], "internal");
+   func.exportArgs = exportArgs(functionDefinition);
+   func.exportReturns = exportReturns(functionDefinition);
+   func._handler = handler;
+@@ -776,14 +797,18 @@ async function runUdf(
+   transactionLimits?: Record<string, number>,
+ ): Promise<any> {
+   const queryArgs = parseArgs(args);
+-  const syscallArgs: Record<string, any> = {
++  const syscallArgs: Record<string, unknown> = {
+     udfType,
+-    args: convexToJson(queryArgs),
++    args: queryArgs,
+     ...getFunctionAddress(f),
+   };
+   if (transactionLimits) {
+     syscallArgs.transactionLimits = transactionLimits;
+   }
+-  const result = await performAsyncSyscall("1.0/runUdf", syscallArgs);
+-  return jsonToConvexOwned(result);
++  return await performAsyncValueSyscall(
++    "1.0/runUdf",
++    syscallArgs,
++    () => ({ ...syscallArgs, args: convexToJson(queryArgs) }),
++    jsonToConvexOwned,
++  );
+ }
+diff --git a/src/server/impl/scheduler_impl.ts b/src/server/impl/scheduler_impl.ts
+index e92e8c0322f446a21aa750e0ce5be149c0b7323a..6144b2f73d6c6bf771df22df4b9d3b95d43adb7e 100644
+--- a/src/server/impl/scheduler_impl.ts
++++ b/src/server/impl/scheduler_impl.ts
+@@ -1,6 +1,6 @@
+ import { convexToJson, Value } from "../../values/index.js";
+ import { version } from "../../index.js";
+-import { performAsyncSyscall } from "./syscall.js";
++import { performAsyncSyscall, performAsyncValueSyscall } from "./syscall.js";
+ import { parseArgs } from "../../common/index.js";
+ import { SchedulableFunctionReference, Scheduler } from "../scheduler.js";
+ import { Id } from "../../values/value.js";
+@@ -15,7 +15,12 @@ export function setupMutationScheduler(): Scheduler {
+       args?: Record<string, Value>,
+     ) => {
+       const syscallArgs = runAfterSyscallArgs(delayMs, functionReference, args);
+-      return await performAsyncSyscall("1.0/schedule", syscallArgs);
++      return await performAsyncValueSyscall(
++        "1.0/schedule",
++        syscallArgs,
++        () => ({ ...syscallArgs, args: convexToJson(syscallArgs.args) }),
++        (result) => result,
++      );
+     },
+     runAt: async (
+       ms_since_epoch_or_date: number | Date,
+@@ -27,12 +32,21 @@ export function setupMutationScheduler(): Scheduler {
+         functionReference,
+         args,
+       );
+-      return await performAsyncSyscall("1.0/schedule", syscallArgs);
++      return await performAsyncValueSyscall(
++        "1.0/schedule",
++        syscallArgs,
++        () => ({ ...syscallArgs, args: convexToJson(syscallArgs.args) }),
++        (result) => result,
++      );
+     },
+     cancel: async (id: Id<"_scheduled_functions">) => {
+       validateArg(id, 1, "cancel", "id");
+-      const args = { id: convexToJson(id) };
+-      await performAsyncSyscall("1.0/cancel_job", args);
++      await performAsyncValueSyscall(
++        "1.0/cancel_job",
++        { id },
++        () => ({ id: convexToJson(id) }),
++        () => undefined,
++      );
+     },
+   };
+ }
+@@ -48,7 +62,10 @@ export function setupActionScheduler(requestId: string): Scheduler {
+         requestId,
+         ...runAfterSyscallArgs(delayMs, functionReference, args),
+       };
+-      return await performAsyncSyscall("1.0/actions/schedule", syscallArgs);
++      return await performAsyncSyscall("1.0/actions/schedule", {
++        ...syscallArgs,
++        args: convexToJson(syscallArgs.args),
++      });
+     },
+     runAt: async (
+       ms_since_epoch_or_date: number | Date,
+@@ -59,7 +76,10 @@ export function setupActionScheduler(requestId: string): Scheduler {
+         requestId,
+         ...runAtSyscallArgs(ms_since_epoch_or_date, functionReference, args),
+       };
+-      return await performAsyncSyscall("1.0/actions/schedule", syscallArgs);
++      return await performAsyncSyscall("1.0/actions/schedule", {
++        ...syscallArgs,
++        args: convexToJson(syscallArgs.args),
++      });
+     },
+     cancel: async (id: Id<"_scheduled_functions">) => {
+       validateArg(id, 1, "cancel", "id");
+@@ -93,7 +113,7 @@ function runAfterSyscallArgs(
+   return {
+     ...address,
+     ts,
+-    args: convexToJson(functionArgs),
++    args: functionArgs,
+     version,
+   };
+ }
+@@ -118,7 +138,7 @@ function runAtSyscallArgs(
+   return {
+     ...address,
+     ts,
+-    args: convexToJson(functionArgs),
++    args: functionArgs,
+     version,
+   };
+ }
+diff --git a/src/server/impl/search_filter_builder_impl.ts b/src/server/impl/search_filter_builder_impl.ts
+index e9a58c8abc000302ce6d85198d85c029d131dfc4..dd2af47f66ca50c6270362be5e641e2f9561e8cd 100644
+--- a/src/server/impl/search_filter_builder_impl.ts
++++ b/src/server/impl/search_filter_builder_impl.ts
+@@ -1,4 +1,4 @@
+-import { JSONValue, convexOrUndefinedToJson } from "../../values/value.js";
++import { QueryValue, queryValueArg } from "./query_value.js";
+ import {
+   FieldTypeFromFieldPath,
+   GenericDocument,
+@@ -20,7 +20,7 @@ export type SerializedSearchFilter =
+   | {
+       type: "Eq";
+       fieldPath: string;
+-      value: JSONValue;
++      value: QueryValue;
+     };
+ 
+ export class SearchFilterBuilderImpl
+@@ -79,7 +79,7 @@ export class SearchFilterBuilderImpl
+       this.filters.concat({
+         type: "Eq",
+         fieldPath: fieldName,
+-        value: convexOrUndefinedToJson(value),
++        value: queryValueArg(value),
+       }),
+     );
+   }
+diff --git a/src/server/impl/storage_impl.ts b/src/server/impl/storage_impl.ts
+index f8b8c44698435e0c2b777020e9e88abf39aab1a9..8cdbcc545cdca819de74c456fe11cb984d613924 100644
+--- a/src/server/impl/storage_impl.ts
++++ b/src/server/impl/storage_impl.ts
+@@ -6,25 +6,29 @@ import {
+   StorageWriter,
+ } from "../storage.js";
+ import { version } from "../../index.js";
+-import { performAsyncSyscall, performJsSyscall } from "./syscall.js";
++import { performAsyncValueSyscall, performJsSyscall } from "./syscall.js";
+ import { validateArg } from "./validate.js";
+ 
+ export function setupStorageReader(requestId: string): StorageReader {
+   return {
+     getUrl: async (storageId: FileStorageId) => {
+       validateArg(storageId, 1, "getUrl", "storageId");
+-      return await performAsyncSyscall("1.0/storageGetUrl", {
+-        requestId,
+-        version,
+-        storageId,
+-      });
++      const args = { requestId, version, storageId };
++      return await performAsyncValueSyscall(
++        "1.0/storageGetUrl",
++        args,
++        () => args,
++        (result) => result,
++      );
+     },
+     getMetadata: async (storageId: FileStorageId): Promise<FileMetadata> => {
+-      return await performAsyncSyscall("1.0/storageGetMetadata", {
+-        requestId,
+-        version,
+-        storageId,
+-      });
++      const args = { requestId, version, storageId };
++      return await performAsyncValueSyscall<FileMetadata>(
++        "1.0/storageGetMetadata",
++        args,
++        () => args,
++        (result) => result,
++      );
+     },
+   };
+ }
+@@ -33,17 +37,22 @@ export function setupStorageWriter(requestId: string): StorageWriter {
+   const reader = setupStorageReader(requestId);
+   return {
+     generateUploadUrl: async () => {
+-      return await performAsyncSyscall("1.0/storageGenerateUploadUrl", {
+-        requestId,
+-        version,
+-      });
++      const args = { requestId, version };
++      return await performAsyncValueSyscall(
++        "1.0/storageGenerateUploadUrl",
++        args,
++        () => args,
++        (result) => result,
++      );
+     },
+     delete: async (storageId: FileStorageId) => {
+-      await performAsyncSyscall("1.0/storageDelete", {
+-        requestId,
+-        version,
+-        storageId,
+-      });
++      const args = { requestId, version, storageId };
++      await performAsyncValueSyscall(
++        "1.0/storageDelete",
++        args,
++        () => args,
++        () => undefined,
++      );
+     },
+     getUrl: reader.getUrl,
+     getMetadata: reader.getMetadata,
+diff --git a/src/server/impl/syscall.ts b/src/server/impl/syscall.ts
+index 60103cde7b49ba7acc413a21c1faf36395a4ef57..c575c19e5950a8653d6c1043dadc36b9a6c2790e 100644
+--- a/src/server/impl/syscall.ts
++++ b/src/server/impl/syscall.ts
+@@ -9,6 +9,10 @@ declare const Convex: {
+     op: string,
+     args: Record<string, any>,
+   ) => Promise<string>;
++  asyncSyscallValueArgs?: (
++    op: string,
++    args: Record<string, unknown>,
++  ) => Promise<unknown>;
+   jsSyscall: (op: string, args: Record<string, any>) => any;
+ };
+ /**
+@@ -65,6 +69,31 @@ export async function performAsyncSyscall(
+   return JSON.parse(resultStr);
+ }
+ 
++/** The Wasm value ABI returns SDK-visible values; V8 keeps the JSON syscall contract. */
++export async function performAsyncValueSyscall<T>(
++  op: string,
++  valueArgs: Record<string, unknown>,
++  jsonArgs: () => Record<string, unknown>,
++  fromJson: (value: any) => T,
++): Promise<T> {
++  if (
++    typeof Convex === "undefined" ||
++    Convex.asyncSyscallValueArgs === undefined
++  ) {
++    return fromJson(await performAsyncSyscall(op, jsonArgs()));
++  }
++  try {
++    return (await Convex.asyncSyscallValueArgs(op, valueArgs)) as T;
++  } catch (e: any) {
++    if (e.data !== undefined) {
++      const rethrown = new ConvexError(e.message);
++      rethrown.data = e.data;
++      throw rethrown;
++    }
++    throw new Error(e.message);
++  }
++}
++
+ /**
+  * Call into a "JS" syscall. Like `performSyscall`, this calls a dynamically linked
+  * function set up in the Convex function execution. Unlike `performSyscall`, the
+diff --git a/src/server/registration.ts b/src/server/registration.ts
+index 672fe8015ef033736678665f9e1d80ab36aca06a..1e47a900b81ecc7b7bc1a551e04d91c5b86d313c 100644
+--- a/src/server/registration.ts
++++ b/src/server/registration.ts
+@@ -507,6 +507,9 @@ export type RegisteredMutation<
+   /** @internal */
+   invokeMutation(argsStr: string): Promise<string>;
+ 
++  /** @internal */
++  invokeMutationValue(args: Args): Promise<unknown>;
++
+   /** @internal */
+   exportArgs(): string;
+ 
+@@ -536,6 +539,9 @@ export type RegisteredQuery<
+   /** @internal */
+   invokeQuery(argsStr: string): Promise<string>;
+ 
++  /** @internal */
++  invokeQueryValue(args: Args): Promise<unknown>;
++
+   /** @internal */
+   exportArgs(): string;
+ 

@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Sat, 26 Sep 2026 04:49:43 +0800
+Subject: [PATCH 15/17] sdk: use bulk collection when the runtime provides it
+
+Collect now uses one queryCollect operation when the runtime advertises the terminal. The query is consumed before dispatch, returned tagged rows use the existing Convex value conversion, and the stream implementation remains the fallback. take, first, and unique inherit this path through collect.
+
+Exclude immutable published package manifests from the source-format check so a new source package can be built without rewriting previous release records.
+---
+ .github/workflows/build-convex-in-prod.yml |  7 +++++--
+ src/server/impl/query_impl.ts              | 21 +++++++++++++++++++++
+ 2 files changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/.github/workflows/build-convex-in-prod.yml b/.github/workflows/build-convex-in-prod.yml
+index ab69dc289c5b7b9a104a8ac2c022ebc4de75f4d2..fd97d84d7cb99b8ffc8af42218530c6f4c1b24ee 100644
+--- a/.github/workflows/build-convex-in-prod.yml
++++ b/.github/workflows/build-convex-in-prod.yml
+@@ -51,11 +51,13 @@ jobs:
+           upstream_base_sha="$(tr -d '\n' < .convex-in-prod-upstream)"
+           git merge-base --is-ancestor "$upstream_base_sha" HEAD
+ 
++          # Published package manifests are immutable artifact records, not formatted source.
++
+           mapfile -t format_files < <(
+             git diff --name-only --diff-filter=ACMR "$upstream_base_sha" HEAD -- \
+               '*.cjs' '*.css' '*.gql' '*.graphql' '*.html' '*.js' '*.json' \
+               '*.json5' '*.jsx' '*.md' '*.mdx' '*.mjs' '*.scss' '*.ts' \
+-              '*.tsx' '*.yaml' '*.yml'
++              '*.tsx' '*.yaml' '*.yml' ':(exclude)packages/convex/**'
+           )
+           if (( ${#format_files[@]} > 0 )); then
+             # Upstream has no lockfile, so keep formatter upgrades from changing
+@@ -65,7 +67,8 @@ jobs:
+ 
+           mapfile -t lint_files < <(
+             git diff --name-only --diff-filter=ACMR "$upstream_base_sha" HEAD -- \
+-              '*.cjs' '*.js' '*.jsx' '*.mjs' '*.ts' '*.tsx'
++              '*.cjs' '*.js' '*.jsx' '*.mjs' '*.ts' '*.tsx' \
++              ':(exclude)packages/convex/**'
+           )
+           if (( ${#lint_files[@]} > 0 )); then
+             npx eslint --no-warn-ignored "${lint_files[@]}"
+diff --git a/src/server/impl/query_impl.ts b/src/server/impl/query_impl.ts
+index ea836a6ef06ef3ffb2b06d9d00c84285638ca166..f57fc62006792ede2f9f91562ba1577e333dda04 100644
+--- a/src/server/impl/query_impl.ts
++++ b/src/server/impl/query_impl.ts
+@@ -19,6 +19,8 @@ import {
+ import { validateArg, validateArgIsNonNegativeInteger } from "./validate.js";
+ import { version } from "../../index.js";
+ 
++declare const Convex: { queryCollect?: true };
++
+ const MAX_QUERY_OPERATORS = 256;
+ 
+ type QueryOperator = { filter: JSONValue } | { limit: number };
+@@ -313,6 +315,25 @@ export class QueryImpl implements Query<GenericTableInfo> {
+   }
+ 
+   async collect(): Promise<Array<any>> {
++    if (
++      this.state.type === "preparing" &&
++      typeof Convex !== "undefined" &&
++      Convex.queryCollect === true
++    ) {
++      const query = this.takeQuery();
++      try {
++        const rows = await performAsyncSyscall("1.0/queryCollect", {
++          query,
++          version,
++        });
++        if (!Array.isArray(rows)) {
++          throw new Error("Bulk query returned an invalid result");
++        }
++        return rows.map((row) => jsonToConvex(row));
++      } finally {
++        this.state = { type: "consumed" };
++      }
++    }
+     const out: Value[] = [];
+     for await (const item of this) {
+       out.push(item);
