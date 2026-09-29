@@ -7,6 +7,7 @@ import {
 } from "./client.js";
 import { ConvexClient } from "../simple_client.js";
 import { ConvexReactClient } from "../../react/client.js";
+import { makeFunctionReference } from "../../server/api.js";
 import {
   encodeServerMessage,
   nodeWebSocket,
@@ -53,6 +54,93 @@ test("React forwards the exact retry result from a supplied base client", async 
     await client.close();
   }
 });
+test("React watch observes local result removal without subscribing again", async () => {
+  await withInMemoryWebSocket(async ({ address, receive, send }) => {
+    const client = new ConvexReactClient(address, {
+      webSocketConstructor: nodeWebSocket,
+      logger: false,
+      unsavedChangesWarning: false,
+      skipConvexDeploymentUrlCheck: true,
+    });
+    const query = makeFunctionReference<"query">("messages:list");
+    const watch = client.watchQuery(query, {});
+    expect(watch.hasLocalQueryResult()).toBe(false);
+    let resolveUpdate!: () => void;
+    const updated = new Promise<void>((resolve) => {
+      resolveUpdate = resolve;
+    });
+    const unsubscribe = watch.onUpdate(resolveUpdate);
+
+    try {
+      expect((await receive()).type).toBe("Connect");
+      const addMessage = await receive();
+      if (addMessage.type !== "ModifyQuerySet") {
+        throw new Error("Expected an Add query modification");
+      }
+      const add = addMessage.modifications[0];
+      if (add?.type !== "Add") {
+        throw new Error("Expected an Add query modification");
+      }
+      send({
+        type: "Transition",
+        startVersion: {
+          querySet: 0,
+          ts: Long.fromNumber(0),
+          identity: 0,
+        },
+        endVersion: {
+          querySet: 1,
+          ts: Long.fromNumber(1),
+          identity: 0,
+        },
+        modifications: [
+          {
+            type: "QueryUpdated",
+            queryId: add.queryId,
+            value: "current value",
+            logLines: [],
+            journal: null,
+          },
+        ],
+      });
+      await updated;
+      expect(watch.hasLocalQueryResult()).toBe(true);
+
+      let resolveRemoval!: () => void;
+      const removed = new Promise<void>((resolve) => {
+        resolveRemoval = resolve;
+      });
+      watch.onLocalQueryResultRemoved(resolveRemoval);
+      unsubscribe();
+      const removeMessage = await receive();
+      expect(removeMessage).toMatchObject({
+        type: "ModifyQuerySet",
+        baseVersion: 1,
+        newVersion: 2,
+        modifications: [{ type: "Remove", queryId: add.queryId }],
+      });
+      send({
+        type: "Transition",
+        startVersion: {
+          querySet: 1,
+          ts: Long.fromNumber(1),
+          identity: 0,
+        },
+        endVersion: {
+          querySet: 2,
+          ts: Long.fromNumber(2),
+          identity: 0,
+        },
+        modifications: [{ type: "QueryRemoved", queryId: add.queryId }],
+      });
+      await removed;
+      expect(watch.hasLocalQueryResult()).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
 describe("degradable BaseConvexClient", () => {
   test("serializes the workload class on the initial Connect and reconnect", async () => {
     await withInMemoryWebSocket(async ({ address, receive, close }) => {
