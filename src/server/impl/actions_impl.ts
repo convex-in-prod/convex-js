@@ -1,4 +1,5 @@
-import { convexToJson, jsonToConvex, Value } from "../../values/index.js";
+import { convexToJson, Value } from "../../values/index.js";
+import { jsonToConvexOwned } from "../../values/value.js";
 import { version } from "../../index.js";
 import { performAsyncSyscall } from "./syscall.js";
 import { parseArgs } from "../../common/index.js";
@@ -36,7 +37,7 @@ export function setupActionCalls(requestId: string) {
         "1.0/actions/query",
         syscallArgs(requestId, query, args),
       );
-      return jsonToConvex(result);
+      return jsonToConvexOwned(result);
     },
     runMutation: async (
       mutation: FunctionReference<"mutation", "public" | "internal">,
@@ -54,7 +55,7 @@ export function setupActionCalls(requestId: string) {
         writeConflictRetryOptions,
         isWriteConflictRetryableError,
       );
-      return jsonToConvex(result);
+      return jsonToConvexOwned(result);
     },
     runAction: async (
       action: FunctionReference<"action", "public" | "internal">,
@@ -64,7 +65,7 @@ export function setupActionCalls(requestId: string) {
         "1.0/actions/action",
         syscallArgs(requestId, action, args),
       );
-      return jsonToConvex(result);
+      return jsonToConvexOwned(result);
     },
   };
 }

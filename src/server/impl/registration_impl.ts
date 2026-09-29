@@ -2,11 +2,11 @@ import {
   ConvexError,
   convexToJson,
   GenericValidator,
-  jsonToConvex,
   v,
   Validator,
   Value,
 } from "../../values/index.js";
+import { jsonToConvexOwned } from "../../values/value.js";
 import { GenericDataModel } from "../data_model.js";
 import {
   ActionBuilder,
@@ -37,7 +37,7 @@ import {
   setupStorageWriter,
 } from "./storage_impl.js";
 import { parseArgs } from "../../common/index.js";
-import { performAsyncSyscall } from "./syscall.js";
+import { performAsyncValueSyscall } from "./syscall.js";
 import { asObjectValidator } from "../../values/validator.js";
 import { getFunctionAddress } from "../components/paths.js";
 import {
@@ -61,10 +61,17 @@ function transactionLimitsForMutationRunMutation(options: any) {
 async function invokeMutation<
   F extends (ctx: GenericMutationCtx<GenericDataModel>, ...args: any) => any,
 >(func: F, argsStr: string, visibility: FunctionVisibility) {
+  const args = jsonToConvexOwned(JSON.parse(argsStr));
+  const result = await invokeMutationValue(func, args as any, visibility);
+  return JSON.stringify(convexToJson(result));
+}
+
+async function invokeMutationValue<
+  F extends (ctx: GenericMutationCtx<GenericDataModel>, ...args: any) => any,
+>(func: F, args: any[], visibility: FunctionVisibility) {
   // TODO(presley): Change the function signature and propagate the requestId from Rust.
   // Ok, to mock it out for now, since queries are only running in V8.
   const requestId = "";
-  const args = jsonToConvex(JSON.parse(argsStr));
   const mutationCtx = {
     db: setupWriter(),
     auth: setupAuth(requestId),
@@ -86,7 +93,7 @@ async function invokeMutation<
   };
   const result = await invokeFunction(func, mutationCtx, args as any);
   validateReturnValue(result);
-  return JSON.stringify(convexToJson(result === undefined ? null : result));
+  return result === undefined ? null : result;
 }
 
 export function validateReturnValue(v: any) {
@@ -275,6 +282,8 @@ export const mutationGeneric: MutationBuilder<any, "public"> = ((
   func.isMutation = true;
   func.isPublic = true;
   func.invokeMutation = (argsStr) => invokeMutation(handler, argsStr, "public");
+  func.invokeMutationValue = (args) =>
+    invokeMutationValue(handler, [args], "public");
   func.exportArgs = exportArgs(functionDefinition);
   func.exportReturns = exportReturns(functionDefinition);
   func._handler = handler;
@@ -337,6 +346,8 @@ export const internalMutationGeneric: MutationBuilder<any, "internal"> = ((
   func.isInternal = true;
   func.invokeMutation = (argsStr) =>
     invokeMutation(handler, argsStr, "internal");
+  func.invokeMutationValue = (args) =>
+    invokeMutationValue(handler, [args], "internal");
   func.exportArgs = exportArgs(functionDefinition);
   func.exportReturns = exportReturns(functionDefinition);
   func._handler = handler;
@@ -346,10 +357,17 @@ export const internalMutationGeneric: MutationBuilder<any, "internal"> = ((
 async function invokeQuery<
   F extends (ctx: GenericQueryCtx<GenericDataModel>, ...args: any) => any,
 >(func: F, argsStr: string, visibility: FunctionVisibility) {
+  const args = jsonToConvexOwned(JSON.parse(argsStr));
+  const result = await invokeQueryValue(func, args as any, visibility);
+  return JSON.stringify(convexToJson(result));
+}
+
+async function invokeQueryValue<
+  F extends (ctx: GenericQueryCtx<GenericDataModel>, ...args: any) => any,
+>(func: F, args: any[], visibility: FunctionVisibility) {
   // TODO(presley): Change the function signature and propagate the requestId from Rust.
   // Ok, to mock it out for now, since queries are only running in V8.
   const requestId = "";
-  const args = jsonToConvex(JSON.parse(argsStr));
   const queryCtx = {
     db: setupReader(),
     auth: setupAuth(requestId),
@@ -366,7 +384,7 @@ async function invokeQuery<
   };
   const result = await invokeFunction(func, queryCtx, args as any);
   validateReturnValue(result);
-  return JSON.stringify(convexToJson(result === undefined ? null : result));
+  return result === undefined ? null : result;
 }
 
 /**
@@ -440,6 +458,7 @@ export const queryGeneric: QueryBuilder<any, "public"> = ((
   func.isQuery = true;
   func.isPublic = true;
   func.invokeQuery = (argsStr) => invokeQuery(handler, argsStr, "public");
+  func.invokeQueryValue = (args) => invokeQueryValue(handler, [args], "public");
   func.exportArgs = exportArgs(functionDefinition);
   func.exportReturns = exportReturns(functionDefinition);
   func._handler = handler;
@@ -508,6 +527,8 @@ export const internalQueryGeneric: QueryBuilder<any, "internal"> = ((
   func.isInternal = true;
   func.invokeQuery = (argsStr) =>
     invokeQuery(handler as any, argsStr, "internal");
+  func.invokeQueryValue = (args) =>
+    invokeQueryValue(handler as any, [args], "internal");
   func.exportArgs = exportArgs(functionDefinition);
   func.exportReturns = exportReturns(functionDefinition);
   func._handler = handler;
@@ -517,7 +538,7 @@ export const internalQueryGeneric: QueryBuilder<any, "internal"> = ((
 async function invokeAction<
   F extends (ctx: GenericActionCtx<GenericDataModel>, ...args: any) => any,
 >(func: F, requestId: string, argsStr: string, visibility: FunctionVisibility) {
-  const args = jsonToConvex(JSON.parse(argsStr));
+  const args = jsonToConvexOwned(JSON.parse(argsStr));
   const calls = setupActionCalls(requestId);
   const ctx = {
     ...calls,
@@ -776,14 +797,18 @@ async function runUdf(
   transactionLimits?: Record<string, number>,
 ): Promise<any> {
   const queryArgs = parseArgs(args);
-  const syscallArgs: Record<string, any> = {
+  const syscallArgs: Record<string, unknown> = {
     udfType,
-    args: convexToJson(queryArgs),
+    args: queryArgs,
     ...getFunctionAddress(f),
   };
   if (transactionLimits) {
     syscallArgs.transactionLimits = transactionLimits;
   }
-  const result = await performAsyncSyscall("1.0/runUdf", syscallArgs);
-  return jsonToConvex(result);
+  return await performAsyncValueSyscall(
+    "1.0/runUdf",
+    syscallArgs,
+    () => ({ ...syscallArgs, args: convexToJson(queryArgs) }),
+    jsonToConvexOwned,
+  );
 }

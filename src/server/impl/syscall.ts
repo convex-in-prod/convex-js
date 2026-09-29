@@ -4,12 +4,21 @@ import { jsonToConvex } from "../../values/value.js";
 declare const Convex: {
   syscall: (op: string, jsonArgs: string) => string;
   asyncSyscall: (op: string, jsonArgs: string) => Promise<string>;
+  syscallObjectArgs?: (op: string, args: Record<string, any>) => string;
+  asyncSyscallObjectArgs?: (
+    op: string,
+    args: Record<string, any>,
+  ) => Promise<string>;
+  asyncSyscallValueArgs?: (
+    op: string,
+    args: Record<string, unknown>,
+  ) => Promise<unknown>;
   jsSyscall: (op: string, args: Record<string, any>) => any;
 };
 /**
- * Perform a syscall, taking in a JSON-encodable object as an argument, serializing with
- * JSON.stringify, calling into Rust, and then parsing the response as a JSON-encodable
- * value. If one of your arguments is a Convex value, you must call `convexToJson` on it
+ * Perform a syscall with a JSON-encodable object and parse its JSON response.
+ * The runtime may accept the object directly or require a JSON string.
+ * If one of your arguments is a Convex value, you must call `convexToJson` on it
  * before passing it to this function, and if the return value has a Convex value, you're
  * also responsible for calling `jsonToConvex`: This layer only deals in JSON.
  */
@@ -21,7 +30,10 @@ export function performSyscall(op: string, arg: Record<string, any>): any {
         "Did you mean to use `useQuery` or `useMutation` to call a Convex function?",
     );
   }
-  const resultStr = Convex.syscall(op, JSON.stringify(arg));
+  const resultStr =
+    Convex.syscallObjectArgs === undefined
+      ? Convex.syscall(op, JSON.stringify(arg))
+      : Convex.syscallObjectArgs(op, arg);
   return JSON.parse(resultStr);
 }
 
@@ -37,7 +49,10 @@ export async function performAsyncSyscall(
   }
   let resultStr;
   try {
-    resultStr = await Convex.asyncSyscall(op, JSON.stringify(arg));
+    resultStr =
+      Convex.asyncSyscallObjectArgs === undefined
+        ? await Convex.asyncSyscall(op, JSON.stringify(arg))
+        : await Convex.asyncSyscallObjectArgs(op, arg);
   } catch (e: any) {
     // Rethrow the exception to attach stack trace starting from here.
     // If the error came from JS it will include its own stack trace in the message.
@@ -52,6 +67,31 @@ export async function performAsyncSyscall(
     throw new Error(e.message);
   }
   return JSON.parse(resultStr);
+}
+
+/** The Wasm value ABI returns SDK-visible values; V8 keeps the JSON syscall contract. */
+export async function performAsyncValueSyscall<T>(
+  op: string,
+  valueArgs: Record<string, unknown>,
+  jsonArgs: () => Record<string, unknown>,
+  fromJson: (value: any) => T,
+): Promise<T> {
+  if (
+    typeof Convex === "undefined" ||
+    Convex.asyncSyscallValueArgs === undefined
+  ) {
+    return fromJson(await performAsyncSyscall(op, jsonArgs()));
+  }
+  try {
+    return (await Convex.asyncSyscallValueArgs(op, valueArgs)) as T;
+  } catch (e: any) {
+    if (e.data !== undefined) {
+      const rethrown = new ConvexError(e.message);
+      rethrown.data = e.data;
+      throw rethrown;
+    }
+    throw new Error(e.message);
+  }
 }
 
 /**
