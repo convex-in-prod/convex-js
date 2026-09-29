@@ -147,7 +147,16 @@ export function setFetch(f: typeof globalThis.fetch) {
   specifiedFetch = f;
 }
 
+export type HttpMutationPriority = "normal" | "high";
+
 export type HttpMutationOptions = WriteConflictRetryOptions & {
+  /**
+   * Request bounded backend scheduling preference for this mutation. Defaults
+   * to normal. High priority does not bypass authorization or capacity limits,
+   * and does not reorder the client's queue; use skipQueue for independent calls.
+   * Requires a backend with mutation-priority support.
+   */
+  priority?: HttpMutationPriority | undefined;
   /**
    * Skip the default queue of mutations and run this immediately.
    *
@@ -181,6 +190,7 @@ export class ConvexHttpClient {
     mutation: FunctionReference<"mutation">;
     args: FunctionArgs<any>;
     writeConflictRetryOptions: ValidatedWriteConflictRetryOptions;
+    priority: HttpMutationPriority;
     resolve: (value: any) => void;
     reject: (error: any) => void;
   }> = [];
@@ -454,9 +464,10 @@ export class ConvexHttpClient {
     mutation: Mutation,
     mutationArgs: FunctionArgs<Mutation>,
     writeConflictRetryOptions: ValidatedWriteConflictRetryOptions,
+    priority: HttpMutationPriority,
   ): Promise<FunctionReturnType<Mutation>> {
     return await retryOnWriteConflict(
-      () => this.mutationInnerOnce(mutation, mutationArgs),
+      () => this.mutationInnerOnce(mutation, mutationArgs, priority),
       writeConflictRetryOptions,
       isHttpWriteConflictRetryableError,
     );
@@ -467,12 +478,14 @@ export class ConvexHttpClient {
   >(
     mutation: Mutation,
     mutationArgs: FunctionArgs<Mutation>,
+    priority: HttpMutationPriority,
   ): Promise<FunctionReturnType<Mutation>> {
     const name = getFunctionName(mutation);
     const body = JSON.stringify({
       path: name,
       format: "convex_encoded_json",
       args: [convexToJson(mutationArgs)],
+      ...(priority === "high" ? { priority } : {}),
     });
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -522,13 +535,20 @@ export class ConvexHttpClient {
 
     this.isProcessingQueue = true;
     while (this.mutationQueue.length > 0) {
-      const { mutation, args, writeConflictRetryOptions, resolve, reject } =
-        this.mutationQueue.shift()!;
+      const {
+        mutation,
+        args,
+        writeConflictRetryOptions,
+        priority,
+        resolve,
+        reject,
+      } = this.mutationQueue.shift()!;
       try {
         const result = await this.mutationInner(
           mutation,
           args,
           writeConflictRetryOptions,
+          priority,
         );
         resolve(result);
       } catch (error) {
@@ -542,12 +562,14 @@ export class ConvexHttpClient {
     mutation: Mutation,
     args: FunctionArgs<Mutation>,
     writeConflictRetryOptions: ValidatedWriteConflictRetryOptions,
+    priority: HttpMutationPriority,
   ): Promise<FunctionReturnType<Mutation>> {
     return new Promise((resolve, reject) => {
       this.mutationQueue.push({
         mutation,
         args,
         writeConflictRetryOptions,
+        priority,
         resolve,
         reject,
       });
@@ -571,6 +593,11 @@ export class ConvexHttpClient {
     const [fnArgs, options] = args;
     const mutationArgs = parseArgs(fnArgs);
     const queued = !options?.skipQueue;
+    const priority =
+      options?.priority === undefined ? "normal" : options.priority;
+    if (priority !== "normal" && priority !== "high") {
+      throw new Error('Mutation priority must be "normal" or "high".');
+    }
     const writeConflictRetryOptions =
       validateWriteConflictRetryOptions(options);
 
@@ -579,12 +606,14 @@ export class ConvexHttpClient {
         mutation,
         mutationArgs,
         writeConflictRetryOptions,
+        priority,
       );
     } else {
       return await this.mutationInner(
         mutation,
         mutationArgs,
         writeConflictRetryOptions,
+        priority,
       );
     }
   }
