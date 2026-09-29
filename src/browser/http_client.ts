@@ -23,6 +23,12 @@ import {
   FunctionArgs,
   UserIdentityAttributes,
 } from "../server/index.js";
+import {
+  retryOnWriteConflict,
+  validateWriteConflictRetryOptions,
+  ValidatedWriteConflictRetryOptions,
+  WriteConflictRetryOptions,
+} from "../common/write_conflict_retry.js";
 
 export const STATUS_CODE_OK = 200;
 export const STATUS_CODE_BAD_REQUEST = 400;
@@ -31,20 +37,124 @@ export const STATUS_CODE_BAD_REQUEST = 400;
 // Must match the constant of the same name in the backend.
 export const STATUS_CODE_UDF_FAILED = 560;
 
+const STATUS_CODE_SERVICE_UNAVAILABLE = 503;
+
+// The HTTP protocol exposes ErrorMetadata.short_msg as `code`, but not the backend's
+// ErrorCode::RejectedBeforeExecution category. Keep this compatibility set aligned with
+// RejectedBeforeExecutionReason::error_metadata in crates/isolate/src/metrics.rs. Missing a new
+// code fails closed as an unclassified HTTP error; never infer this guarantee from status or text.
+const REJECTED_BEFORE_EXECUTION_CODES: ReadonlySet<string> = new Set([
+  "ExpiredInQueue",
+  "WorkerOverloaded",
+  "IsolateNotClean",
+  "InitialPermitTimeoutError",
+  "ExecuteFullError",
+]);
+
+function executionStatus(
+  status: number,
+  responseJson: unknown | undefined,
+): "rejected_before_execution" | undefined {
+  if (
+    status !== STATUS_CODE_SERVICE_UNAVAILABLE ||
+    typeof responseJson !== "object" ||
+    responseJson === null ||
+    !("code" in responseJson) ||
+    typeof responseJson.code !== "string" ||
+    !REJECTED_BEFORE_EXECUTION_CODES.has(responseJson.code)
+  ) {
+    return undefined;
+  }
+  return "rejected_before_execution";
+}
+
+/**
+ * A completed non-UDF HTTP error response from a Convex deployment.
+ *
+ * Transport failures can reject before a response is available and therefore do not use this
+ * class. `responseJson` is present only when the completed response declares JSON content and the
+ * body parses successfully. `executionStatus` is present only for an exact completed backend
+ * rejection that guarantees function execution did not start.
+ *
+ * @public
+ */
+export class ConvexHttpError extends Error {
+  readonly name = "ConvexHttpError";
+  readonly status: number;
+  readonly responseText: string;
+  readonly responseJson: unknown | undefined;
+  readonly executionStatus: "rejected_before_execution" | undefined;
+
+  constructor(
+    status: number,
+    responseText: string,
+    responseJson: unknown | undefined,
+  ) {
+    super(responseText);
+    this.status = status;
+    this.responseText = responseText;
+    this.responseJson = responseJson;
+    this.executionStatus = executionStatus(status, responseJson);
+  }
+}
+
+function isHttpWriteConflictRetryableError(error: unknown): boolean {
+  if (
+    !(error instanceof ConvexHttpError) ||
+    error.status !== STATUS_CODE_SERVICE_UNAVAILABLE
+  ) {
+    return false;
+  }
+  // Public HTTP mutations have no deduplication. Only a completed structured OCC
+  // response proves this attempt did not commit; matching error text does not.
+  const body = error.responseJson;
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    "code" in body &&
+    body.code === "OptimisticConcurrencyControlFailure" &&
+    "message" in body &&
+    typeof body.message === "string"
+  );
+}
+
+async function completedHttpError(
+  response: Response,
+): Promise<ConvexHttpError> {
+  // Reading the complete body is what distinguishes a typed server response from an ambiguous
+  // transport failure. Keep malformed or non-JSON bodies as text without inventing structured
+  // fields that callers could mistake for protocol evidence.
+  const responseText = await response.text();
+  const contentType = response.headers
+    .get("content-type")
+    ?.split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  let responseJson: unknown | undefined;
+  if (contentType === "application/json") {
+    try {
+      responseJson = JSON.parse(responseText) as unknown;
+    } catch {
+      responseJson = undefined;
+    }
+  }
+  return new ConvexHttpError(response.status, responseText, responseJson);
+}
+
 // Allow fetch to be shimmed in for Node.js < 18
 let specifiedFetch: typeof globalThis.fetch | undefined = undefined;
 export function setFetch(f: typeof globalThis.fetch) {
   specifiedFetch = f;
 }
 
-export type HttpMutationOptions = {
+export type HttpMutationOptions = WriteConflictRetryOptions & {
   /**
    * Skip the default queue of mutations and run this immediately.
    *
    * This allows the same HttpConvexClient to be used to request multiple
    * mutations in parallel, something not possible with WebSocket-based clients.
    */
-  skipQueue: boolean;
+  skipQueue?: boolean | undefined;
 };
 
 /**
@@ -70,6 +180,7 @@ export class ConvexHttpClient {
   private mutationQueue: Array<{
     mutation: FunctionReference<"mutation">;
     args: FunctionArgs<any>;
+    writeConflictRetryOptions: ValidatedWriteConflictRetryOptions;
     resolve: (value: any) => void;
     reject: (error: any) => void;
   }> = [];
@@ -253,7 +364,7 @@ export class ConvexHttpClient {
       headers: headers,
     });
     if (!response.ok) {
-      throw new Error(await response.text());
+      throw await completedHttpError(response);
     }
     const { ts } = (await response.json()) as { ts: string };
     return ts;
@@ -314,7 +425,7 @@ export class ConvexHttpClient {
       headers: headers,
     });
     if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
-      throw new Error(await response.text());
+      throw await completedHttpError(response);
     }
     const respJSON = await response.json();
 
@@ -342,6 +453,20 @@ export class ConvexHttpClient {
   private async mutationInner<Mutation extends FunctionReference<"mutation">>(
     mutation: Mutation,
     mutationArgs: FunctionArgs<Mutation>,
+    writeConflictRetryOptions: ValidatedWriteConflictRetryOptions,
+  ): Promise<FunctionReturnType<Mutation>> {
+    return await retryOnWriteConflict(
+      () => this.mutationInnerOnce(mutation, mutationArgs),
+      writeConflictRetryOptions,
+      isHttpWriteConflictRetryableError,
+    );
+  }
+
+  private async mutationInnerOnce<
+    Mutation extends FunctionReference<"mutation">,
+  >(
+    mutation: Mutation,
+    mutationArgs: FunctionArgs<Mutation>,
   ): Promise<FunctionReturnType<Mutation>> {
     const name = getFunctionName(mutation);
     const body = JSON.stringify({
@@ -366,7 +491,7 @@ export class ConvexHttpClient {
       headers: headers,
     });
     if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
-      throw new Error(await response.text());
+      throw await completedHttpError(response);
     }
     const respJSON = await response.json();
     if (this.debug) {
@@ -397,9 +522,14 @@ export class ConvexHttpClient {
 
     this.isProcessingQueue = true;
     while (this.mutationQueue.length > 0) {
-      const { mutation, args, resolve, reject } = this.mutationQueue.shift()!;
+      const { mutation, args, writeConflictRetryOptions, resolve, reject } =
+        this.mutationQueue.shift()!;
       try {
-        const result = await this.mutationInner(mutation, args);
+        const result = await this.mutationInner(
+          mutation,
+          args,
+          writeConflictRetryOptions,
+        );
         resolve(result);
       } catch (error) {
         reject(error);
@@ -411,9 +541,16 @@ export class ConvexHttpClient {
   private enqueueMutation<Mutation extends FunctionReference<"mutation">>(
     mutation: Mutation,
     args: FunctionArgs<Mutation>,
+    writeConflictRetryOptions: ValidatedWriteConflictRetryOptions,
   ): Promise<FunctionReturnType<Mutation>> {
     return new Promise((resolve, reject) => {
-      this.mutationQueue.push({ mutation, args, resolve, reject });
+      this.mutationQueue.push({
+        mutation,
+        args,
+        writeConflictRetryOptions,
+        resolve,
+        reject,
+      });
       void this.processMutationQueue();
     });
   }
@@ -434,11 +571,21 @@ export class ConvexHttpClient {
     const [fnArgs, options] = args;
     const mutationArgs = parseArgs(fnArgs);
     const queued = !options?.skipQueue;
+    const writeConflictRetryOptions =
+      validateWriteConflictRetryOptions(options);
 
     if (queued) {
-      return await this.enqueueMutation(mutation, mutationArgs);
+      return await this.enqueueMutation(
+        mutation,
+        mutationArgs,
+        writeConflictRetryOptions,
+      );
     } else {
-      return await this.mutationInner(mutation, mutationArgs);
+      return await this.mutationInner(
+        mutation,
+        mutationArgs,
+        writeConflictRetryOptions,
+      );
     }
   }
 
@@ -478,7 +625,7 @@ export class ConvexHttpClient {
       headers: headers,
     });
     if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
-      throw new Error(await response.text());
+      throw await completedHttpError(response);
     }
     const respJSON = await response.json();
     if (this.debug) {
@@ -547,7 +694,7 @@ export class ConvexHttpClient {
       headers: headers,
     });
     if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
-      throw new Error(await response.text());
+      throw await completedHttpError(response);
     }
     const respJSON = await response.json();
     if (this.debug) {
