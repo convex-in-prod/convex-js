@@ -1,5 +1,10 @@
-import { JSONValue, Value, NumericValue } from "../../values/index.js";
-import { convexOrUndefinedToJson } from "../../values/value.js";
+import { Value, NumericValue } from "../../values/index.js";
+import {
+  QueryValue,
+  queryValueArg,
+  QueryRecord,
+  queryRecordBuilder,
+} from "./query_value.js";
 import { GenericTableInfo } from "../data_model.js";
 import {
   Expression,
@@ -7,29 +12,40 @@ import {
   FilterBuilder,
 } from "../filter_builder.js";
 
+export type SerializedQueryExpression =
+  | QueryRecord
+  | {
+      [operator: string]:
+        | QueryValue
+        | SerializedQueryExpression
+        | SerializedQueryExpression[];
+    };
+
 // The `any` type parameter in `Expression<any>` allows us to use this class
 // in place of any `Expression` type in `filterBuilderImpl`.
 export class ExpressionImpl extends Expression<any> {
-  private inner: JSONValue;
-  constructor(inner: JSONValue) {
+  private inner: SerializedQueryExpression;
+  constructor(inner: SerializedQueryExpression) {
     super();
     this.inner = inner;
   }
 
-  serialize(): JSONValue {
+  serialize(): SerializedQueryExpression {
     return this.inner;
   }
 }
 
 export function serializeExpression(
   expr: ExpressionOrValue<Value | undefined>,
-): JSONValue {
+): SerializedQueryExpression {
   if (expr instanceof ExpressionImpl) {
     return expr.serialize();
   } else {
-    // Assume that the expression is a literal Convex value, which we'll serialize
-    // to its JSON representation.
-    return { $literal: convexOrUndefinedToJson(expr as Value | undefined) };
+    // Capture the literal now so mutations after query construction cannot
+    // change the value observed when the query runs.
+    const captured = queryValueArg(expr as Value | undefined);
+    const record = queryRecordBuilder();
+    return record === undefined ? { $literal: captured } : record(1, captured);
   }
 }
 
@@ -40,54 +56,72 @@ export const filterBuilderImpl: FilterBuilder<GenericTableInfo> = {
     l: ExpressionOrValue<T>,
     r: ExpressionOrValue<T>,
   ): Expression<boolean> {
-    return new ExpressionImpl({
-      $eq: [serializeExpression(l), serializeExpression(r)],
-    });
+    const left = serializeExpression(l);
+    const right = serializeExpression(r);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $eq: [left, right] } : record(3, left, right),
+    );
   },
 
   neq<T extends Value | undefined>(
     l: ExpressionOrValue<T>,
     r: ExpressionOrValue<T>,
   ): Expression<boolean> {
-    return new ExpressionImpl({
-      $neq: [serializeExpression(l), serializeExpression(r)],
-    });
+    const left = serializeExpression(l);
+    const right = serializeExpression(r);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $neq: [left, right] } : record(4, left, right),
+    );
   },
 
   lt<T extends Value>(
     l: ExpressionOrValue<T>,
     r: ExpressionOrValue<T>,
   ): Expression<boolean> {
-    return new ExpressionImpl({
-      $lt: [serializeExpression(l), serializeExpression(r)],
-    });
+    const left = serializeExpression(l);
+    const right = serializeExpression(r);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $lt: [left, right] } : record(5, left, right),
+    );
   },
 
   lte<T extends Value>(
     l: ExpressionOrValue<T>,
     r: ExpressionOrValue<T>,
   ): Expression<boolean> {
-    return new ExpressionImpl({
-      $lte: [serializeExpression(l), serializeExpression(r)],
-    });
+    const left = serializeExpression(l);
+    const right = serializeExpression(r);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $lte: [left, right] } : record(6, left, right),
+    );
   },
 
   gt<T extends Value>(
     l: ExpressionOrValue<T>,
     r: ExpressionOrValue<T>,
   ): Expression<boolean> {
-    return new ExpressionImpl({
-      $gt: [serializeExpression(l), serializeExpression(r)],
-    });
+    const left = serializeExpression(l);
+    const right = serializeExpression(r);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $gt: [left, right] } : record(7, left, right),
+    );
   },
 
   gte<T extends Value>(
     l: ExpressionOrValue<T>,
     r: ExpressionOrValue<T>,
   ): Expression<boolean> {
-    return new ExpressionImpl({
-      $gte: [serializeExpression(l), serializeExpression(r)],
-    });
+    const left = serializeExpression(l);
+    const right = serializeExpression(r);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $gte: [left, right] } : record(8, left, right),
+    );
   },
 
   //  Arithmetic  //////////////////////////////////////////////////////////////
@@ -96,67 +130,101 @@ export const filterBuilderImpl: FilterBuilder<GenericTableInfo> = {
     l: ExpressionOrValue<T>,
     r: ExpressionOrValue<T>,
   ): Expression<T> {
-    return new ExpressionImpl({
-      $add: [serializeExpression(l), serializeExpression(r)],
-    });
+    const left = serializeExpression(l);
+    const right = serializeExpression(r);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $add: [left, right] } : record(9, left, right),
+    );
   },
 
   sub<T extends NumericValue>(
     l: ExpressionOrValue<T>,
     r: ExpressionOrValue<T>,
   ): Expression<T> {
-    return new ExpressionImpl({
-      $sub: [serializeExpression(l), serializeExpression(r)],
-    });
+    const left = serializeExpression(l);
+    const right = serializeExpression(r);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $sub: [left, right] } : record(10, left, right),
+    );
   },
 
   mul<T extends NumericValue>(
     l: ExpressionOrValue<T>,
     r: ExpressionOrValue<T>,
   ): Expression<T> {
-    return new ExpressionImpl({
-      $mul: [serializeExpression(l), serializeExpression(r)],
-    });
+    const left = serializeExpression(l);
+    const right = serializeExpression(r);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $mul: [left, right] } : record(11, left, right),
+    );
   },
 
   div<T extends NumericValue>(
     l: ExpressionOrValue<T>,
     r: ExpressionOrValue<T>,
   ): Expression<T> {
-    return new ExpressionImpl({
-      $div: [serializeExpression(l), serializeExpression(r)],
-    });
+    const left = serializeExpression(l);
+    const right = serializeExpression(r);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $div: [left, right] } : record(12, left, right),
+    );
   },
 
   mod<T extends NumericValue>(
     l: ExpressionOrValue<T>,
     r: ExpressionOrValue<T>,
   ): Expression<T> {
-    return new ExpressionImpl({
-      $mod: [serializeExpression(l), serializeExpression(r)],
-    });
+    const left = serializeExpression(l);
+    const right = serializeExpression(r);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $mod: [left, right] } : record(13, left, right),
+    );
   },
 
   neg<T extends NumericValue>(x: ExpressionOrValue<T>): Expression<T> {
-    return new ExpressionImpl({ $neg: serializeExpression(x) });
+    const expression = serializeExpression(x);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $neg: expression } : record(14, expression),
+    );
   },
 
   //  Logic  ///////////////////////////////////////////////////////////////////
 
   and(...exprs: Array<ExpressionOrValue<boolean>>): Expression<boolean> {
-    return new ExpressionImpl({ $and: exprs.map(serializeExpression) });
+    const expressions = exprs.map(serializeExpression);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $and: expressions } : record(16, expressions),
+    );
   },
 
   or(...exprs: Array<ExpressionOrValue<boolean>>): Expression<boolean> {
-    return new ExpressionImpl({ $or: exprs.map(serializeExpression) });
+    const expressions = exprs.map(serializeExpression);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $or: expressions } : record(17, expressions),
+    );
   },
 
   not(x: ExpressionOrValue<boolean>): Expression<boolean> {
-    return new ExpressionImpl({ $not: serializeExpression(x) });
+    const expression = serializeExpression(x);
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $not: expression } : record(15, expression),
+    );
   },
 
   //  Other  ///////////////////////////////////////////////////////////////////
   field(fieldPath: string): Expression<any> {
-    return new ExpressionImpl({ $field: fieldPath });
+    const record = queryRecordBuilder();
+    return new ExpressionImpl(
+      record === undefined ? { $field: fieldPath } : record(2, fieldPath),
+    );
   },
 };

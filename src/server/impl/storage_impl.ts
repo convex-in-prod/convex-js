@@ -7,25 +7,32 @@ import {
 } from "../storage.js";
 import { version } from "../../index.js";
 import { fromByteArray } from "../../values/base64.js";
-import { performAsyncSyscall, performJsSyscall } from "./syscall.js";
+import {
+  ValueSyscall,
+  performAsyncSyscall,
+  performAsyncValueSyscall,
+  performJsSyscall,
+} from "./syscall.js";
 import { validateArg } from "./validate.js";
 
 export function setupStorageReader(requestId: string): StorageReader {
   return {
     getUrl: async (storageId: FileStorageId) => {
       validateArg(storageId, 1, "getUrl", "storageId");
-      return await performAsyncSyscall("1.0/storageGetUrl", {
-        requestId,
-        version,
-        storageId,
-      });
+      return await performAsyncValueSyscall(
+        ValueSyscall.StorageUrl,
+        [storageId, requestId, version],
+        () => ({ requestId, version, storageId }),
+        (result) => result,
+      );
     },
     getMetadata: async (storageId: FileStorageId): Promise<FileMetadata> => {
-      return await performAsyncSyscall("1.0/storageGetMetadata", {
-        requestId,
-        version,
-        storageId,
-      });
+      return await performAsyncValueSyscall<FileMetadata>(
+        ValueSyscall.StorageMetadata,
+        [storageId, requestId, version],
+        () => ({ requestId, version, storageId }),
+        (result) => result,
+      );
     },
   };
 }
@@ -34,17 +41,20 @@ export function setupStorageWriter(requestId: string): StorageWriter {
   const reader = setupStorageReader(requestId);
   return {
     generateUploadUrl: async () => {
-      return await performAsyncSyscall("1.0/storageGenerateUploadUrl", {
-        requestId,
-        version,
-      });
+      return await performAsyncValueSyscall(
+        ValueSyscall.StorageUploadUrl,
+        [requestId, version],
+        () => ({ requestId, version }),
+        (result) => result,
+      );
     },
     delete: async (storageId: FileStorageId) => {
-      await performAsyncSyscall("1.0/storageDelete", {
-        requestId,
-        version,
-        storageId,
-      });
+      await performAsyncValueSyscall(
+        ValueSyscall.StorageDelete,
+        [storageId, requestId, version],
+        () => ({ requestId, version, storageId }),
+        () => undefined,
+      );
     },
     store: async (blob: Blob, options?: { sha256?: string }) => {
       if (!(blob instanceof Blob)) {

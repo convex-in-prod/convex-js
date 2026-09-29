@@ -1,5 +1,10 @@
-import { JSONValue, Value } from "../../values/index.js";
-import { convexOrUndefinedToJson } from "../../values/value.js";
+import { Value } from "../../values/index.js";
+import {
+  QueryValue,
+  queryValueArg,
+  QueryRecord,
+  queryRecordBuilder,
+} from "./query_value.js";
 import { GenericDocument, GenericIndexFields } from "../data_model.js";
 import {
   IndexRange,
@@ -8,11 +13,14 @@ import {
   UpperBoundIndexRangeBuilder,
 } from "../index_range_builder.js";
 
-export type SerializedRangeExpression = {
-  type: "Eq" | "Gt" | "Gte" | "Lt" | "Lte";
-  fieldPath: string;
-  value: JSONValue;
-};
+type RangeComparison = "Eq" | "Gt" | "Gte" | "Lt" | "Lte";
+export type SerializedRangeExpression =
+  | QueryRecord
+  | {
+      type: RangeComparison;
+      fieldPath: string;
+      value: QueryValue;
+    };
 
 export class IndexRangeBuilderImpl
   extends IndexRange
@@ -21,11 +29,9 @@ export class IndexRangeBuilderImpl
     LowerBoundIndexRangeBuilder<GenericDocument, string>,
     UpperBoundIndexRangeBuilder<GenericDocument, string>
 {
-  private rangeExpressions: ReadonlyArray<SerializedRangeExpression>;
+  private rangeExpressions: SerializedRangeExpression[];
   private isConsumed: boolean;
-  private constructor(
-    rangeExpressions: ReadonlyArray<SerializedRangeExpression>,
-  ) {
+  private constructor(rangeExpressions: SerializedRangeExpression[]) {
     super();
     this.rangeExpressions = rangeExpressions;
     this.isConsumed = false;
@@ -44,59 +50,50 @@ export class IndexRangeBuilderImpl
     this.isConsumed = true;
   }
 
-  eq(fieldName: string, value: Value) {
+  private append(type: RangeComparison, fieldName: string, value: Value) {
     this.consume();
-    return new IndexRangeBuilderImpl(
-      this.rangeExpressions.concat({
-        type: "Eq",
-        fieldPath: fieldName,
-        value: convexOrUndefinedToJson(value),
-      }),
+    // Only the successor may use this storage. Capture the value after consuming
+    // this wrapper so a reentrant getter cannot branch from the same builder.
+    const captured = queryValueArg(value);
+    const record = queryRecordBuilder();
+    this.rangeExpressions.push(
+      record === undefined
+        ? { type, fieldPath: fieldName, value: captured }
+        : record(
+            type === "Eq"
+              ? 21
+              : type === "Gt"
+                ? 22
+                : type === "Gte"
+                  ? 23
+                  : type === "Lt"
+                    ? 24
+                    : 25,
+            fieldName,
+            captured,
+          ),
     );
+    return new IndexRangeBuilderImpl(this.rangeExpressions);
+  }
+
+  eq(fieldName: string, value: Value) {
+    return this.append("Eq", fieldName, value);
   }
 
   gt(fieldName: string, value: Value) {
-    this.consume();
-    return new IndexRangeBuilderImpl(
-      this.rangeExpressions.concat({
-        type: "Gt",
-        fieldPath: fieldName,
-        value: convexOrUndefinedToJson(value),
-      }),
-    );
+    return this.append("Gt", fieldName, value);
   }
   gte(fieldName: string, value: Value) {
-    this.consume();
-    return new IndexRangeBuilderImpl(
-      this.rangeExpressions.concat({
-        type: "Gte",
-        fieldPath: fieldName,
-        value: convexOrUndefinedToJson(value),
-      }),
-    );
+    return this.append("Gte", fieldName, value);
   }
   lt(fieldName: string, value: Value) {
-    this.consume();
-    return new IndexRangeBuilderImpl(
-      this.rangeExpressions.concat({
-        type: "Lt",
-        fieldPath: fieldName,
-        value: convexOrUndefinedToJson(value),
-      }),
-    );
+    return this.append("Lt", fieldName, value);
   }
   lte(fieldName: string, value: Value) {
-    this.consume();
-    return new IndexRangeBuilderImpl(
-      this.rangeExpressions.concat({
-        type: "Lte",
-        fieldPath: fieldName,
-        value: convexOrUndefinedToJson(value),
-      }),
-    );
+    return this.append("Lte", fieldName, value);
   }
 
-  export() {
+  export(): ReadonlyArray<SerializedRangeExpression> {
     this.consume();
     return this.rangeExpressions;
   }
