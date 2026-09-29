@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
-Date: Fri, 14 Aug 2026 11:52:23 +0800
-Subject: [PATCH 06/17] codegen: use non-committing deployment analysis
+Date: Wed, 30 Sep 2026 01:02:07 +0800
+Subject: [PATCH 06/11] codegen: use non-committing deployment analysis
 
 Route standalone codegen through evaluate_push with an explicit analysis request instead of beginning the start_push deployment lifecycle. Refuse older backend responses without analysis rather than falling back to a request that can publish pending schema and index metadata.
 
@@ -9,7 +9,6 @@ Keep dev and deploy on start_push, omit the analysis request from deployment pre
 
 Add response-decoder coverage, operator patch guidance, and an Unreleased changelog entry.
 ---
- CHANGELOG.md                               |   4 +
  src/cli/codegen.ts                         |   5 +-
  src/cli/codegen_templates/component_api.ts |  28 +++---
  src/cli/codegen_templates/dataModel.ts     |  16 ++--
@@ -18,24 +17,9 @@ Add response-decoder coverage, operator patch guidance, and an Unreleased change
  src/cli/lib/deploy2.ts                     |  10 +-
  src/cli/lib/deployApi/startPush.test.ts    |  22 +++++
  src/cli/lib/deployApi/startPush.ts         |  14 ++-
- 9 files changed, 162 insertions(+), 78 deletions(-)
+ 8 files changed, 158 insertions(+), 78 deletions(-)
  create mode 100644 src/cli/lib/deployApi/startPush.test.ts
 
-diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 7adb52117814c68541e8752cd122181bc6f49021..a0b423e43e21dc40c921d6f2b3a94dbe6acd1057 100644
---- a/CHANGELOG.md
-+++ b/CHANGELOG.md
-@@ -19,6 +19,10 @@
-   gateway.
- - Improved the error message when `npx convex export` fails because a snapshot
-   export is already in progress.
-+- `npx convex codegen` now obtains server analysis through deployment preflight
-+  without committing pending schemas or indexes or starting index backfills. It
-+  reports an explicit error when the target backend's preflight response does
-+  not include code generation analysis.
- 
- ## 1.44.0
- 
 diff --git a/src/cli/codegen.ts b/src/cli/codegen.ts
 index 4e60be6fd846f962f3e7800da0903c5c851cb605..339168300110522ae9d39677242166da4fec216c 100644
 --- a/src/cli/codegen.ts

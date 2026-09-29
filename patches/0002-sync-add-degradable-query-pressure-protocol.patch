@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
-Date: Wed, 15 Jul 2026 19:45:08 +0800
-Subject: [PATCH 02/17] sync: add degradable query pressure protocol
+Date: Wed, 30 Sep 2026 01:02:07 +0800
+Subject: [PATCH 02/11] sync: add degradable query pressure protocol
 
 Add an optional connection-level degradable root-query class and lifecycle-version capability. Preserve the legacy Connect and pressure shapes when omitted, validate all bounded lifecycle fields strictly, and serialize both declarations on reconnect.
 
@@ -22,7 +22,7 @@ Cover strict protocol parsing, transition and chunk ordering, reconnects, epoch 
  create mode 100644 src/browser/sync/protocol.test.ts
 
 diff --git a/src/browser/index.ts b/src/browser/index.ts
-index 4b9d7946d68a9fe1b5875ccd451f6997efaf023e..6d8046dd45117f540f77b42ba2d8b54a6eea8d46 100644
+index cbbc58cf52f48309a45dee41ce35d076104d2a84..2303c26ac97be46db259ab7b2712d3789f58d7a3 100644
 --- a/src/browser/index.ts
 +++ b/src/browser/index.ts
 @@ -23,6 +23,9 @@ export type {

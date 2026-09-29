@@ -1,0 +1,327 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Wed, 30 Sep 2026 01:02:07 +0800
+Subject: [PATCH 09/11] http-client: preserve per-call mutation priority
+ through retries
+
+Accept only normal or high priority for each mutation and carry the selected hint through queued execution and each definitive conflict retry. Independent skipQueue calls retain their own priority and progress while a queued mutation waits. Validate malformed priorities before any request and cover retry delay, queue order and physical request counts.
+---
+ src/browser/http_client.test.ts | 168 ++++++++++++++++++++++++++++++++
+ src/browser/http_client.ts      |  35 ++++++-
+ src/browser/index.ts            |   5 +-
+ 3 files changed, 204 insertions(+), 4 deletions(-)
+
+diff --git a/src/browser/http_client.test.ts b/src/browser/http_client.test.ts
+index 346674d29051423befddb10476eb16c682331ba5..4ed13e50f4fb88ed7c74428b2976278aa74a3ff1 100644
+--- a/src/browser/http_client.test.ts
++++ b/src/browser/http_client.test.ts
+@@ -303,4 +303,172 @@ describe("ConvexHttpClient mutation retry evidence", () => {
+     expect(localFetch).toHaveBeenCalledTimes(1);
+   });
+ 
++  test("retains the default OCC delay and queue order while an independent call completes", async () => {
++    vi.useFakeTimers();
++    try {
++      const requests: unknown[] = [];
++      const localFetch = vi
++        .fn<typeof fetch>()
++        .mockImplementation(async (_url, init) => {
++          requests.push(JSON.parse(String(init?.body)));
++          return new Response(
++            JSON.stringify(
++              requests.length === 1 ? occ : { status: "success", value: "ok" },
++            ),
++            {
++              status: requests.length === 1 ? 503 : 200,
++              headers: { "content-type": "application/json" },
++            },
++          );
++        });
++      const client = new ConvexHttpClient("https://occ-delay.convex.cloud", {
++        fetch: localFetch,
++      });
++      const high = client.mutation(
++        mutation,
++        { value: "high" },
++        { priority: "high" },
++      );
++      const queued = client.mutation(mutation, { value: "queued" });
++      await vi.advanceTimersByTimeAsync(0);
++      await expect(
++        client.mutation(
++          mutation,
++          { value: "independent" },
++          { skipQueue: true },
++        ),
++      ).resolves.toBe("ok");
++      await vi.advanceTimersByTimeAsync(1999);
++      expect(requests).toHaveLength(2);
++      await vi.advanceTimersByTimeAsync(1);
++      await expect(Promise.all([high, queued])).resolves.toEqual(["ok", "ok"]);
++      expect(requests).toMatchObject([
++        { args: [{ value: "high" }], priority: "high" },
++        { args: [{ value: "independent" }] },
++        { args: [{ value: "high" }], priority: "high" },
++        { args: [{ value: "queued" }] },
++      ]);
++    } finally {
++      vi.useRealTimers();
++    }
++  });
++});
++
++describe("ConvexHttpClient mutation priority", () => {
++  test("keeps each queued call's priority across write-conflict retries", async () => {
++    const requests: unknown[] = [];
++    const localFetch = vi
++      .fn<typeof fetch>()
++      .mockImplementation(async (_url, init) => {
++        requests.push(JSON.parse(String(init?.body)));
++        return new Response(
++          JSON.stringify(
++            requests.length === 1
++              ? {
++                  code: "OptimisticConcurrencyControlFailure",
++                  message:
++                    "Data read or written in this mutation changed while it was being run.",
++                }
++              : { status: "success", value: "ok" },
++          ),
++          {
++            status: requests.length === 1 ? 503 : 200,
++            headers: { "content-type": "application/json" },
++          },
++        );
++      });
++    const client = new ConvexHttpClient("https://priority.convex.cloud", {
++      fetch: localFetch,
++    });
++    const high = client.mutation(
++      mutation,
++      { value: "urgent" },
++      {
++        priority: "high",
++        writeConflictRetryDelayMs: 0,
++      },
++    );
++    const normal = client.mutation(mutation, { value: "ordinary" });
++    await expect(Promise.all([high, normal])).resolves.toEqual(["ok", "ok"]);
++    expect(requests).toEqual([
++      {
++        path: "test:mutation",
++        args: [{ value: "urgent" }],
++        format: "convex_encoded_json",
++        priority: "high",
++      },
++      {
++        path: "test:mutation",
++        args: [{ value: "urgent" }],
++        format: "convex_encoded_json",
++        priority: "high",
++      },
++      {
++        path: "test:mutation",
++        args: [{ value: "ordinary" }],
++        format: "convex_encoded_json",
++      },
++    ]);
++  });
++
++  test("skipQueue sends high priority without waiting for an ordinary mutation", async () => {
++    let resolveOrdinary!: (response: Response) => void;
++    const ordinaryResponse = new Promise<Response>((resolve) => {
++      resolveOrdinary = resolve;
++    });
++    const requests: unknown[] = [];
++    const localFetch = vi
++      .fn<typeof fetch>()
++      .mockImplementation(async (_url, init) => {
++        requests.push(JSON.parse(String(init?.body)));
++        return requests.length === 1
++          ? ordinaryResponse
++          : new Response(JSON.stringify({ status: "success", value: "high" }));
++      });
++    const client = new ConvexHttpClient("https://priority.convex.cloud", {
++      fetch: localFetch,
++    });
++    const ordinary = client.mutation(
++      mutation,
++      { value: "ordinary" },
++      { priority: "normal" },
++    );
++    await expect(
++      client.mutation(
++        mutation,
++        { value: "urgent" },
++        { priority: "high", skipQueue: true },
++      ),
++    ).resolves.toBe("high");
++    expect(requests).toMatchObject([
++      { args: [{ value: "ordinary" }] },
++      { args: [{ value: "urgent" }], priority: "high" },
++    ]);
++    expect(requests[0]).not.toHaveProperty("priority");
++    resolveOrdinary(
++      new Response(JSON.stringify({ status: "success", value: "ordinary" })),
++    );
++    await expect(ordinary).resolves.toBe("ordinary");
++  });
++
++  test.each(["administrator", null, true, 1])(
++    "rejects invalid priority %s before sending",
++    async (priority) => {
++      const localFetch = vi.fn<typeof fetch>();
++      const client = new ConvexHttpClient("https://priority.convex.cloud", {
++        fetch: localFetch,
++      });
++      await expect(
++        client.mutation(
++          mutation,
++          { value: "invalid" },
++          {
++            // @ts-expect-error Verify the runtime boundary for untyped callers.
++            priority,
++          },
++        ),
++      ).rejects.toThrow('Mutation priority must be "normal" or "high".');
++      expect(localFetch).not.toHaveBeenCalled();
++    },
++  );
+ });
+diff --git a/src/browser/http_client.ts b/src/browser/http_client.ts
+index d8156145ccbf250c44c80f51c5b7f5888e83932a..dc53d4c0c7ec8a61713e5c701263b90cf3492d3b 100644
+--- a/src/browser/http_client.ts
++++ b/src/browser/http_client.ts
+@@ -147,7 +147,16 @@ export function setFetch(f: typeof globalThis.fetch) {
+   specifiedFetch = f;
+ }
+ 
++export type HttpMutationPriority = "normal" | "high";
++
+ export type HttpMutationOptions = WriteConflictRetryOptions & {
++  /**
++   * Request bounded backend scheduling preference for this mutation. Defaults
++   * to normal. High priority does not bypass authorization or capacity limits,
++   * and does not reorder the client's queue; use skipQueue for independent calls.
++   * Requires a backend with mutation-priority support.
++   */
++  priority?: HttpMutationPriority | undefined;
+   /**
+    * Skip the default queue of mutations and run this immediately.
+    *
+@@ -181,6 +190,7 @@ export class ConvexHttpClient {
+     mutation: FunctionReference<"mutation">;
+     args: FunctionArgs<any>;
+     writeConflictRetryOptions: ValidatedWriteConflictRetryOptions;
++    priority: HttpMutationPriority;
+     resolve: (value: any) => void;
+     reject: (error: any) => void;
+   }> = [];
+@@ -454,9 +464,10 @@ export class ConvexHttpClient {
+     mutation: Mutation,
+     mutationArgs: FunctionArgs<Mutation>,
+     writeConflictRetryOptions: ValidatedWriteConflictRetryOptions,
++    priority: HttpMutationPriority,
+   ): Promise<FunctionReturnType<Mutation>> {
+     return await retryOnWriteConflict(
+-      () => this.mutationInnerOnce(mutation, mutationArgs),
++      () => this.mutationInnerOnce(mutation, mutationArgs, priority),
+       writeConflictRetryOptions,
+       isHttpWriteConflictRetryableError,
+     );
+@@ -467,12 +478,14 @@ export class ConvexHttpClient {
+   >(
+     mutation: Mutation,
+     mutationArgs: FunctionArgs<Mutation>,
++    priority: HttpMutationPriority,
+   ): Promise<FunctionReturnType<Mutation>> {
+     const name = getFunctionName(mutation);
+     const body = JSON.stringify({
+       path: name,
+       format: "convex_encoded_json",
+       args: [convexToJson(mutationArgs)],
++      ...(priority === "high" ? { priority } : {}),
+     });
+     const headers: Record<string, string> = {
+       "Content-Type": "application/json",
+@@ -522,13 +535,20 @@ export class ConvexHttpClient {
+ 
+     this.isProcessingQueue = true;
+     while (this.mutationQueue.length > 0) {
+-      const { mutation, args, writeConflictRetryOptions, resolve, reject } =
+-        this.mutationQueue.shift()!;
++      const {
++        mutation,
++        args,
++        writeConflictRetryOptions,
++        priority,
++        resolve,
++        reject,
++      } = this.mutationQueue.shift()!;
+       try {
+         const result = await this.mutationInner(
+           mutation,
+           args,
+           writeConflictRetryOptions,
++          priority,
+         );
+         resolve(result);
+       } catch (error) {
+@@ -542,12 +562,14 @@ export class ConvexHttpClient {
+     mutation: Mutation,
+     args: FunctionArgs<Mutation>,
+     writeConflictRetryOptions: ValidatedWriteConflictRetryOptions,
++    priority: HttpMutationPriority,
+   ): Promise<FunctionReturnType<Mutation>> {
+     return new Promise((resolve, reject) => {
+       this.mutationQueue.push({
+         mutation,
+         args,
+         writeConflictRetryOptions,
++        priority,
+         resolve,
+         reject,
+       });
+@@ -571,6 +593,11 @@ export class ConvexHttpClient {
+     const [fnArgs, options] = args;
+     const mutationArgs = parseArgs(fnArgs);
+     const queued = !options?.skipQueue;
++    const priority =
++      options?.priority === undefined ? "normal" : options.priority;
++    if (priority !== "normal" && priority !== "high") {
++      throw new Error('Mutation priority must be "normal" or "high".');
++    }
+     const writeConflictRetryOptions =
+       validateWriteConflictRetryOptions(options);
+ 
+@@ -579,12 +606,14 @@ export class ConvexHttpClient {
+         mutation,
+         mutationArgs,
+         writeConflictRetryOptions,
++        priority,
+       );
+     } else {
+       return await this.mutationInner(
+         mutation,
+         mutationArgs,
+         writeConflictRetryOptions,
++        priority,
+       );
+     }
+   }
+diff --git a/src/browser/index.ts b/src/browser/index.ts
+index 2303c26ac97be46db259ab7b2712d3789f58d7a3..b7995fb96736c5a6eef46a526967758c7212ced4 100644
+--- a/src/browser/index.ts
++++ b/src/browser/index.ts
+@@ -40,7 +40,10 @@ export type { QueryToken } from "./sync/udf_path_utils.js";
+ /** @internal */
+ export type { PaginatedQueryToken } from "./sync/udf_path_utils.js";
+ export { ConvexHttpClient, ConvexHttpError } from "./http_client.js";
+-export type { HttpMutationOptions } from "./http_client.js";
++export type {
++  HttpMutationOptions,
++  HttpMutationPriority,
++} from "./http_client.js";
+ export type { QueryJournal } from "./sync/protocol.js";
+ /** @internal */
+ export type { UserIdentityAttributes } from "./sync/protocol.js";

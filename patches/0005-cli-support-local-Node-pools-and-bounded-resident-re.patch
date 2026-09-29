@@ -1,11 +1,10 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
-Date: Wed, 12 Aug 2026 13:32:50 +0800
-Subject: [PATCH 05/17] cli: support module-scoped local Node pools
+Date: Wed, 30 Sep 2026 01:02:07 +0800
+Subject: [PATCH 05/11] cli: support local Node pools and bounded resident
+ retirement
 
-Parse and preserve required module-scoped Node pool declarations through bundling and deployment metadata. Keep the declaration attached to the entry module, reject invalid or ambiguous combinations, and include dedicated-pool modules in Node bundle telemetry.
-
-Add --force-node-cutover to deployment and preview flows, negotiate cutover protocol version 1 before sending it, and warn that interrupted actions may have completed external effects. Keep dry runs and internal development pushes non-forced, and report committed cutover failure explicitly.
+Validate module-scoped local executor pool declarations during bundling and carry them through deployment metadata. Expose the matching server retirement callback so residents can drain under the backend-owned deadline without weakening forced termination or memory-pressure authority.
 ---
  src/bundler/index.test.ts                   | 146 ++++++++++++++++++++
  src/bundler/index.ts                        | 113 ++++++++++++---
@@ -20,9 +19,12 @@ Add --force-node-cutover to deployment and preview flows, negotiate cutover prot
  src/cli/lib/deployApi/startPush.ts          |   1 +
  src/cli/lib/dev.ts                          |   1 +
  src/cli/lib/run.ts                          |   1 +
- 13 files changed, 356 insertions(+), 21 deletions(-)
+ src/server/index.ts                         |   6 +
+ src/server/node_pool_retirement.ts          |  51 +++++++
+ 15 files changed, 413 insertions(+), 21 deletions(-)
  create mode 100644 src/bundler/index.test.ts
  create mode 100644 src/cli/lib/deployApi/modules.test.ts
+ create mode 100644 src/server/node_pool_retirement.ts
 
 diff --git a/src/bundler/index.test.ts b/src/bundler/index.test.ts
 new file mode 100644
@@ -743,3 +745,77 @@ index b4e770c4131a561b53d8675b5ab57e1b1ec593cd..477bd93fa73f3c6962932d8df8ca6a18
        typecheck: args.typecheck,
        typecheckComponents: args.typecheckComponents,
        debug: false,
+diff --git a/src/server/index.ts b/src/server/index.ts
+index 04cb3c4bb9aaeace8921736f5e83c475dc74a5fa..4b76617d85f551875d0fb533815f5d056d8d76f5 100644
+--- a/src/server/index.ts
++++ b/src/server/index.ts
+@@ -104,6 +104,12 @@ export {
+   internalQueryGeneric,
+ } from "./impl/registration_impl.js";
+ export { getServiceToken } from "./impl/actions_impl.js";
++export {
++  onNodePoolRetirement,
++  type NodePoolRetirementDeadline,
++  type NodePoolRetirementHandler,
++  type NodePoolRetirementReason,
++} from "./node_pool_retirement.js";
+ export type {
+   TransactionMetric,
+   TransactionMetrics,
+diff --git a/src/server/node_pool_retirement.ts b/src/server/node_pool_retirement.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..36d59eac718c4ccb4cb00bdadd1d97607d87216d
+--- /dev/null
++++ b/src/server/node_pool_retirement.ts
+@@ -0,0 +1,51 @@
++/** Reasons for a healthy local Node process generation to stop resident work. */
++export type NodePoolRetirementReason =
++  | "generation_age"
++  | "rss_limit"
++  | "package_limit"
++  | "source_change"
++  | "topology_change";
++
++/**
++ * One fixed process-local monotonic deadline. The supervisor independently
++ * enforces its earlier deadline, including IPC delivery time. Neither repeated
++ * reads nor repeated retirement requests extend the allowed cleanup time.
++ */
++export type NodePoolRetirementDeadline = Readonly<{
++  remainingMs: () => number;
++  signal: AbortSignal;
++}>;
++
++/** Resolving declares that the resident has stopped and released its resources. */
++export type NodePoolRetirementHandler = (input: {
++  reason: NodePoolRetirementReason;
++  deadline: NodePoolRetirementDeadline;
++}) => Promise<void>;
++
++declare const Convex: {
++  onNodePoolRetirement?: (callback: NodePoolRetirementHandler) => void;
++};
++
++/**
++ * Register one resident cleanup callback before starting detached work in a
++ * local Node action. The callback belongs to the process, outlives the action,
++ * and uses independently owned clients, not the returned action context.
++ * A second registration or registration after retirement starts is rejected.
++ * Emergency termination can bypass cleanup; durable fencing remains required.
++ */
++export function onNodePoolRetirement(
++  callback: NodePoolRetirementHandler,
++): void {
++  if (typeof Convex === "undefined" || !Convex.onNodePoolRetirement) {
++    const processGlobal = (
++      globalThis as {
++        process?: { env?: Record<string, string | undefined> };
++      }
++    ).process;
++    // Unit tests load action modules outside the Node executor. Keep that one
++    // explicit test runtime injectable without silently weakening production.
++    if (processGlobal?.env?.VITEST === "true") return;
++    throw new Error("This runtime does not support Node pool retirement.");
++  }
++  Convex.onNodePoolRetirement(callback);
++}

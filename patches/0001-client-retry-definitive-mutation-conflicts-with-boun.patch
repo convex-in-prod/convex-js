@@ -1,27 +1,343 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
-Date: Tue, 23 Jun 2026 17:40:29 +0800
-Subject: [PATCH 01/17] client: retry write conflict mutations
+Date: Wed, 30 Sep 2026 01:02:07 +0800
+Subject: [PATCH 01/11] client: retry definitive mutation conflicts with
+ bounded policy
 
-Retry terminal optimistic-concurrency failures once across WebSocket mutations, HTTP mutations, and action-context mutation calls. Keep the existing configurable retry count and delay.
+Retain completed HTTP failures as typed evidence and classify explicit pre-execution rejections. Retry public HTTP mutations only after a complete structured HTTP 503 OptimisticConcurrencyControlFailure response with a string message. Transport loss, incomplete bodies and UDF or arbitrary error text do not prove a write failed to commit.
 
-Recognize the internal OCC name, the table-specific public message, and the generic system-table public message. Cover both public message forms through the thrown-error and failed-result classifiers.
+Keep the existing configurable retry budget and delay. Action callbacks explicitly retain their established terminal-conflict message classifier. Cover physical attempt counts and preserve original errors for ambiguous outcomes.
 ---
- src/browser/http_client.ts              |  56 +++++++++--
- src/browser/sync/client.ts              |  38 ++++++--
- src/common/write_conflict_retry.test.ts | 104 ++++++++++++++++++++
- src/common/write_conflict_retry.ts      | 120 ++++++++++++++++++++++++
- src/nextjs/index.ts                     |  13 ++-
- src/react/client.ts                     |  26 ++++-
- src/server/impl/actions_impl.ts         |  18 +++-
- src/server/impl/registration_impl.ts    |  19 +++-
+ src/browser/http_client.test.ts         | 306 ++++++++++++++++++++++++
+ src/browser/http_client.ts              | 171 ++++++++++++-
+ src/browser/index.ts                    |   2 +-
+ src/browser/sync/client.ts              |  38 ++-
+ src/common/write_conflict_retry.test.ts | 107 +++++++++
+ src/common/write_conflict_retry.ts      | 121 ++++++++++
+ src/nextjs/index.ts                     |  13 +-
+ src/react/client.ts                     |  26 +-
+ src/server/impl/actions_impl.ts         |  20 +-
+ src/server/impl/registration_impl.ts    |  19 +-
  src/server/registration.ts              |   6 +-
- 9 files changed, 376 insertions(+), 24 deletions(-)
+ 11 files changed, 799 insertions(+), 30 deletions(-)
+ create mode 100644 src/browser/http_client.test.ts
  create mode 100644 src/common/write_conflict_retry.test.ts
  create mode 100644 src/common/write_conflict_retry.ts
 
+diff --git a/src/browser/http_client.test.ts b/src/browser/http_client.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..346674d29051423befddb10476eb16c682331ba5
+--- /dev/null
++++ b/src/browser/http_client.test.ts
+@@ -0,0 +1,306 @@
++import { describe, expect, test, vi } from "vitest";
++import { makeFunctionReference } from "../server/api.js";
++import { ConvexHttpClient, ConvexHttpError } from "./index.js";
++
++const mutation = makeFunctionReference<"mutation", { value: string }, string>(
++  "test:mutation",
++);
++
++const rejectedBeforeExecutionCodes = [
++  "ExpiredInQueue",
++  "WorkerOverloaded",
++  "IsolateNotClean",
++  "InitialPermitTimeoutError",
++  "ExecuteFullError",
++] as const;
++
++describe("ConvexHttpClient HTTP errors", () => {
++  test("preserves a completed JSON failure as a typed HTTP error", async () => {
++    const responseBody = {
++      code: "ExpiredInQueue",
++      message: "Request expired while waiting for execution admission",
++    };
++    const localFetch = vi.fn<typeof fetch>().mockResolvedValue(
++      new Response(JSON.stringify(responseBody), {
++        status: 503,
++        headers: { "content-type": "application/json; charset=utf-8" },
++      }),
++    );
++    const client = new ConvexHttpClient("https://http-error.convex.cloud", {
++      fetch: localFetch,
++    });
++
++    const failure = await client
++      .mutation(mutation, { value: "test" })
++      .catch((error: unknown) => error);
++
++    expect(failure).toBeInstanceOf(ConvexHttpError);
++    expect(failure).toMatchObject({
++      name: "ConvexHttpError",
++      status: 503,
++      responseText: JSON.stringify(responseBody),
++      responseJson: responseBody,
++      executionStatus: "rejected_before_execution",
++    });
++  });
++
++  test.each(rejectedBeforeExecutionCodes)(
++    "classifies completed %s as rejected before execution",
++    async (code) => {
++      const localFetch = vi.fn<typeof fetch>().mockResolvedValue(
++        new Response(JSON.stringify({ code, message: "Admission rejected" }), {
++          status: 503,
++          headers: { "content-type": "application/json" },
++        }),
++      );
++      const client = new ConvexHttpClient(
++        "https://execution-rejection.convex.cloud",
++        { fetch: localFetch },
++      );
++
++      const failure = await client
++        .mutation(mutation, { value: "test" })
++        .catch((error: unknown) => error);
++
++      expect(failure).toMatchObject({
++        executionStatus: "rejected_before_execution",
++      });
++    },
++  );
++
++  test("does not classify an unknown completed 503 code", async () => {
++    const localFetch = vi.fn<typeof fetch>().mockResolvedValue(
++      new Response(JSON.stringify({ code: "FutureAdmissionFailure" }), {
++        status: 503,
++        headers: { "content-type": "application/json" },
++      }),
++    );
++    const client = new ConvexHttpClient(
++      "https://unknown-http-error.convex.cloud",
++      { fetch: localFetch },
++    );
++
++    const failure = await client
++      .mutation(mutation, { value: "test" })
++      .catch((error: unknown) => error);
++
++    expect(failure).toMatchObject({ executionStatus: undefined });
++  });
++
++  test("does not classify a known code with a different status", async () => {
++    const localFetch = vi.fn<typeof fetch>().mockResolvedValue(
++      new Response(JSON.stringify({ code: "ExpiredInQueue" }), {
++        status: 500,
++        headers: { "content-type": "application/json" },
++      }),
++    );
++    const client = new ConvexHttpClient(
++      "https://wrong-status-http-error.convex.cloud",
++      { fetch: localFetch },
++    );
++
++    const failure = await client
++      .mutation(mutation, { value: "test" })
++      .catch((error: unknown) => error);
++
++    expect(failure).toMatchObject({ executionStatus: undefined });
++  });
++
++  test("does not invent structured data for a malformed JSON failure", async () => {
++    const localFetch = vi.fn<typeof fetch>().mockResolvedValue(
++      new Response("{not-json", {
++        status: 503,
++        headers: { "content-type": "application/json" },
++      }),
++    );
++    const client = new ConvexHttpClient(
++      "https://malformed-error.convex.cloud",
++      {
++        fetch: localFetch,
++      },
++    );
++
++    const failure = await client
++      .mutation(mutation, { value: "test" })
++      .catch((error: unknown) => error);
++
++    expect(failure).toBeInstanceOf(ConvexHttpError);
++    expect(failure).toMatchObject({
++      status: 503,
++      responseText: "{not-json",
++      responseJson: undefined,
++      executionStatus: undefined,
++    });
++  });
++});
++
++describe("ConvexHttpClient mutation retry evidence", () => {
++  const occ = {
++    code: "OptimisticConcurrencyControlFailure",
++    message:
++      "Data read or written in this mutation changed while it was being run.",
++  };
++
++  test.each([0, 2])(
++    "bounds definitive OCC retries to %s",
++    async (maxWriteConflictRetries) => {
++      const localFetch = vi.fn<typeof fetch>().mockImplementation(
++        async () =>
++          new Response(JSON.stringify(occ), {
++            status: 503,
++            headers: { "content-type": "application/json; charset=utf-8" },
++          }),
++      );
++      const client = new ConvexHttpClient("https://occ.convex.cloud", {
++        fetch: localFetch,
++      });
++
++      const failure = await client
++        .mutation(
++          mutation,
++          { value: "test" },
++          {
++            maxWriteConflictRetries,
++            writeConflictRetryDelayMs: 0,
++          },
++        )
++        .catch((error: unknown) => error);
++
++      expect(failure).toBeInstanceOf(ConvexHttpError);
++      expect(failure).toMatchObject({ status: 503, responseJson: occ });
++      expect(localFetch).toHaveBeenCalledTimes(1 + maxWriteConflictRetries);
++    },
++  );
++
++  test.each([
++    ["wrong status", 500, JSON.stringify(occ), "application/json"],
++    [
++      "UDF error",
++      200,
++      JSON.stringify({ status: "error", errorMessage: occ.code }),
++      "application/json",
++    ],
++    [
++      "legacy UDF error",
++      560,
++      JSON.stringify({ status: "error", errorMessage: occ.code }),
++      "application/json",
++    ],
++    [
++      "unrelated code",
++      503,
++      JSON.stringify({ code: "OtherError", message: occ.code }),
++      "application/json",
++    ],
++    [
++      "missing message",
++      503,
++      JSON.stringify({ code: occ.code }),
++      "application/json",
++    ],
++    [
++      "non-string message",
++      503,
++      JSON.stringify({ code: occ.code, message: null }),
++      "application/json",
++    ],
++    [
++      "truncated JSON",
++      503,
++      JSON.stringify(occ).slice(0, -1),
++      "application/json",
++    ],
++    ["absent body", 503, "", "application/json"],
++    ["non-JSON content type", 503, JSON.stringify(occ), "text/plain"],
++  ] as const)(
++    "does not replay %s",
++    async (_name, status, body, contentType) => {
++      const localFetch = vi
++        .fn<typeof fetch>()
++        .mockImplementation(
++          async () =>
++            new Response(body, {
++              status,
++              headers: { "content-type": contentType },
++            }),
++        );
++      const client = new ConvexHttpClient("https://non-occ.convex.cloud", {
++        fetch: localFetch,
++      });
++
++      const failure = await client
++        .mutation(
++          mutation,
++          { value: "test" },
++          {
++            writeConflictRetryDelayMs: 0,
++          },
++        )
++        .catch((error: unknown) => error);
++
++      expect(failure).toBeInstanceOf(Error);
++      expect(failure).toMatchObject({
++        message: status === 200 || status === 560 ? occ.code : body,
++      });
++      expect(localFetch).toHaveBeenCalledTimes(1);
++    },
++  );
++
++  test.each([
++    new TypeError(`Response lost after submission: ${occ.code}`),
++    new DOMException(occ.code, "TimeoutError"),
++    new Error("Unrelated transport failure"),
++  ])("preserves transport failure without replay: %s", async (failure) => {
++    const localFetch = vi.fn<typeof fetch>().mockRejectedValue(failure);
++    const client = new ConvexHttpClient("https://transport.convex.cloud", {
++      fetch: localFetch,
++    });
++
++    await expect(
++      client.mutation(
++        mutation,
++        { value: "test" },
++        {
++          writeConflictRetryDelayMs: 0,
++        },
++      ),
++    ).rejects.toBe(failure);
++    expect(localFetch).toHaveBeenCalledTimes(1);
++  });
++
++  test("requires the response stream to complete even after valid OCC JSON arrives", async () => {
++    const failure = new TypeError(`Response stream interrupted: ${occ.code}`);
++    const localFetch = vi.fn<typeof fetch>().mockImplementation(
++      async () =>
++        new Response(
++          new ReadableStream<Uint8Array>({
++            start(controller) {
++              controller.enqueue(new TextEncoder().encode(JSON.stringify(occ)));
++            },
++            pull(controller) {
++              controller.error(failure);
++            },
++          }),
++          {
++            status: 503,
++            headers: { "content-type": "application/json" },
++          },
++        ),
++    );
++    const client = new ConvexHttpClient("https://incomplete.convex.cloud", {
++      fetch: localFetch,
++    });
++
++    await expect(
++      client.mutation(
++        mutation,
++        { value: "test" },
++        {
++          writeConflictRetryDelayMs: 0,
++        },
++      ),
++    ).rejects.toBe(failure);
++    expect(localFetch).toHaveBeenCalledTimes(1);
++  });
++
++});
 diff --git a/src/browser/http_client.ts b/src/browser/http_client.ts
-index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..90e0f156dc70c880642ad549af215b00d7b0d14d 100644
+index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..d8156145ccbf250c44c80f51c5b7f5888e83932a 100644
 --- a/src/browser/http_client.ts
 +++ b/src/browser/http_client.ts
 @@ -23,6 +23,12 @@ import {
@@ -37,7 +353,117 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..90e0f156dc70c880642ad549af215b00
  
  export const STATUS_CODE_OK = 200;
  export const STATUS_CODE_BAD_REQUEST = 400;
-@@ -37,14 +43,14 @@ export function setFetch(f: typeof globalThis.fetch) {
+@@ -31,20 +37,124 @@ export const STATUS_CODE_BAD_REQUEST = 400;
+ // Must match the constant of the same name in the backend.
+ export const STATUS_CODE_UDF_FAILED = 560;
+ 
++const STATUS_CODE_SERVICE_UNAVAILABLE = 503;
++
++// The HTTP protocol exposes ErrorMetadata.short_msg as `code`, but not the backend's
++// ErrorCode::RejectedBeforeExecution category. Keep this compatibility set aligned with
++// RejectedBeforeExecutionReason::error_metadata in crates/isolate/src/metrics.rs. Missing a new
++// code fails closed as an unclassified HTTP error; never infer this guarantee from status or text.
++const REJECTED_BEFORE_EXECUTION_CODES: ReadonlySet<string> = new Set([
++  "ExpiredInQueue",
++  "WorkerOverloaded",
++  "IsolateNotClean",
++  "InitialPermitTimeoutError",
++  "ExecuteFullError",
++]);
++
++function executionStatus(
++  status: number,
++  responseJson: unknown | undefined,
++): "rejected_before_execution" | undefined {
++  if (
++    status !== STATUS_CODE_SERVICE_UNAVAILABLE ||
++    typeof responseJson !== "object" ||
++    responseJson === null ||
++    !("code" in responseJson) ||
++    typeof responseJson.code !== "string" ||
++    !REJECTED_BEFORE_EXECUTION_CODES.has(responseJson.code)
++  ) {
++    return undefined;
++  }
++  return "rejected_before_execution";
++}
++
++/**
++ * A completed non-UDF HTTP error response from a Convex deployment.
++ *
++ * Transport failures can reject before a response is available and therefore do not use this
++ * class. `responseJson` is present only when the completed response declares JSON content and the
++ * body parses successfully. `executionStatus` is present only for an exact completed backend
++ * rejection that guarantees function execution did not start.
++ *
++ * @public
++ */
++export class ConvexHttpError extends Error {
++  readonly name = "ConvexHttpError";
++  readonly status: number;
++  readonly responseText: string;
++  readonly responseJson: unknown | undefined;
++  readonly executionStatus: "rejected_before_execution" | undefined;
++
++  constructor(
++    status: number,
++    responseText: string,
++    responseJson: unknown | undefined,
++  ) {
++    super(responseText);
++    this.status = status;
++    this.responseText = responseText;
++    this.responseJson = responseJson;
++    this.executionStatus = executionStatus(status, responseJson);
++  }
++}
++
++function isHttpWriteConflictRetryableError(error: unknown): boolean {
++  if (
++    !(error instanceof ConvexHttpError) ||
++    error.status !== STATUS_CODE_SERVICE_UNAVAILABLE
++  ) {
++    return false;
++  }
++  // Public HTTP mutations have no deduplication. Only a completed structured OCC
++  // response proves this attempt did not commit; matching error text does not.
++  const body = error.responseJson;
++  return (
++    typeof body === "object" &&
++    body !== null &&
++    "code" in body &&
++    body.code === "OptimisticConcurrencyControlFailure" &&
++    "message" in body &&
++    typeof body.message === "string"
++  );
++}
++
++async function completedHttpError(
++  response: Response,
++): Promise<ConvexHttpError> {
++  // Reading the complete body is what distinguishes a typed server response from an ambiguous
++  // transport failure. Keep malformed or non-JSON bodies as text without inventing structured
++  // fields that callers could mistake for protocol evidence.
++  const responseText = await response.text();
++  const contentType = response.headers
++    .get("content-type")
++    ?.split(";", 1)[0]
++    ?.trim()
++    .toLowerCase();
++  let responseJson: unknown | undefined;
++  if (contentType === "application/json") {
++    try {
++      responseJson = JSON.parse(responseText) as unknown;
++    } catch {
++      responseJson = undefined;
++    }
++  }
++  return new ConvexHttpError(response.status, responseText, responseJson);
++}
++
+ // Allow fetch to be shimmed in for Node.js < 18
+ let specifiedFetch: typeof globalThis.fetch | undefined = undefined;
+ export function setFetch(f: typeof globalThis.fetch) {
    specifiedFetch = f;
  }
  
@@ -54,7 +480,7 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..90e0f156dc70c880642ad549af215b00
  };
  
  /**
-@@ -70,6 +76,7 @@ export class ConvexHttpClient {
+@@ -70,6 +180,7 @@ export class ConvexHttpClient {
    private mutationQueue: Array<{
      mutation: FunctionReference<"mutation">;
      args: FunctionArgs<any>;
@@ -62,7 +488,25 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..90e0f156dc70c880642ad549af215b00
      resolve: (value: any) => void;
      reject: (error: any) => void;
    }> = [];
-@@ -342,6 +349,19 @@ export class ConvexHttpClient {
+@@ -253,7 +364,7 @@ export class ConvexHttpClient {
+       headers: headers,
+     });
+     if (!response.ok) {
+-      throw new Error(await response.text());
++      throw await completedHttpError(response);
+     }
+     const { ts } = (await response.json()) as { ts: string };
+     return ts;
+@@ -314,7 +425,7 @@ export class ConvexHttpClient {
+       headers: headers,
+     });
+     if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+-      throw new Error(await response.text());
++      throw await completedHttpError(response);
+     }
+     const respJSON = await response.json();
+ 
+@@ -342,6 +453,20 @@ export class ConvexHttpClient {
    private async mutationInner<Mutation extends FunctionReference<"mutation">>(
      mutation: Mutation,
      mutationArgs: FunctionArgs<Mutation>,
@@ -71,6 +515,7 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..90e0f156dc70c880642ad549af215b00
 +    return await retryOnWriteConflict(
 +      () => this.mutationInnerOnce(mutation, mutationArgs),
 +      writeConflictRetryOptions,
++      isHttpWriteConflictRetryableError,
 +    );
 +  }
 +
@@ -82,7 +527,16 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..90e0f156dc70c880642ad549af215b00
    ): Promise<FunctionReturnType<Mutation>> {
      const name = getFunctionName(mutation);
      const body = JSON.stringify({
-@@ -397,9 +417,14 @@ export class ConvexHttpClient {
+@@ -366,7 +491,7 @@ export class ConvexHttpClient {
+       headers: headers,
+     });
+     if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+-      throw new Error(await response.text());
++      throw await completedHttpError(response);
+     }
+     const respJSON = await response.json();
+     if (this.debug) {
+@@ -397,9 +522,14 @@ export class ConvexHttpClient {
  
      this.isProcessingQueue = true;
      while (this.mutationQueue.length > 0) {
@@ -99,7 +553,7 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..90e0f156dc70c880642ad549af215b00
          resolve(result);
        } catch (error) {
          reject(error);
-@@ -411,9 +436,16 @@ export class ConvexHttpClient {
+@@ -411,9 +541,16 @@ export class ConvexHttpClient {
    private enqueueMutation<Mutation extends FunctionReference<"mutation">>(
      mutation: Mutation,
      args: FunctionArgs<Mutation>,
@@ -117,7 +571,7 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..90e0f156dc70c880642ad549af215b00
        void this.processMutationQueue();
      });
    }
-@@ -434,11 +466,21 @@ export class ConvexHttpClient {
+@@ -434,11 +571,21 @@ export class ConvexHttpClient {
      const [fnArgs, options] = args;
      const mutationArgs = parseArgs(fnArgs);
      const queued = !options?.skipQueue;
@@ -141,6 +595,37 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..90e0f156dc70c880642ad549af215b00
      }
    }
  
+@@ -478,7 +625,7 @@ export class ConvexHttpClient {
+       headers: headers,
+     });
+     if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+-      throw new Error(await response.text());
++      throw await completedHttpError(response);
+     }
+     const respJSON = await response.json();
+     if (this.debug) {
+@@ -547,7 +694,7 @@ export class ConvexHttpClient {
+       headers: headers,
+     });
+     if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
+-      throw new Error(await response.text());
++      throw await completedHttpError(response);
+     }
+     const respJSON = await response.json();
+     if (this.debug) {
+diff --git a/src/browser/index.ts b/src/browser/index.ts
+index 4b9d7946d68a9fe1b5875ccd451f6997efaf023e..cbbc58cf52f48309a45dee41ce35d076104d2a84 100644
+--- a/src/browser/index.ts
++++ b/src/browser/index.ts
+@@ -36,7 +36,7 @@ export type {
+ export type { QueryToken } from "./sync/udf_path_utils.js";
+ /** @internal */
+ export type { PaginatedQueryToken } from "./sync/udf_path_utils.js";
+-export { ConvexHttpClient } from "./http_client.js";
++export { ConvexHttpClient, ConvexHttpError } from "./http_client.js";
+ export type { HttpMutationOptions } from "./http_client.js";
+ export type { QueryJournal } from "./sync/protocol.js";
+ /** @internal */
 diff --git a/src/browser/sync/client.ts b/src/browser/sync/client.ts
 index 64d19dc759f32e3727ad8964aade81ee065490ac..218864d4e5d629d8a6437f775730deb9d897dbeb 100644
 --- a/src/browser/sync/client.ts
@@ -206,13 +691,14 @@ index 64d19dc759f32e3727ad8964aade81ee065490ac..218864d4e5d629d8a6437f775730deb9
    /**
 diff --git a/src/common/write_conflict_retry.test.ts b/src/common/write_conflict_retry.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..69f81e28165edbdb47399ce03a8ea9a1c7cb5023
+index 0000000000000000000000000000000000000000..3f5db555eb4a85ba48827fbd271855913060e65f
 --- /dev/null
 +++ b/src/common/write_conflict_retry.test.ts
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,107 @@
 +import { describe, expect, test, vi } from "vitest";
 +
 +import {
++  isWriteConflictRetryableError,
 +  isWriteConflictRetryableMessage,
 +  isWriteConflictRetryableResult,
 +  retryOnWriteConflict,
@@ -288,6 +774,7 @@ index 0000000000000000000000000000000000000000..69f81e28165edbdb47399ce03a8ea9a1
 +          maxWriteConflictRetries: 1,
 +          writeConflictRetryDelayMs: 2000,
 +        },
++        isWriteConflictRetryableError,
 +      );
 +
 +      await vi.advanceTimersByTimeAsync(2000);
@@ -309,6 +796,7 @@ index 0000000000000000000000000000000000000000..69f81e28165edbdb47399ce03a8ea9a1
 +          maxWriteConflictRetries: 1,
 +          writeConflictRetryDelayMs: 2000,
 +        },
++        isWriteConflictRetryableError,
 +      ),
 +    ).rejects.toThrow("Validation failed");
 +    expect(calls).toBe(1);
@@ -316,10 +804,10 @@ index 0000000000000000000000000000000000000000..69f81e28165edbdb47399ce03a8ea9a1
 +});
 diff --git a/src/common/write_conflict_retry.ts b/src/common/write_conflict_retry.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7a86ca4b4e102ba6fb31d6232de6aae0ad8eb2f4
+index 0000000000000000000000000000000000000000..9e27cce713de86ca8b74206081e3b3236aa868b0
 --- /dev/null
 +++ b/src/common/write_conflict_retry.ts
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,121 @@
 +const WRITE_CONFLICT_ERROR_TEXT = "OptimisticConcurrencyControlFailure";
 +const WRITE_CONFLICT_PUBLIC_ERROR_TEXT = "Documents read from or written to";
 +const WRITE_CONFLICT_PUBLIC_RETRY_TEXT =
@@ -426,13 +914,14 @@ index 0000000000000000000000000000000000000000..7a86ca4b4e102ba6fb31d6232de6aae0
 +export async function retryOnWriteConflict<T>(
 +  operation: () => Promise<T>,
 +  options: ValidatedWriteConflictRetryOptions,
++  isRetryable: (error: unknown) => boolean,
 +): Promise<T> {
 +  let attemptsRemaining = options.maxWriteConflictRetries;
 +  while (true) {
 +    try {
 +      return await operation();
 +    } catch (error: unknown) {
-+      if (attemptsRemaining <= 0 || !isWriteConflictRetryableError(error)) {
++      if (attemptsRemaining <= 0 || !isRetryable(error)) {
 +        throw error;
 +      }
 +      attemptsRemaining -= 1;
@@ -546,14 +1035,15 @@ index b71e6044d1b8037c8215f5067c13b09063bb4787..37ccee6f182ea9c4c5a616d6a99b19ba
  
  /**
 diff --git a/src/server/impl/actions_impl.ts b/src/server/impl/actions_impl.ts
-index 0b32321a4b27af74708cb59ec6c33784e1c93185..30aec48556b3d4237bdd6651f596ad8b97194c3a 100644
+index 0b32321a4b27af74708cb59ec6c33784e1c93185..344cc3de88c5ef7eae54464f6f475eda06284537 100644
 --- a/src/server/impl/actions_impl.ts
 +++ b/src/server/impl/actions_impl.ts
-@@ -5,6 +5,11 @@ import { parseArgs } from "../../common/index.js";
+@@ -5,6 +5,12 @@ import { parseArgs } from "../../common/index.js";
  import { FunctionReference } from "../../server/api.js";
  import { getFunctionAddress } from "../components/paths.js";
  import { validateArg } from "./validate.js";
 +import {
++  isWriteConflictRetryableError,
 +  retryOnWriteConflict,
 +  validateWriteConflictRetryOptions,
 +  WriteConflictRetryOptions,
@@ -561,7 +1051,7 @@ index 0b32321a4b27af74708cb59ec6c33784e1c93185..30aec48556b3d4237bdd6651f596ad8b
  
  function syscallArgs(
    requestId: string,
-@@ -35,10 +40,17 @@ export function setupActionCalls(requestId: string) {
+@@ -35,10 +41,18 @@ export function setupActionCalls(requestId: string) {
      runMutation: async (
        mutation: FunctionReference<"mutation", "public" | "internal">,
        args?: Record<string, Value>,
@@ -579,6 +1069,7 @@ index 0b32321a4b27af74708cb59ec6c33784e1c93185..30aec48556b3d4237bdd6651f596ad8b
 +            syscallArgs(requestId, mutation, args),
 +          ),
 +        writeConflictRetryOptions,
++        isWriteConflictRetryableError,
        );
        return jsonToConvex(result);
      },

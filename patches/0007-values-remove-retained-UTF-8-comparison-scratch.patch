@@ -1,50 +1,15 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
-Date: Sat, 12 Sep 2026 15:04:41 +0800
-Subject: [PATCH 12/17] values: remove retained UTF-8 comparison scratch
+Date: Wed, 30 Sep 2026 01:02:07 +0800
+Subject: [PATCH 07/11] values: remove retained UTF-8 comparison scratch
 
 Keep UTF-8 value ordering request-local so reusable function contexts do not retain bytes derived from an earlier invocation. Preserve lone-surrogate ordering and document the downstream context-reuse compatibility change.
 ---
- CHANGELOG.md                    |   3 +
- patches/README.md               |   8 +++
  src/values/compare_utf8.test.ts |  69 ++++++++++++++++++
  src/values/compare_utf8.ts      | 124 ++------------------------------
- 4 files changed, 84 insertions(+), 120 deletions(-)
+ 2 files changed, 73 insertions(+), 120 deletions(-)
  create mode 100644 src/values/compare_utf8.test.ts
 
-diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 6baca5491838185d00d054914b4a858bf08832ac..f132cf74e4f3fd325320fc4196b44c0bb89b2a6b 100644
---- a/CHANGELOG.md
-+++ b/CHANGELOG.md
-@@ -27,6 +27,9 @@
-   failures. The error retains the HTTP status, response text, and parsed JSON
-   body when available, and identifies completed backend responses that prove
-   function execution was rejected before it started.
-+- UTF-8 value comparison no longer retains request-derived scratch bytes in
-+  module state. String ordering, including the established handling of lone
-+  UTF-16 surrogates, is unchanged.
- 
- ## 1.44.0
- 
-diff --git a/patches/README.md b/patches/README.md
-index bdab0933e3964a2fad2ab8a87f64b57682c57cc8..20ae75374561e27144ee04fedf90fa3cacf120d3 100644
---- a/patches/README.md
-+++ b/patches/README.md
-@@ -85,6 +85,14 @@ ordinary actions remain fresh. Both settings are disabled by default and do not
- place application module names in backend logic. See
- [`default_database_context_reuse/README.md`](default_database_context_reuse/README.md).
- 
-+### Stateless UTF-8 value comparison
-+
-+UTF-8 value comparison keeps all request-derived comparison state local to the
-+invocation. It preserves the established ordering for well-formed strings and
-+lone UTF-16 surrogates without module-scoped scratch arrays. This allows a
-+reviewed reusable database-function module context to retain the comparator code
-+without retaining bytes derived from an earlier request.
-+
- ### Module-scoped Node pools
- 
- Applications may annotate Node modules with a bounded local-pool declaration.
 diff --git a/src/values/compare_utf8.test.ts b/src/values/compare_utf8.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..d65b870bb6edf27867f44e97d06521103e6ee79c

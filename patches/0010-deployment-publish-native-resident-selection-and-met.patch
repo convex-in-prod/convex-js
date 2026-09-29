@@ -1,0 +1,447 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Wed, 30 Sep 2026 01:02:07 +0800
+Subject: [PATCH 10/11] deployment: publish native resident selection and
+ metadata
+
+Validate and freeze an explicit nullable native-resident activation envelope before build commands, require protocol support, and transmit it through finish-push. Expose committed native selection through deployment metadata with null semantics for ordinary execution and older backends. Keep process lifecycle and transactional publication authority with the backend.
+---
+ src/cli/deploy.ts                            |  20 +++
+ src/cli/lib/components.ts                    |   2 +
+ src/cli/lib/deploy2.ts                       |   5 +
+ src/cli/lib/deployApi/nativeResident.test.ts | 145 +++++++++++++++++++
+ src/cli/lib/deployApi/nativeResident.ts      |  61 ++++++++
+ src/server/impl/meta_impl.test.ts            |  35 +++++
+ src/server/impl/meta_impl.ts                 |   3 +
+ src/server/meta.ts                           |  11 ++
+ 8 files changed, 282 insertions(+)
+ create mode 100644 src/cli/lib/deployApi/nativeResident.test.ts
+ create mode 100644 src/cli/lib/deployApi/nativeResident.ts
+ create mode 100644 src/server/impl/meta_impl.test.ts
+
+diff --git a/src/cli/deploy.ts b/src/cli/deploy.ts
+index 00d79dda73af68ffe32d610c113ecb5c4eb5f4d5..757c2cca5b7a74026b2f424e4f2115b6248fdf90 100644
+--- a/src/cli/deploy.ts
++++ b/src/cli/deploy.ts
+@@ -1,3 +1,7 @@
++import {
++  readNativeResidentActivation,
++  type NativeResidentActivation,
++} from "./lib/deployApi/nativeResident.js";
+ import { chalkStderr } from "chalk";
+ import { Command, Option } from "@commander-js/extra-typings";
+ import { Context, oneoffContext } from "../bundler/context.js";
+@@ -116,9 +120,20 @@ Same format as .env.local or .env files, and overrides them.`,
+       .conflicts("preview-create")
+       .conflicts("preview-name"),
+   )
++  .addOption(
++    new Option(
++      "--native-resident <file>",
++      "Read an explicit native resident selection envelope for this function deployment.",
++    ),
++  )
+   .showHelpAfterError()
+   .action(async (cmdOptions) => {
+     const ctx = await oneoffContext(cmdOptions);
++    // Read once before build commands or retries; they cannot replace publication intent.
++    const nativeResident =
++      cmdOptions.nativeResident === undefined
++        ? undefined
++        : await readNativeResidentActivation(ctx, cmdOptions.nativeResident);
+ 
+     const deploymentSelection = await getDeploymentSelection(ctx, {
+       ...cmdOptions,
+@@ -179,6 +194,7 @@ Same format as .env.local or .env files, and overrides them.`,
+         },
+         {
+           ...cmdOptions,
++          nativeResident,
+           previewName: previewName ?? undefined,
+           reuse,
+           message: cmdOptions.message ?? getDefaultDeployMessage(),
+@@ -203,6 +219,7 @@ Same format as .env.local or .env files, and overrides them.`,
+ 
+       await deployToExistingDeployment(ctx, deploymentSelection, {
+         ...cmdOptions,
++        nativeResident,
+         skipWorkosCheck: cmdOptions.skipWorkosCheck ?? false,
+         allowDeletingLargeIndexes:
+           cmdOptions.allowDeletingLargeIndexes ?? false,
+@@ -239,6 +256,7 @@ async function deployToNewPreviewDeployment(
+     skipWorkosCheck?: boolean | undefined;
+     message: string | null;
+     forceNodeCutover?: boolean | undefined;
++    nativeResident?: NativeResidentActivation | undefined;
+   },
+ ) {
+   const previewName = options.previewName ?? null;
+@@ -337,6 +355,7 @@ async function deployToNewPreviewDeployment(
+     warnOnSlowSchemaValidation: true,
+     message: options.message,
+     forceNodeCutover: !!options.forceNodeCutover,
++    nativeResident: options.nativeResident,
+   };
+   showSpinner(`Deploying to ${previewUrl}...`);
+   await runPush(ctx, pushOptions);
+@@ -383,6 +402,7 @@ async function deployToExistingDeployment(
+     allowDeletingLargeIndexes: boolean;
+     message: string | null;
+     forceNodeCutover?: boolean | undefined;
++    nativeResident?: NativeResidentActivation | undefined;
+   },
+ ) {
+   const deploymentToActOn = await loadSelectedDeploymentCredentials(
+diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
+index 2bb66f911955a0dae1be2e369b7de632c25ba6b9..196bd5d0db31b6dcbfee2ce6381273379f02a84f 100644
+--- a/src/cli/lib/components.ts
++++ b/src/cli/lib/components.ts
+@@ -1,3 +1,4 @@
++import type { NativeResidentActivation } from "./deployApi/nativeResident.js";
+ import path from "path";
+ import { Context } from "../../bundler/context.js";
+ import {
+@@ -87,6 +88,7 @@ export type PushOptions = {
+   warnOnSlowSchemaValidation: boolean;
+   message: string | null;
+   forceNodeCutover: boolean;
++  nativeResident?: NativeResidentActivation | undefined;
+ };
+ 
+ export async function runCodegen(
+diff --git a/src/cli/lib/deploy2.ts b/src/cli/lib/deploy2.ts
+index f110b0d7f94c3b343ad421c19ee3e0c482a101aa..385cc1598820bdebd20b18711d7ea407d11a49cf 100644
+--- a/src/cli/lib/deploy2.ts
++++ b/src/cli/lib/deploy2.ts
+@@ -1,3 +1,4 @@
++import type { NativeResidentActivation } from "./deployApi/nativeResident.js";
+ import { Context } from "../../bundler/context.js";
+ import {
+   changeSpinner,
+@@ -368,6 +369,7 @@ export async function finishPush(
+     deploymentType?: DeploymentType;
+     message: string | null;
+     forceNodeCutover: boolean;
++    nativeResident?: NativeResidentActivation | undefined;
+   },
+ ): Promise<FinishPushDiff> {
+   changeSpinner("Finalizing push...");
+@@ -380,6 +382,7 @@ export async function finishPush(
+     startPush,
+     dryRun: options.dryRun,
+     message: options.message,
++    nativeResident: options.nativeResident,
+     forceNodeCutover:
+       (!options.dryRun && options.forceNodeCutover) || undefined,
+   };
+@@ -483,6 +486,7 @@ export async function deployToDeployment(
+     allowDeletingLargeIndexes: boolean;
+     message: string | null;
+     forceNodeCutover?: boolean | undefined;
++    nativeResident?: NativeResidentActivation | undefined;
+   },
+ ) {
+   const { url, adminKey } = credentials;
+@@ -534,6 +538,7 @@ export async function deployToDeployment(
+     warnOnSlowSchemaValidation: true,
+     message: options.message,
+     forceNodeCutover: !!options.forceNodeCutover,
++    nativeResident: options.nativeResident,
+   };
+   showSpinner(`Deploying to ${url}...${options.dryRun ? " [dry run]" : ""}`);
+   await runPush(ctx, pushOptions);
+diff --git a/src/cli/lib/deployApi/nativeResident.test.ts b/src/cli/lib/deployApi/nativeResident.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0370e71ee75766ebde8eeb16aadc310ecff2de3f
+--- /dev/null
++++ b/src/cli/lib/deployApi/nativeResident.test.ts
+@@ -0,0 +1,145 @@
++import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { brotliDecompressSync } from "node:zlib";
++import { afterEach, expect, test, vi } from "vitest";
++import type { Context } from "../../../bundler/context.js";
++import { nodeFs } from "../../../bundler/fs.js";
++import { finishPush } from "../deploy2.js";
++import { Span } from "../tracing.js";
++import { readNativeResidentActivation } from "./nativeResident.js";
++import { startPushResponse } from "./startPush.js";
++
++const { requests } = vi.hoisted(() => ({ requests: [] as unknown[] }));
++vi.mock("../utils/utils.js", async (original) => ({
++  ...(await original<typeof import("../utils/utils.js")>()),
++  deploymentFetch: () => async (_path: string, options: { body: Buffer }) => {
++    requests.push(
++      JSON.parse(brotliDecompressSync(options.body).toString("utf8")),
++    );
++    return new Response(
++      JSON.stringify({
++        authDiff: { added: [], removed: [] },
++        definitionDiffs: {},
++        componentDiffs: {},
++      }),
++    );
++  },
++}));
++const ctx: Context = {
++  fs: nodeFs,
++  deprecationMessagePrinted: false,
++  crash: async ({ printedMessage }) => {
++    throw new Error(printedMessage ?? "crash");
++  },
++  registerCleanup: () => "cleanup",
++  removeCleanup: () => async () => {},
++  bigBrainAuth: () => null,
++  _updateBigBrainAuth: () => {},
++};
++const descriptor = {
++  artifactSha256: "a".repeat(64),
++  configurationSha256: "b".repeat(64),
++  lifecycleProtocol: 1,
++  applicationContract: "example-v1",
++};
++const directory = mkdtempSync(join(tmpdir(), "native-deploy-cli-"));
++afterEach(() => {
++  requests.length = 0;
++});
++const options = {
++  adminKey: "test-key",
++  url: "http://127.0.0.1:3210",
++  dryRun: false,
++  deploymentName: null,
++  message: null,
++  forceNodeCutover: false,
++};
++const start = startPushResponse.parse({
++  environmentVariables: {},
++  externalDepsId: null,
++  componentDefinitionPackages: {},
++  appAuth: [],
++  analysis: {},
++  app: {
++    definitionPath: "",
++    componentPath: "",
++    args: {},
++    childComponents: {},
++    httpRoutes: { httpModuleRoutes: null, mounts: [] },
++    exports: {},
++  },
++  schemaChange: { allocatedComponentIds: {}, schemaIds: {} },
++});
++
++test("finish push retains a file's original selection across repeated calls and dry run", async () => {
++  const path = join(directory, "selection.json");
++  const envelope = {
++    expectedPrior: null,
++    target: descriptor,
++    applicationContract: "example-v1",
++  };
++  writeFileSync(path, JSON.stringify(envelope));
++  const nativeResident = await readNativeResidentActivation(ctx, path);
++  writeFileSync(path, JSON.stringify({ ...envelope, target: null }));
++  await finishPush(ctx, Span.noop(), start, { ...options, nativeResident });
++  await finishPush(ctx, Span.noop(), start, {
++    ...options,
++    nativeResident,
++    dryRun: true,
++  });
++  expect(requests).toEqual([
++    expect.objectContaining({ nativeResident: envelope, dryRun: false }),
++    expect.objectContaining({ nativeResident: envelope, dryRun: true }),
++  ]);
++});
++
++test("finish push preserves omission and explicit retirement", async () => {
++  await finishPush(ctx, Span.noop(), start, options);
++  const path = join(directory, "retire.json");
++  const envelope = {
++    expectedPrior: descriptor,
++    target: null,
++    applicationContract: "example-v1",
++  };
++  writeFileSync(path, JSON.stringify(envelope));
++  await finishPush(ctx, Span.noop(), start, {
++    ...options,
++    nativeResident: await readNativeResidentActivation(ctx, path),
++  });
++  expect(requests[0]).not.toHaveProperty("nativeResident");
++  expect(requests[1]).toHaveProperty("nativeResident", envelope);
++});
++
++test.each([
++  { target: null, applicationContract: null },
++  { expectedPrior: null, applicationContract: null },
++  {
++    expectedPrior: null,
++    target: { ...descriptor, lifecycleProtocol: 2 },
++    applicationContract: "example-v1",
++  },
++  {
++    expectedPrior: null,
++    target: descriptor,
++    applicationContract: "different-v1",
++  },
++  {
++    expectedPrior: null,
++    target: null,
++    applicationContract: null,
++    watcherKey: "secret",
++  },
++])(
++  "malformed envelopes fail before publication without their contents",
++  async (value) => {
++    const path = join(directory, "invalid.json");
++    writeFileSync(path, JSON.stringify(value));
++    await expect(readNativeResidentActivation(ctx, path)).rejects.toThrow(
++      "valid deployment envelope",
++    );
++    expect(requests).toHaveLength(0);
++  },
++);
++
++process.once("exit", () => rmSync(directory, { recursive: true, force: true }));
+diff --git a/src/cli/lib/deployApi/nativeResident.ts b/src/cli/lib/deployApi/nativeResident.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d2831b11dece521576d6e94aee9c6b80b2e32c67
+--- /dev/null
++++ b/src/cli/lib/deployApi/nativeResident.ts
+@@ -0,0 +1,61 @@
++import { z } from "zod";
++import type { Context } from "../../../bundler/context.js";
++
++const nativeResidentDescriptor = z
++  .object({
++    artifactSha256: z.string().regex(/^[0-9a-f]{64}$/),
++    configurationSha256: z.string().regex(/^[0-9a-f]{64}$/),
++    lifecycleProtocol: z.literal(1),
++    applicationContract: z.string().regex(/^[A-Za-z0-9_.-]{1,128}$/),
++  })
++  .strict();
++
++export const nativeResidentActivation = z
++  .object({
++    expectedPrior: nativeResidentDescriptor.nullable(),
++    target: nativeResidentDescriptor.nullable(),
++    applicationContract: z
++      .string()
++      .regex(/^[A-Za-z0-9_.-]{1,128}$/)
++      .nullable(),
++  })
++  .strict()
++  .refine(
++    (activation) =>
++      [activation.expectedPrior, activation.target].every(
++        (descriptor) =>
++          descriptor === null ||
++          descriptor.applicationContract === activation.applicationContract,
++      ),
++    { message: "Native descriptors require the declared application contract" },
++  );
++
++export type NativeResidentActivation = z.infer<typeof nativeResidentActivation>;
++
++export async function readNativeResidentActivation(
++  ctx: Context,
++  path: string,
++): Promise<NativeResidentActivation> {
++  const invalidFile = {
++    exitCode: 1,
++    errorType: "invalid filesystem data" as const,
++    printedMessage:
++      "The native resident file must contain a valid deployment envelope of at most 16 KiB.",
++  };
++  try {
++    const metadata = ctx.fs.stat(path);
++    if (!metadata.isFile() || metadata.size < 1 || metadata.size > 16 * 1024) {
++      return ctx.crash(invalidFile);
++    }
++    const text = ctx.fs.readUtf8File(path);
++    if (Buffer.byteLength(text) > 16 * 1024) return ctx.crash(invalidFile);
++    const activation = nativeResidentActivation.parse(JSON.parse(text));
++    if (activation.expectedPrior !== null)
++      Object.freeze(activation.expectedPrior);
++    if (activation.target !== null) Object.freeze(activation.target);
++    return Object.freeze(activation);
++  } catch {
++    // File contents and paths can contain operator credentials. Validation errors stay local.
++    return ctx.crash(invalidFile);
++  }
++}
+diff --git a/src/server/impl/meta_impl.test.ts b/src/server/impl/meta_impl.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1be24b60e0815a9fe1313d01e9c530640500af9f
+--- /dev/null
++++ b/src/server/impl/meta_impl.test.ts
+@@ -0,0 +1,35 @@
++import { afterEach, expect, test, vi } from "vitest";
++
++import { setupMutationMeta, setupQueryMeta } from "./meta_impl.js";
++
++afterEach(() => vi.unstubAllGlobals());
++
++test("deployment metadata preserves native authority and distinguishes unsupported backends", async () => {
++  const nativeResident = {
++    artifactSha256: "a".repeat(64),
++    configurationSha256: "b".repeat(64),
++    lifecycleProtocol: 1,
++    applicationContract: "example-v1",
++  };
++  for (const selection of [nativeResident, null, undefined]) {
++    const response = {
++      name: "example",
++      region: null,
++      class: "s16",
++      ...(selection === undefined ? {} : { nativeResident: selection }),
++    };
++    vi.stubGlobal("Convex", {
++      asyncSyscall: async () => JSON.stringify(response),
++    });
++    for (const meta of [
++      setupQueryMeta("internal"),
++      setupMutationMeta("internal"),
++    ]) {
++      const actual = await meta.getDeploymentMetadata();
++      expect(actual).toEqual(response);
++      expect(Object.hasOwn(actual, "nativeResident")).toBe(
++        selection !== undefined,
++      );
++    }
++  }
++});
+diff --git a/src/server/impl/meta_impl.ts b/src/server/impl/meta_impl.ts
+index 2e2d8756d1abdb752a52021715bd2f9dc458ae74..896e0561a12f2204ba4250acdc7e46addbac5f27 100644
+--- a/src/server/impl/meta_impl.ts
++++ b/src/server/impl/meta_impl.ts
+@@ -61,6 +61,9 @@ async function getDeploymentMetadata(): Promise<DeploymentMetadata> {
+     name: result.name,
+     region: result.region ?? null,
+     class: result.class,
++    ...(result.nativeResident === undefined
++      ? {}
++      : { nativeResident: result.nativeResident }),
+   };
+ }
+ 
+diff --git a/src/server/meta.ts b/src/server/meta.ts
+index dd2b831fd01c5f1b653359005c1da3b6f376fc64..3f28bbdd70c3ef23047df7597a35703fd4865ee8 100644
+--- a/src/server/meta.ts
++++ b/src/server/meta.ts
+@@ -87,6 +87,17 @@ export type DeploymentMetadata = {
+    * The deployment class, e.g. `"s16"`, `"s256"`, `"d1024"`, or `"d2048"`.
+    */
+   class: "s16" | "s256" | "d1024" | "d2048";
++  /**
++   * Committed native resident selection in a query or mutation's transaction.
++   * `null` selects ordinary execution. Omitted for actions and backends without
++   * native resident support; omission does not establish selection authority.
++   */
++  nativeResident?: {
++    artifactSha256: string;
++    configurationSha256: string;
++    lifecycleProtocol: number;
++    applicationContract: string;
++  } | null;
+ };
+ 
+ /**
