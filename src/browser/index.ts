@@ -23,6 +23,9 @@ export type {
   SubscribeOptions,
   ConnectionState,
   AuthTokenFetcher,
+  QueryWorkloadClass,
+  ServerPressure,
+  ServerPressureHandler,
 } from "./sync/client.js";
 /** @internal */
 export type { BaseConvexClientInterface } from "./sync/client.js";
