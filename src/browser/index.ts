@@ -40,7 +40,10 @@ export type { QueryToken } from "./sync/udf_path_utils.js";
 /** @internal */
 export type { PaginatedQueryToken } from "./sync/udf_path_utils.js";
 export { ConvexHttpClient, ConvexHttpError } from "./http_client.js";
-export type { HttpMutationOptions } from "./http_client.js";
+export type {
+  HttpMutationOptions,
+  HttpMutationPriority,
+} from "./http_client.js";
 export type { QueryJournal } from "./sync/protocol.js";
 /** @internal */
 export type { UserIdentityAttributes } from "./sync/protocol.js";
