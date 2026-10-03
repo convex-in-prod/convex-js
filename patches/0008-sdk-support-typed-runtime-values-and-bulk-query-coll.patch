@@ -5,25 +5,29 @@ Subject: [PATCH 08/11] sdk: support typed runtime values and bulk query
  collection
 
 Use the runtime capability boundary for bulk collection, owned JSON values and typed syscall arguments and results. Keep ordinary serialized syscalls when capabilities are absent and preserve value ownership across query, database, storage, metadata, scheduler and registration adapters. Include focused owned-value regressions.
+
+Transfer owned index-range and search-filter arrays between consumed builder wrappers instead of copying every prefix. Preserve value capture timing and reject reentrant or repeated use, including after capture throws.
 ---
  src/server/components/index.ts                |  12 +-
  src/server/impl/actions_impl.ts               |   9 +-
  src/server/impl/authentication_impl.ts        |  11 +-
  src/server/impl/database_impl.ts              |  92 +++++++++-------
  src/server/impl/filter_builder_impl.ts        |  25 +++--
- src/server/impl/index_range_builder_impl.ts   |  16 +--
+ src/server/impl/index_range_builder_impl.ts   |  75 +++++--------
  src/server/impl/meta_impl.ts                  |  36 ++++--
+ src/server/impl/query_builder.test.ts         |  70 ++++++++++++
  src/server/impl/query_impl.ts                 | 103 +++++++++++++-----
  src/server/impl/query_value.ts                |  24 ++++
  src/server/impl/registration_impl.ts          |  47 ++++++--
  src/server/impl/scheduler_impl.ts             |  38 +++++--
- src/server/impl/search_filter_builder_impl.ts |   6 +-
+ src/server/impl/search_filter_builder_impl.ts |  38 +++----
  src/server/impl/storage_impl.ts               |  49 +++++----
  src/server/impl/syscall.ts                    |  50 ++++++++-
  src/server/registration.ts                    |   6 +
  src/values/value.ts                           |  51 ++++++++-
  src/values/value_owned.test.ts                |  47 ++++++++
- 17 files changed, 459 insertions(+), 163 deletions(-)
+ 18 files changed, 564 insertions(+), 219 deletions(-)
+ create mode 100644 src/server/impl/query_builder.test.ts
  create mode 100644 src/server/impl/query_value.ts
  create mode 100644 src/values/value_owned.test.ts
 
@@ -340,7 +344,7 @@ index 10fb3ea0e607cec6f086dfe1a47505af2fcfde0a..f68a7c035939d71857ec49afc3b8959d
  }
  
 diff --git a/src/server/impl/index_range_builder_impl.ts b/src/server/impl/index_range_builder_impl.ts
-index d0bc59047898f33eb588df94937ceb5e6b3668e5..7cd4fe5e39418c42b3d9836c8e2edfac2b68c924 100644
+index d0bc59047898f33eb588df94937ceb5e6b3668e5..6e5c1045725b22ce318e4c7364919342678f0240 100644
 --- a/src/server/impl/index_range_builder_impl.ts
 +++ b/src/server/impl/index_range_builder_impl.ts
 @@ -1,5 +1,5 @@
@@ -360,50 +364,101 @@ index d0bc59047898f33eb588df94937ceb5e6b3668e5..7cd4fe5e39418c42b3d9836c8e2edfac
  };
  
  export class IndexRangeBuilderImpl
-@@ -50,7 +50,7 @@ export class IndexRangeBuilderImpl
-       this.rangeExpressions.concat({
-         type: "Eq",
-         fieldPath: fieldName,
--        value: convexOrUndefinedToJson(value),
-+        value: queryValueArg(value),
-       }),
-     );
+@@ -21,11 +21,9 @@ export class IndexRangeBuilderImpl
+     LowerBoundIndexRangeBuilder<GenericDocument, string>,
+     UpperBoundIndexRangeBuilder<GenericDocument, string>
+ {
+-  private rangeExpressions: ReadonlyArray<SerializedRangeExpression>;
++  private rangeExpressions: SerializedRangeExpression[];
+   private isConsumed: boolean;
+-  private constructor(
+-    rangeExpressions: ReadonlyArray<SerializedRangeExpression>,
+-  ) {
++  private constructor(rangeExpressions: SerializedRangeExpression[]) {
+     super();
+     this.rangeExpressions = rangeExpressions;
+     this.isConsumed = false;
+@@ -44,59 +42,40 @@ export class IndexRangeBuilderImpl
+     this.isConsumed = true;
    }
-@@ -61,7 +61,7 @@ export class IndexRangeBuilderImpl
-       this.rangeExpressions.concat({
-         type: "Gt",
-         fieldPath: fieldName,
+ 
+-  eq(fieldName: string, value: Value) {
++  private append(
++    type: SerializedRangeExpression["type"],
++    fieldName: string,
++    value: Value,
++  ) {
+     this.consume();
+-    return new IndexRangeBuilderImpl(
+-      this.rangeExpressions.concat({
+-        type: "Eq",
+-        fieldPath: fieldName,
 -        value: convexOrUndefinedToJson(value),
-+        value: queryValueArg(value),
-       }),
-     );
+-      }),
+-    );
++    // Only the successor may use this storage. Capture the value after consuming
++    // this wrapper so a reentrant getter cannot branch from the same builder.
++    this.rangeExpressions.push({
++      type,
++      fieldPath: fieldName,
++      value: queryValueArg(value),
++    });
++    return new IndexRangeBuilderImpl(this.rangeExpressions);
++  }
++
++  eq(fieldName: string, value: Value) {
++    return this.append("Eq", fieldName, value);
    }
-@@ -71,7 +71,7 @@ export class IndexRangeBuilderImpl
-       this.rangeExpressions.concat({
-         type: "Gte",
-         fieldPath: fieldName,
+ 
+   gt(fieldName: string, value: Value) {
+-    this.consume();
+-    return new IndexRangeBuilderImpl(
+-      this.rangeExpressions.concat({
+-        type: "Gt",
+-        fieldPath: fieldName,
 -        value: convexOrUndefinedToJson(value),
-+        value: queryValueArg(value),
-       }),
-     );
+-      }),
+-    );
++    return this.append("Gt", fieldName, value);
    }
-@@ -81,7 +81,7 @@ export class IndexRangeBuilderImpl
-       this.rangeExpressions.concat({
-         type: "Lt",
-         fieldPath: fieldName,
+   gte(fieldName: string, value: Value) {
+-    this.consume();
+-    return new IndexRangeBuilderImpl(
+-      this.rangeExpressions.concat({
+-        type: "Gte",
+-        fieldPath: fieldName,
 -        value: convexOrUndefinedToJson(value),
-+        value: queryValueArg(value),
-       }),
-     );
+-      }),
+-    );
++    return this.append("Gte", fieldName, value);
    }
-@@ -91,7 +91,7 @@ export class IndexRangeBuilderImpl
-       this.rangeExpressions.concat({
-         type: "Lte",
-         fieldPath: fieldName,
+   lt(fieldName: string, value: Value) {
+-    this.consume();
+-    return new IndexRangeBuilderImpl(
+-      this.rangeExpressions.concat({
+-        type: "Lt",
+-        fieldPath: fieldName,
 -        value: convexOrUndefinedToJson(value),
-+        value: queryValueArg(value),
-       }),
-     );
+-      }),
+-    );
++    return this.append("Lt", fieldName, value);
+   }
+   lte(fieldName: string, value: Value) {
+-    this.consume();
+-    return new IndexRangeBuilderImpl(
+-      this.rangeExpressions.concat({
+-        type: "Lte",
+-        fieldPath: fieldName,
+-        value: convexOrUndefinedToJson(value),
+-      }),
+-    );
++    return this.append("Lte", fieldName, value);
+   }
+ 
+-  export() {
++  export(): ReadonlyArray<SerializedRangeExpression> {
+     this.consume();
+     return this.rangeExpressions;
    }
 diff --git a/src/server/impl/meta_impl.ts b/src/server/impl/meta_impl.ts
 index 46b760e1b28e7e8e0d98489d601e35d91f9a71ee..2e2d8756d1abdb752a52021715bd2f9dc458ae74 100644
@@ -495,6 +550,82 @@ index 46b760e1b28e7e8e0d98489d601e35d91f9a71ee..2e2d8756d1abdb752a52021715bd2f9d
    return { ip, userAgent, requestId, scheduledFunctionId, authToken };
  }
  
+diff --git a/src/server/impl/query_builder.test.ts b/src/server/impl/query_builder.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d98dcfef0ce62c6249eb869eabae7b58a824efc0
+--- /dev/null
++++ b/src/server/impl/query_builder.test.ts
+@@ -0,0 +1,70 @@
++import { afterEach, expect, test, vi } from "vitest";
++import { IndexRangeBuilderImpl } from "./index_range_builder_impl.js";
++import { SearchFilterBuilderImpl } from "./search_filter_builder_impl.js";
++import { Value } from "../../values/value.js";
++
++afterEach(() => vi.unstubAllGlobals());
++
++for (const typed of [false, true]) {
++  test(`builders transfer ownership and snapshot values (${typed ? "typed" : "JSON"})`, () => {
++    if (typed) {
++      vi.stubGlobal("Convex", {
++        typedQueryArgs: true,
++        captureQueryValue: (value: Value) =>
++          new TextEncoder().encode(JSON.stringify(value)).buffer,
++      });
++    }
++    const value = { nested: [1] };
++    const root = IndexRangeBuilderImpl.new();
++    const middle = root.eq("a", value);
++    const final = middle.gte("b", 2).lt("b", 8);
++    value.nested.push(9);
++    const range = final.export();
++    expect(range.map(({ type }) => type)).toEqual(["Eq", "Gte", "Lt"]);
++    expect(
++      typed
++        ? JSON.parse(new TextDecoder().decode(range[0].value as ArrayBuffer))
++        : range[0].value,
++    ).toEqual({ nested: [1] });
++    for (const old of [root, middle, final]) {
++      expect(() => old.eq("c", 3)).toThrow("already been used");
++      expect(() => old.export()).toThrow("already been used");
++    }
++    const search = SearchFilterBuilderImpl.new();
++    const withTerm = search.search("text", "term");
++    const withFilter = withTerm.eq("a", value);
++    value.nested.push(10);
++    expect(() => search.eq("a", 3)).toThrow("already been used");
++    expect(() => withTerm.eq("a", 3)).toThrow("already been used");
++    const filters = (withFilter as SearchFilterBuilderImpl).export();
++    expect(filters[0]).toEqual({
++      type: "Search",
++      fieldPath: "text",
++      value: "term",
++    });
++    expect(
++      typed
++        ? JSON.parse(new TextDecoder().decode(filters[1].value as ArrayBuffer))
++        : filters[1].value,
++    ).toEqual({ nested: [1, 9] });
++    expect(() => (withFilter as SearchFilterBuilderImpl).export()).toThrow(
++      "already been used",
++    );
++  });
++}
++
++test("reentrant and throwing value capture cannot reuse a consumed builder", () => {
++  for (const builder of [
++    IndexRangeBuilderImpl.new(),
++    SearchFilterBuilderImpl.new(),
++  ]) {
++    const value = {
++      get field(): never {
++        expect(() => builder.eq("reentrant", 1)).toThrow("already been used");
++        throw new Error("capture failed");
++      },
++    };
++    expect(() => builder.eq("a", value)).toThrow("capture failed");
++    expect(() => builder.export()).toThrow("already been used");
++  }
++});
 diff --git a/src/server/impl/query_impl.ts b/src/server/impl/query_impl.ts
 index ea836a6ef06ef3ffb2b06d9d00c84285638ca166..f880b962aadbc81e0816336a7e50a1ef8b5e6cb5 100644
 --- a/src/server/impl/query_impl.ts
@@ -919,7 +1050,7 @@ index e92e8c0322f446a21aa750e0ce5be149c0b7323a..6144b2f73d6c6bf771df22df4b9d3b95
    };
  }
 diff --git a/src/server/impl/search_filter_builder_impl.ts b/src/server/impl/search_filter_builder_impl.ts
-index e9a58c8abc000302ce6d85198d85c029d131dfc4..dd2af47f66ca50c6270362be5e641e2f9561e8cd 100644
+index e9a58c8abc000302ce6d85198d85c029d131dfc4..384188f3a41c6286b61f3cdad7cd446445a7c646 100644
 --- a/src/server/impl/search_filter_builder_impl.ts
 +++ b/src/server/impl/search_filter_builder_impl.ts
 @@ -1,4 +1,4 @@
@@ -937,14 +1068,63 @@ index e9a58c8abc000302ce6d85198d85c029d131dfc4..dd2af47f66ca50c6270362be5e641e2f
      };
  
  export class SearchFilterBuilderImpl
-@@ -79,7 +79,7 @@ export class SearchFilterBuilderImpl
-       this.filters.concat({
-         type: "Eq",
-         fieldPath: fieldName,
+@@ -29,9 +29,9 @@ export class SearchFilterBuilderImpl
+     SearchFilterBuilder<GenericDocument, GenericSearchIndexConfig>,
+     SearchFilterFinalizer<GenericDocument, GenericSearchIndexConfig>
+ {
+-  private filters: ReadonlyArray<SerializedSearchFilter>;
++  private filters: SerializedSearchFilter[];
+   private isConsumed: boolean;
+-  private constructor(filters: ReadonlyArray<SerializedSearchFilter>) {
++  private constructor(filters: SerializedSearchFilter[]) {
+     super();
+     this.filters = filters;
+     this.isConsumed = false;
+@@ -57,13 +57,14 @@ export class SearchFilterBuilderImpl
+     validateArg(fieldName, 1, "search", "fieldName");
+     validateArg(query, 2, "search", "query");
+     this.consume();
+-    return new SearchFilterBuilderImpl(
+-      this.filters.concat({
+-        type: "Search",
+-        fieldPath: fieldName,
+-        value: query,
+-      }),
+-    );
++    // Consumption transfers ownership to the successor; old wrappers cannot
++    // append to or export this array again.
++    this.filters.push({
++      type: "Search",
++      fieldPath: fieldName,
++      value: query,
++    });
++    return new SearchFilterBuilderImpl(this.filters);
+   }
+   eq<FieldName extends string>(
+     fieldName: FieldName,
+@@ -75,16 +76,15 @@ export class SearchFilterBuilderImpl
+       validateArg(value, 2, "search", "value");
+     }
+     this.consume();
+-    return new SearchFilterBuilderImpl(
+-      this.filters.concat({
+-        type: "Eq",
+-        fieldPath: fieldName,
 -        value: convexOrUndefinedToJson(value),
-+        value: queryValueArg(value),
-       }),
-     );
+-      }),
+-    );
++    this.filters.push({
++      type: "Eq",
++      fieldPath: fieldName,
++      value: queryValueArg(value),
++    });
++    return new SearchFilterBuilderImpl(this.filters);
+   }
+ 
+-  export() {
++  export(): ReadonlyArray<SerializedSearchFilter> {
+     this.consume();
+     return this.filters;
    }
 diff --git a/src/server/impl/storage_impl.ts b/src/server/impl/storage_impl.ts
 index f8b8c44698435e0c2b777020e9e88abf39aab1a9..8cdbcc545cdca819de74c456fe11cb984d613924 100644
