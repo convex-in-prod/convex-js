@@ -410,10 +410,10 @@ index 0000000000000000000000000000000000000000..1be24b60e0815a9fe1313d01e9c53064
 +  }
 +});
 diff --git a/src/server/impl/meta_impl.ts b/src/server/impl/meta_impl.ts
-index 2e2d8756d1abdb752a52021715bd2f9dc458ae74..896e0561a12f2204ba4250acdc7e46addbac5f27 100644
+index b02da7b88db793e8663e1d574ab3f8cac781f530..5980bb6b8e150a577b99942fef0fa937156db179 100644
 --- a/src/server/impl/meta_impl.ts
 +++ b/src/server/impl/meta_impl.ts
-@@ -61,6 +61,9 @@ async function getDeploymentMetadata(): Promise<DeploymentMetadata> {
+@@ -65,6 +65,9 @@ async function getDeploymentMetadata(): Promise<DeploymentMetadata> {
      name: result.name,
      region: result.region ?? null,
      class: result.class,

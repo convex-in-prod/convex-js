@@ -6,7 +6,7 @@
 0005-cli-support-local-Node-pools-and-bounded-resident-re.patch c8ebf9227ba7b3ba5d66cd6d03bdeb3d07b0e2a0
 0006-codegen-use-non-committing-deployment-analysis.patch 2b13b74ebaaabed5f8690e608e01638770bb8489
 0007-values-remove-retained-UTF-8-comparison-scratch.patch f41fb77de82b86d2e8cb86c467a397237f21cb79
-0008-sdk-support-typed-runtime-values-and-bulk-query-coll.patch 02a2a6a596d35891908700357d37c33c3dc319f4
-0009-http-client-preserve-per-call-mutation-priority-thro.patch ee88a56dcc1c8f682ec0b7c7a012fc285728377b
-0010-deployment-publish-native-resident-selection-and-met.patch 38db4da16330462221f9455b3ec3af4f54e45e2e
-0011-packaging-keep-source-provenance-separate-from-immut.patch 3e1bd0ecd992302c2e96e314913ed0956a02de5e
+0008-sdk-support-typed-runtime-values-and-bulk-query-coll.patch 7c138e72089090a3b1b57a82d07e74940053fabc
+0009-http-client-preserve-per-call-mutation-priority-thro.patch 079562a828b8896a2ed77bda2212435951522991
+0010-deployment-publish-native-resident-selection-and-met.patch f62eb08ecf193abaab589b7c814a74f469ed7077
+0011-packaging-keep-source-provenance-separate-from-immut.patch 28060144adf759ee08e8b101d24609975910a917
