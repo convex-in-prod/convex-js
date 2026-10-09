@@ -20,11 +20,11 @@ Record the reviewed upstream source and retain the peer-compatible SHA-derived p
 
 diff --git a/.convex-in-prod-upstream b/.convex-in-prod-upstream
 new file mode 100644
-index 0000000000000000000000000000000000000000..ae50e3c417314e4a7b47b8b2b49b78d208c3a5b1
+index 0000000000000000000000000000000000000000..76254a7aed4a60db15e62b22eba54d05a03b6035
 --- /dev/null
 +++ b/.convex-in-prod-upstream
 @@ -0,0 +1 @@
-+da00c5cc463a40db208034df4b8296bb2d04aa1e
++0fca732f8e62f0549e3b669dd560e32d6b0108c0
 diff --git a/.github/workflows/build-convex-in-prod.yml b/.github/workflows/build-convex-in-prod.yml
 new file mode 100644
 index 0000000000000000000000000000000000000000..fd97d84d7cb99b8ffc8af42218530c6f4c1b24ee
@@ -187,10 +187,10 @@ index 0000000000000000000000000000000000000000..fd97d84d7cb99b8ffc8af42218530c6f
 +          process.stdout.write(`Integrity: \`${integrity}\`\n`);
 +          NODE
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index 7adb52117814c68541e8752cd122181bc6f49021..f132cf74e4f3fd325320fc4196b44c0bb89b2a6b 100644
+index cc26fd5e85f038ae7991898fc0cf37054a4112c6..9b7f5719d31b65b6836e29327ea7bb9d9112dd48 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -19,6 +19,17 @@
+@@ -59,6 +59,17 @@
    gateway.
  - Improved the error message when `npx convex export` fails because a snapshot
    export is already in progress.
@@ -209,7 +209,7 @@ index 7adb52117814c68541e8752cd122181bc6f49021..f132cf74e4f3fd325320fc4196b44c0b
  ## 1.44.0
  
 diff --git a/package.json b/package.json
-index 99899885e98841ad37c32c77e0cca8c13042d0b1..4df88b2759a8a3614e092bf9fdf01b7881976a67 100644
+index 6b173282543894adb963c3a176c87190484d433b..c8fab1cdbd31ef4677a7ab250f237c164f43e06a 100644
 --- a/package.json
 +++ b/package.json
 @@ -333,7 +333,7 @@

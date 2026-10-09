@@ -1,12 +1,12 @@
 # patch-file source-commit
-0001-client-retry-definitive-mutation-conflicts-with-boun.patch 0bf1c544762f4ffbdb38009f488d5ca32a78882f
-0002-sync-add-degradable-query-pressure-protocol.patch fe4345bb9eb0c300ed92ebae5c3f98e0262f13e4
-0003-react-expose-local-query-result-removal.patch 1e68cb2a3bbbe27024e40e207dbb4b2e52aaf103
-0004-bundler-support-centralized-context-reuse-policy.patch de65471336a64d3952e771d2b9ec1eab1eb5ee07
-0005-cli-support-local-Node-pools-and-bounded-resident-re.patch 29d7a83cb9ead83b7dfb7dd46c72b7ef03f5e0fe
-0006-codegen-use-non-committing-deployment-analysis.patch 7d1e0a1266b94ac8d587a1e8f716b272d4c3660a
-0007-values-remove-retained-UTF-8-comparison-scratch.patch 38ecaccdb6321e2d84f6664adc4549d72ff3e4aa
-0008-sdk-support-typed-runtime-values-and-bulk-query-coll.patch 1eec7c63272497333a6103948f917f11741601a0
-0009-http-client-preserve-per-call-mutation-priority-thro.patch d50e92aafbbdaed497308099ea06765c5649711b
-0010-deployment-publish-native-resident-selection-and-met.patch b34f0e3988c7d8bf433fb1b5b7aa0083411b7f2c
-0011-packaging-keep-source-provenance-separate-from-immut.patch 871e0b6a7771e9c0557981b50faecf81bb27dc13
+0001-client-retry-definitive-mutation-conflicts-with-boun.patch f909ee7297d6caad926edf539bea36c9f39eee00
+0002-sync-add-degradable-query-pressure-protocol.patch 323f8ba45fdc917be2a6694f5dd64c95c285acb9
+0003-react-expose-local-query-result-removal.patch ca599e97fe912c11848bcca15951ec8ab4864b07
+0004-bundler-support-centralized-context-reuse-policy.patch 86a9bc5b7ebe6c8ec477587728c465d95f11aa54
+0005-cli-support-local-Node-pools-and-bounded-resident-re.patch 05490c37e7060af64b8f06dc82002624aa292412
+0006-codegen-use-non-committing-deployment-analysis.patch 533ac724e83b2b12190c15585612e3d8daf0d0db
+0007-values-remove-retained-UTF-8-comparison-scratch.patch dce5b00ec5995640b16d701c800b9fd223b50762
+0008-sdk-support-typed-runtime-values-and-bulk-query-coll.patch e6500f44e6bedd217344da0598e95aa803672fcf
+0009-http-client-preserve-per-call-mutation-priority-thro.patch 54a53b2be7879bb970eb106fc00ab070d3d25d81
+0010-deployment-publish-native-resident-selection-and-met.patch d7ae2e572a768b681ded3d54acf4abc122665f0f
+0011-packaging-keep-source-provenance-separate-from-immut.patch e75af0d23c4ca0c33c05c859a31af650c0694284

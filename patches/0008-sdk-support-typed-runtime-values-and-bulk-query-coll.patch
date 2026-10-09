@@ -27,24 +27,24 @@ Keep action scheduling and ordinary V8 execution on their existing adapters.
  src/server/impl/registration_impl.ts          |  57 +++--
  src/server/impl/scheduler_impl.ts             |  62 ++++-
  src/server/impl/search_filter_builder_impl.ts |  43 ++--
- src/server/impl/storage_impl.ts               |  49 ++--
+ src/server/impl/storage_impl.ts               |  50 ++--
  src/server/impl/syscall.ts                    | 218 +++++++++++++++++-
  src/server/impl/value_syscall.test.ts         | 112 +++++++++
  src/server/registration.ts                    |   6 +
  src/values/value.ts                           |  51 +++-
  src/values/value_owned.test.ts                |  47 ++++
- 19 files changed, 1047 insertions(+), 272 deletions(-)
+ 19 files changed, 1048 insertions(+), 272 deletions(-)
  create mode 100644 src/server/impl/query_builder.test.ts
  create mode 100644 src/server/impl/query_value.ts
  create mode 100644 src/server/impl/value_syscall.test.ts
  create mode 100644 src/values/value_owned.test.ts
 
 diff --git a/src/server/components/index.ts b/src/server/components/index.ts
-index 28448db74f35a1ec7926fe0e48f19d00199215ee..1af4fc23a33f22e92ecf5cae2350cd0de3c7e611 100644
+index 783c4643f131696c3c18f5997836bcbca9cc07ef..b54753b6d8fe8fafc846855e8dc72be980b3973c 100644
 --- a/src/server/components/index.ts
 +++ b/src/server/components/index.ts
-@@ -5,7 +5,7 @@ import {
-   FunctionReference,
+@@ -6,7 +6,7 @@ import {
+   FunctionReference_future,
    FunctionType,
  } from "../api.js";
 -import { performAsyncSyscall } from "../impl/syscall.js";
@@ -52,8 +52,8 @@ index 28448db74f35a1ec7926fe0e48f19d00199215ee..1af4fc23a33f22e92ecf5cae2350cd0d
  import { DefaultFunctionArgs } from "../registration.js";
  import {
    AppDefinitionAnalysis,
-@@ -74,10 +74,12 @@ export async function createFunctionHandle<
-   >,
+@@ -72,10 +72,12 @@ export async function createFunctionHandle<
+     | FunctionReference_future<Type, "public" | "internal", Args, ReturnType>,
  ): Promise<FunctionHandle<Type, Args, ReturnType>> {
    const address = getFunctionAddress(functionReference);
 -  return await performAsyncSyscall("1.0/createFunctionHandle", {
@@ -70,7 +70,7 @@ index 28448db74f35a1ec7926fe0e48f19d00199215ee..1af4fc23a33f22e92ecf5cae2350cd0d
  
  interface ComponentExports {
 diff --git a/src/server/impl/actions_impl.ts b/src/server/impl/actions_impl.ts
-index 344cc3de88c5ef7eae54464f6f475eda06284537..7bf67513207665c750e1ded453821ad49e0fba84 100644
+index e83bb9db47b8e63e7a88ea8101baf696ebcabd25..68663090d83aa3b76cad59f3642ed87c4301d82a 100644
 --- a/src/server/impl/actions_impl.ts
 +++ b/src/server/impl/actions_impl.ts
 @@ -1,4 +1,5 @@
@@ -80,7 +80,7 @@ index 344cc3de88c5ef7eae54464f6f475eda06284537..7bf67513207665c750e1ded453821ad4
  import { version } from "../../index.js";
  import { performAsyncSyscall } from "./syscall.js";
  import { parseArgs } from "../../common/index.js";
-@@ -36,7 +37,7 @@ export function setupActionCalls(requestId: string) {
+@@ -41,7 +42,7 @@ export function setupActionCalls(requestId: string) {
          "1.0/actions/query",
          syscallArgs(requestId, query, args),
        );
@@ -88,8 +88,8 @@ index 344cc3de88c5ef7eae54464f6f475eda06284537..7bf67513207665c750e1ded453821ad4
 +      return jsonToConvexOwned(result);
      },
      runMutation: async (
-       mutation: FunctionReference<"mutation", "public" | "internal">,
-@@ -54,7 +55,7 @@ export function setupActionCalls(requestId: string) {
+       mutation:
+@@ -61,7 +62,7 @@ export function setupActionCalls(requestId: string) {
          writeConflictRetryOptions,
          isWriteConflictRetryableError,
        );
@@ -97,8 +97,8 @@ index 344cc3de88c5ef7eae54464f6f475eda06284537..7bf67513207665c750e1ded453821ad4
 +      return jsonToConvexOwned(result);
      },
      runAction: async (
-       action: FunctionReference<"action", "public" | "internal">,
-@@ -64,7 +65,7 @@ export function setupActionCalls(requestId: string) {
+       action:
+@@ -73,7 +74,7 @@ export function setupActionCalls(requestId: string) {
          "1.0/actions/action",
          syscallArgs(requestId, action, args),
        );
@@ -1301,7 +1301,7 @@ index b033c40d905663f20e104a5c1e248648f4e5f9a3..2f1348edcc5479672a434aa64e00771e
 +  );
  }
 diff --git a/src/server/impl/scheduler_impl.ts b/src/server/impl/scheduler_impl.ts
-index e92e8c0322f446a21aa750e0ce5be149c0b7323a..d679dd45b435e6230f5e2322603704dc4e46035b 100644
+index aac0bfe85671ddda3fb99b9cd26369100e82cfff..deb1a055322f9785529cbfc1e5467c31f7890239 100644
 --- a/src/server/impl/scheduler_impl.ts
 +++ b/src/server/impl/scheduler_impl.ts
 @@ -1,6 +1,10 @@
@@ -1315,8 +1315,8 @@ index e92e8c0322f446a21aa750e0ce5be149c0b7323a..d679dd45b435e6230f5e2322603704dc
 +} from "./syscall.js";
  import { parseArgs } from "../../common/index.js";
  import { SchedulableFunctionReference, Scheduler } from "../scheduler.js";
- import { Id } from "../../values/value.js";
-@@ -15,7 +19,17 @@ export function setupMutationScheduler(): Scheduler {
+ import { FunctionReference_future } from "../api.js";
+@@ -22,7 +26,17 @@ export function setupMutationScheduler(): Scheduler {
        args?: Record<string, Value>,
      ) => {
        const syscallArgs = runAfterSyscallArgs(delayMs, functionReference, args);
@@ -1335,7 +1335,7 @@ index e92e8c0322f446a21aa750e0ce5be149c0b7323a..d679dd45b435e6230f5e2322603704dc
      },
      runAt: async (
        ms_since_epoch_or_date: number | Date,
-@@ -27,12 +41,26 @@ export function setupMutationScheduler(): Scheduler {
+@@ -34,12 +48,26 @@ export function setupMutationScheduler(): Scheduler {
          functionReference,
          args,
        );
@@ -1365,7 +1365,7 @@ index e92e8c0322f446a21aa750e0ce5be149c0b7323a..d679dd45b435e6230f5e2322603704dc
      },
    };
  }
-@@ -48,7 +76,13 @@ export function setupActionScheduler(requestId: string): Scheduler {
+@@ -55,7 +83,13 @@ export function setupActionScheduler(requestId: string): Scheduler {
          requestId,
          ...runAfterSyscallArgs(delayMs, functionReference, args),
        };
@@ -1380,7 +1380,7 @@ index e92e8c0322f446a21aa750e0ce5be149c0b7323a..d679dd45b435e6230f5e2322603704dc
      },
      runAt: async (
        ms_since_epoch_or_date: number | Date,
-@@ -59,7 +93,13 @@ export function setupActionScheduler(requestId: string): Scheduler {
+@@ -66,7 +100,13 @@ export function setupActionScheduler(requestId: string): Scheduler {
          requestId,
          ...runAtSyscallArgs(ms_since_epoch_or_date, functionReference, args),
        };
@@ -1395,7 +1395,7 @@ index e92e8c0322f446a21aa750e0ce5be149c0b7323a..d679dd45b435e6230f5e2322603704dc
      },
      cancel: async (id: Id<"_scheduled_functions">) => {
        validateArg(id, 1, "cancel", "id");
-@@ -91,9 +131,9 @@ function runAfterSyscallArgs(
+@@ -98,9 +138,9 @@ function runAfterSyscallArgs(
    // Note the syscall expects a unix timestamp, measured in seconds.
    const ts = (Date.now() + delayMs) / 1000.0;
    return {
@@ -1407,7 +1407,7 @@ index e92e8c0322f446a21aa750e0ce5be149c0b7323a..d679dd45b435e6230f5e2322603704dc
      version,
    };
  }
-@@ -116,9 +156,9 @@ function runAtSyscallArgs(
+@@ -123,9 +163,9 @@ function runAtSyscallArgs(
    const address = getFunctionAddress(functionReference);
    const functionArgs = parseArgs(args);
    return {
@@ -1511,16 +1511,17 @@ index e9a58c8abc000302ce6d85198d85c029d131dfc4..e1976c77bfc35655914a823c61151f8a
      return this.filters;
    }
 diff --git a/src/server/impl/storage_impl.ts b/src/server/impl/storage_impl.ts
-index f8b8c44698435e0c2b777020e9e88abf39aab1a9..861d636b751e559c519839bd94b07f459152eee7 100644
+index 85a1253111d207aeaa417a4368d520cbb07b7ec5..7859af9f555825a17ea2c221f5f9aed3aa88dd37 100644
 --- a/src/server/impl/storage_impl.ts
 +++ b/src/server/impl/storage_impl.ts
-@@ -6,25 +6,31 @@ import {
-   StorageWriter,
+@@ -7,25 +7,32 @@ import {
  } from "../storage.js";
  import { version } from "../../index.js";
+ import { fromByteArray } from "../../values/base64.js";
 -import { performAsyncSyscall, performJsSyscall } from "./syscall.js";
 +import {
 +  ValueSyscall,
++  performAsyncSyscall,
 +  performAsyncValueSyscall,
 +  performJsSyscall,
 +} from "./syscall.js";
@@ -1557,7 +1558,7 @@ index f8b8c44698435e0c2b777020e9e88abf39aab1a9..861d636b751e559c519839bd94b07f45
      },
    };
  }
-@@ -33,17 +39,20 @@ export function setupStorageWriter(requestId: string): StorageWriter {
+@@ -34,17 +41,20 @@ export function setupStorageWriter(requestId: string): StorageWriter {
    const reader = setupStorageReader(requestId);
    return {
      generateUploadUrl: async () => {
@@ -1585,8 +1586,8 @@ index f8b8c44698435e0c2b777020e9e88abf39aab1a9..861d636b751e559c519839bd94b07f45
 +        () => undefined,
 +      );
      },
-     getUrl: reader.getUrl,
-     getMetadata: reader.getMetadata,
+     store: async (blob: Blob, options?: { sha256?: string }) => {
+       if (!(blob instanceof Blob)) {
 diff --git a/src/server/impl/syscall.ts b/src/server/impl/syscall.ts
 index f3d23278a5f7eda002e9dcbb4a3645067506b6ad..7bbb64fbe8144dbfce26b297d431f2dad3745dbf 100644
 --- a/src/server/impl/syscall.ts
@@ -1959,10 +1960,10 @@ index 0000000000000000000000000000000000000000..a3c60d2c90db37b9dbc497574fcd31f0
 +  await expect(result).rejects.toMatchObject({ data });
 +});
 diff --git a/src/server/registration.ts b/src/server/registration.ts
-index 672fe8015ef033736678665f9e1d80ab36aca06a..1e47a900b81ecc7b7bc1a551e04d91c5b86d313c 100644
+index 1ede4cb3ad5ec96f559f2b67987c0ac9f955bdef..a4bb7106e2ab37e5d302b7ee12261c8353a99800 100644
 --- a/src/server/registration.ts
 +++ b/src/server/registration.ts
-@@ -507,6 +507,9 @@ export type RegisteredMutation<
+@@ -528,6 +528,9 @@ export type RegisteredMutation<
    /** @internal */
    invokeMutation(argsStr: string): Promise<string>;
  
@@ -1972,7 +1973,7 @@ index 672fe8015ef033736678665f9e1d80ab36aca06a..1e47a900b81ecc7b7bc1a551e04d91c5
    /** @internal */
    exportArgs(): string;
  
-@@ -536,6 +539,9 @@ export type RegisteredQuery<
+@@ -557,6 +560,9 @@ export type RegisteredQuery<
    /** @internal */
    invokeQuery(argsStr: string): Promise<string>;
  
@@ -1983,7 +1984,7 @@ index 672fe8015ef033736678665f9e1d80ab36aca06a..1e47a900b81ecc7b7bc1a551e04d91c5
    exportArgs(): string;
  
 diff --git a/src/values/value.ts b/src/values/value.ts
-index d72c20bd5a5b47bd75f05cfe96d862b08cdb39d0..ca2b035ea7e30ed9d2d67be34e9efbf0574a86ad 100644
+index 6713b344ca9415e324ffd8e06917f216a417c4fc..f460425648c14430767627faa7a9c79be001f616 100644
 --- a/src/values/value.ts
 +++ b/src/values/value.ts
 @@ -231,6 +231,15 @@ function validateObjectField(k: string) {

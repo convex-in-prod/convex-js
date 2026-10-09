@@ -20,7 +20,7 @@ Validate and freeze an explicit nullable native-resident activation envelope bef
  create mode 100644 src/server/impl/meta_impl.test.ts
 
 diff --git a/src/cli/deploy.ts b/src/cli/deploy.ts
-index 00d79dda73af68ffe32d610c113ecb5c4eb5f4d5..757c2cca5b7a74026b2f424e4f2115b6248fdf90 100644
+index a290ba4bd527082a6de22ee109575a8b032455aa..5c455ad86a1da36010c4ba321c16bb679c71d103 100644
 --- a/src/cli/deploy.ts
 +++ b/src/cli/deploy.ts
 @@ -1,3 +1,7 @@
@@ -31,9 +31,9 @@ index 00d79dda73af68ffe32d610c113ecb5c4eb5f4d5..757c2cca5b7a74026b2f424e4f2115b6
  import { chalkStderr } from "chalk";
  import { Command, Option } from "@commander-js/extra-typings";
  import { Context, oneoffContext } from "../bundler/context.js";
-@@ -116,9 +120,20 @@ Same format as .env.local or .env files, and overrides them.`,
-       .conflicts("preview-create")
-       .conflicts("preview-name"),
+@@ -123,9 +127,20 @@ Same format as .env.local or .env files, and overrides them.`,
+     // blocking backfill through.
+     new Option("--allow-deleting-large-indexes").hideHelp(),
    )
 +  .addOption(
 +    new Option(
@@ -52,31 +52,31 @@ index 00d79dda73af68ffe32d610c113ecb5c4eb5f4d5..757c2cca5b7a74026b2f424e4f2115b6
  
      const deploymentSelection = await getDeploymentSelection(ctx, {
        ...cmdOptions,
-@@ -179,6 +194,7 @@ Same format as .env.local or .env files, and overrides them.`,
+@@ -186,6 +201,7 @@ Same format as .env.local or .env files, and overrides them.`,
          },
          {
            ...cmdOptions,
 +          nativeResident,
            previewName: previewName ?? undefined,
            reuse,
-           message: cmdOptions.message ?? getDefaultDeployMessage(),
-@@ -203,6 +219,7 @@ Same format as .env.local or .env files, and overrides them.`,
+           skipLargeIndexesCheck: cmdOptions.skipLargeIndexesCheck ?? false,
+@@ -211,6 +227,7 @@ Same format as .env.local or .env files, and overrides them.`,
  
        await deployToExistingDeployment(ctx, deploymentSelection, {
          ...cmdOptions,
 +        nativeResident,
          skipWorkosCheck: cmdOptions.skipWorkosCheck ?? false,
+         skipLargeIndexesCheck: cmdOptions.skipLargeIndexesCheck ?? false,
          allowDeletingLargeIndexes:
-           cmdOptions.allowDeletingLargeIndexes ?? false,
-@@ -239,6 +256,7 @@ async function deployToNewPreviewDeployment(
-     skipWorkosCheck?: boolean | undefined;
+@@ -249,6 +266,7 @@ async function deployToNewPreviewDeployment(
+     skipLargeIndexesCheck: boolean;
      message: string | null;
      forceNodeCutover?: boolean | undefined;
 +    nativeResident?: NativeResidentActivation | undefined;
    },
  ) {
    const previewName = options.previewName ?? null;
-@@ -337,6 +355,7 @@ async function deployToNewPreviewDeployment(
+@@ -355,6 +373,7 @@ async function deployToNewPreviewDeployment(
      warnOnSlowSchemaValidation: true,
      message: options.message,
      forceNodeCutover: !!options.forceNodeCutover,
@@ -84,7 +84,7 @@ index 00d79dda73af68ffe32d610c113ecb5c4eb5f4d5..757c2cca5b7a74026b2f424e4f2115b6
    };
    showSpinner(`Deploying to ${previewUrl}...`);
    await runPush(ctx, pushOptions);
-@@ -383,6 +402,7 @@ async function deployToExistingDeployment(
+@@ -402,6 +421,7 @@ async function deployToExistingDeployment(
      allowDeletingLargeIndexes: boolean;
      message: string | null;
      forceNodeCutover?: boolean | undefined;
@@ -93,7 +93,7 @@ index 00d79dda73af68ffe32d610c113ecb5c4eb5f4d5..757c2cca5b7a74026b2f424e4f2115b6
  ) {
    const deploymentToActOn = await loadSelectedDeploymentCredentials(
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index 2bb66f911955a0dae1be2e369b7de632c25ba6b9..196bd5d0db31b6dcbfee2ce6381273379f02a84f 100644
+index 80fe1e1e55c8212df3c18f8838724948c62e6c94..9439604d89ea7c6a9e9c097a0804d2f8860304ab 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
 @@ -1,3 +1,4 @@
@@ -101,7 +101,7 @@ index 2bb66f911955a0dae1be2e369b7de632c25ba6b9..196bd5d0db31b6dcbfee2ce638127337
  import path from "path";
  import { Context } from "../../bundler/context.js";
  import {
-@@ -87,6 +88,7 @@ export type PushOptions = {
+@@ -93,6 +94,7 @@ export type PushOptions = {
    warnOnSlowSchemaValidation: boolean;
    message: string | null;
    forceNodeCutover: boolean;
@@ -110,7 +110,7 @@ index 2bb66f911955a0dae1be2e369b7de632c25ba6b9..196bd5d0db31b6dcbfee2ce638127337
  
  export async function runCodegen(
 diff --git a/src/cli/lib/deploy2.ts b/src/cli/lib/deploy2.ts
-index f110b0d7f94c3b343ad421c19ee3e0c482a101aa..385cc1598820bdebd20b18711d7ea407d11a49cf 100644
+index fe90ec7ecf3b5b99d59a36385189fd3728e0f9c3..13f63ca55e90ac0bfb41650e699b75c634be37ba 100644
 --- a/src/cli/lib/deploy2.ts
 +++ b/src/cli/lib/deploy2.ts
 @@ -1,3 +1,4 @@
@@ -134,7 +134,7 @@ index f110b0d7f94c3b343ad421c19ee3e0c482a101aa..385cc1598820bdebd20b18711d7ea407
      forceNodeCutover:
        (!options.dryRun && options.forceNodeCutover) || undefined,
    };
-@@ -483,6 +486,7 @@ export async function deployToDeployment(
+@@ -484,6 +487,7 @@ export async function deployToDeployment(
      allowDeletingLargeIndexes: boolean;
      message: string | null;
      forceNodeCutover?: boolean | undefined;
@@ -142,7 +142,7 @@ index f110b0d7f94c3b343ad421c19ee3e0c482a101aa..385cc1598820bdebd20b18711d7ea407
    },
  ) {
    const { url, adminKey } = credentials;
-@@ -534,6 +538,7 @@ export async function deployToDeployment(
+@@ -539,6 +543,7 @@ export async function deployToDeployment(
      warnOnSlowSchemaValidation: true,
      message: options.message,
      forceNodeCutover: !!options.forceNodeCutover,
@@ -424,10 +424,10 @@ index b02da7b88db793e8663e1d574ab3f8cac781f530..5980bb6b8e150a577b99942fef0fa937
  }
  
 diff --git a/src/server/meta.ts b/src/server/meta.ts
-index dd2b831fd01c5f1b653359005c1da3b6f376fc64..3f28bbdd70c3ef23047df7597a35703fd4865ee8 100644
+index e9018205c525480c4655a55766a943a8460fc169..774882b47358a3028b7e882bda2d018a931161eb 100644
 --- a/src/server/meta.ts
 +++ b/src/server/meta.ts
-@@ -87,6 +87,17 @@ export type DeploymentMetadata = {
+@@ -103,6 +103,17 @@ export type DeploymentMetadata = {
     * The deployment class, e.g. `"s16"`, `"s256"`, `"d1024"`, or `"d2048"`.
     */
    class: "s16" | "s256" | "d1024" | "d2048";

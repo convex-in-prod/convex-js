@@ -36,10 +36,10 @@ index cbbc58cf52f48309a45dee41ce35d076104d2a84..2303c26ac97be46db259ab7b2712d378
  /** @internal */
  export type { BaseConvexClientInterface } from "./sync/client.js";
 diff --git a/src/browser/simple_client.ts b/src/browser/simple_client.ts
-index 23cd1ee1aa976370481fb5bf6ffd467ab8d0481a..6e528e2217da66a5c79e202e4f990a03724ea704 100644
+index b0d7f857d744af35b2a0ab265b86883072f60ca6..916c27afc8bc9cb6e9d1811456a190a673169b27 100644
 --- a/src/browser/simple_client.ts
 +++ b/src/browser/simple_client.ts
-@@ -557,6 +557,23 @@ export class ConvexClient {
+@@ -578,6 +578,23 @@ export class ConvexClient {
      return this.client.connectionState();
    }
  
@@ -1769,10 +1769,10 @@ index 1a2745a8d7e00a87ea1edab7f29b17069b5431b8..33e58806501023d06b59d6f2447c8d4e
    serverTs?: number;
  };
 diff --git a/src/react/client.ts b/src/react/client.ts
-index 37ccee6f182ea9c4c5a616d6a99b19ba7c9783d2..a80c1ccd0f37cc454d0d8898a7a0c10f0df7ce63 100644
+index 5546234c0ce849c0279716cb4323a3835b3938f6..4abf669affce1b42b3a4a06d31d45d1c5a761018 100644
 --- a/src/react/client.ts
 +++ b/src/react/client.ts
-@@ -314,7 +314,10 @@ export interface ConvexReactClientOptions extends BaseConvexClientOptions {
+@@ -327,7 +327,10 @@ export interface ConvexReactClientOptions extends BaseConvexClientOptions {
    /**
     * An already-constructed {@link BaseConvexClient} to use instead of
     * constructing one internally. When provided, this client (and its
@@ -1784,7 +1784,7 @@ index 37ccee6f182ea9c4c5a616d6a99b19ba7c9783d2..a80c1ccd0f37cc454d0d8898a7a0c10f
     *
     * @internal
     */
-@@ -718,6 +721,21 @@ export class ConvexReactClient {
+@@ -753,6 +756,21 @@ export class ConvexReactClient {
      });
    }
  

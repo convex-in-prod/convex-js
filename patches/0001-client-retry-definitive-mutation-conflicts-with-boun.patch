@@ -9,7 +9,7 @@ Retain completed HTTP failures as typed evidence and classify explicit pre-execu
 Keep the existing configurable retry budget and delay. Action callbacks explicitly retain their established terminal-conflict message classifier. Cover physical attempt counts and preserve original errors for ambiguous outcomes.
 ---
  src/browser/http_client.test.ts         | 304 ++++++++++++++++++++++++
- src/browser/http_client.ts              | 171 ++++++++++++-
+ src/browser/http_client.ts              | 173 +++++++++++++-
  src/browser/index.ts                    |   2 +-
  src/browser/sync/client.ts              |  38 ++-
  src/common/write_conflict_retry.test.ts | 107 +++++++++
@@ -19,7 +19,7 @@ Keep the existing configurable retry budget and delay. Action callbacks explicit
  src/server/impl/actions_impl.ts         |  20 +-
  src/server/impl/registration_impl.ts    |  19 +-
  src/server/registration.ts              |   6 +-
- 11 files changed, 797 insertions(+), 30 deletions(-)
+ 11 files changed, 799 insertions(+), 30 deletions(-)
  create mode 100644 src/browser/http_client.test.ts
  create mode 100644 src/common/write_conflict_retry.test.ts
  create mode 100644 src/common/write_conflict_retry.ts
@@ -335,10 +335,10 @@ index 0000000000000000000000000000000000000000..d412156e3aa79d909739872b83d25ce9
 +
 +});
 diff --git a/src/browser/http_client.ts b/src/browser/http_client.ts
-index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..d8156145ccbf250c44c80f51c5b7f5888e83932a 100644
+index 3c9b80b2b2f0dc6b18228ffacd099a29e109521a..125f8d38ac90c9b60bc7b42e9c89a6fca9e267b0 100644
 --- a/src/browser/http_client.ts
 +++ b/src/browser/http_client.ts
-@@ -23,6 +23,12 @@ import {
+@@ -24,6 +24,12 @@ import {
    FunctionArgs,
    UserIdentityAttributes,
  } from "../server/index.js";
@@ -351,7 +351,7 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..d8156145ccbf250c44c80f51c5b7f588
  
  export const STATUS_CODE_OK = 200;
  export const STATUS_CODE_BAD_REQUEST = 400;
-@@ -31,20 +37,124 @@ export const STATUS_CODE_BAD_REQUEST = 400;
+@@ -32,20 +38,124 @@ export const STATUS_CODE_BAD_REQUEST = 400;
  // Must match the constant of the same name in the backend.
  export const STATUS_CODE_UDF_FAILED = 560;
  
@@ -478,15 +478,15 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..d8156145ccbf250c44c80f51c5b7f588
  };
  
  /**
-@@ -70,6 +180,7 @@ export class ConvexHttpClient {
-   private mutationQueue: Array<{
-     mutation: FunctionReference<"mutation">;
+@@ -73,6 +183,7 @@ export class ConvexHttpClient {
+       | FunctionReference<"mutation">
+       | FunctionReference_future<"mutation">;
      args: FunctionArgs<any>;
 +    writeConflictRetryOptions: ValidatedWriteConflictRetryOptions;
      resolve: (value: any) => void;
      reject: (error: any) => void;
    }> = [];
-@@ -253,7 +364,7 @@ export class ConvexHttpClient {
+@@ -260,7 +371,7 @@ export class ConvexHttpClient {
        headers: headers,
      });
      if (!response.ok) {
@@ -495,7 +495,7 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..d8156145ccbf250c44c80f51c5b7f588
      }
      const { ts } = (await response.json()) as { ts: string };
      return ts;
-@@ -314,7 +425,7 @@ export class ConvexHttpClient {
+@@ -329,7 +440,7 @@ export class ConvexHttpClient {
        headers: headers,
      });
      if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
@@ -504,10 +504,13 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..d8156145ccbf250c44c80f51c5b7f588
      }
      const respJSON = await response.json();
  
-@@ -342,6 +453,20 @@ export class ConvexHttpClient {
-   private async mutationInner<Mutation extends FunctionReference<"mutation">>(
-     mutation: Mutation,
-     mutationArgs: FunctionArgs<Mutation>,
+@@ -358,6 +469,22 @@ export class ConvexHttpClient {
+     Mutation extends
+       | FunctionReference<"mutation">
+       | FunctionReference_future<"mutation">,
++  >(
++    mutation: Mutation,
++    mutationArgs: FunctionArgs<Mutation>,
 +    writeConflictRetryOptions: ValidatedWriteConflictRetryOptions,
 +  ): Promise<FunctionReturnType<Mutation>> {
 +    return await retryOnWriteConflict(
@@ -518,14 +521,13 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..d8156145ccbf250c44c80f51c5b7f588
 +  }
 +
 +  private async mutationInnerOnce<
-+    Mutation extends FunctionReference<"mutation">,
-+  >(
-+    mutation: Mutation,
-+    mutationArgs: FunctionArgs<Mutation>,
-   ): Promise<FunctionReturnType<Mutation>> {
-     const name = getFunctionName(mutation);
-     const body = JSON.stringify({
-@@ -366,7 +491,7 @@ export class ConvexHttpClient {
++    Mutation extends
++      | FunctionReference<"mutation">
++      | FunctionReference_future<"mutation">,
+   >(
+     mutation: Mutation,
+     mutationArgs: FunctionArgs<Mutation>,
+@@ -385,7 +512,7 @@ export class ConvexHttpClient {
        headers: headers,
      });
      if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
@@ -534,7 +536,7 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..d8156145ccbf250c44c80f51c5b7f588
      }
      const respJSON = await response.json();
      if (this.debug) {
-@@ -397,9 +522,14 @@ export class ConvexHttpClient {
+@@ -416,9 +543,14 @@ export class ConvexHttpClient {
  
      this.isProcessingQueue = true;
      while (this.mutationQueue.length > 0) {
@@ -551,8 +553,8 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..d8156145ccbf250c44c80f51c5b7f588
          resolve(result);
        } catch (error) {
          reject(error);
-@@ -411,9 +541,16 @@ export class ConvexHttpClient {
-   private enqueueMutation<Mutation extends FunctionReference<"mutation">>(
+@@ -434,9 +566,16 @@ export class ConvexHttpClient {
+   >(
      mutation: Mutation,
      args: FunctionArgs<Mutation>,
 +    writeConflictRetryOptions: ValidatedWriteConflictRetryOptions,
@@ -569,7 +571,7 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..d8156145ccbf250c44c80f51c5b7f588
        void this.processMutationQueue();
      });
    }
-@@ -434,11 +571,21 @@ export class ConvexHttpClient {
+@@ -461,11 +600,21 @@ export class ConvexHttpClient {
      const [fnArgs, options] = args;
      const mutationArgs = parseArgs(fnArgs);
      const queued = !options?.skipQueue;
@@ -593,7 +595,7 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..d8156145ccbf250c44c80f51c5b7f588
      }
    }
  
-@@ -478,7 +625,7 @@ export class ConvexHttpClient {
+@@ -509,7 +658,7 @@ export class ConvexHttpClient {
        headers: headers,
      });
      if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
@@ -602,7 +604,7 @@ index 0c0bf817aece799dae43c5ee4efc756699f4c0f6..d8156145ccbf250c44c80f51c5b7f588
      }
      const respJSON = await response.json();
      if (this.debug) {
-@@ -547,7 +694,7 @@ export class ConvexHttpClient {
+@@ -580,7 +729,7 @@ export class ConvexHttpClient {
        headers: headers,
      });
      if (!response.ok && response.status !== STATUS_CODE_UDF_FAILED) {
@@ -928,7 +930,7 @@ index 0000000000000000000000000000000000000000..9e27cce713de86ca8b74206081e3b323
 +  }
 +}
 diff --git a/src/nextjs/index.ts b/src/nextjs/index.ts
-index 6d3b7d11d47950fb1a58fd698bad193a6798b72c..b428d8bd914aacf435dd28445262b9f976cd4e13 100644
+index cd3357a8d4c3f307f82d893829f448c61da08eda..df1edcd1ccd722c9b55fcfe9a7a20ef7aa541924 100644
 --- a/src/nextjs/index.ts
 +++ b/src/nextjs/index.ts
 @@ -45,6 +45,7 @@
@@ -939,7 +941,7 @@ index 6d3b7d11d47950fb1a58fd698bad193a6798b72c..b428d8bd914aacf435dd28445262b9f9
  import { Preloaded } from "../react/index.js";
  import {
    ArgsAndOptions,
-@@ -86,6 +87,11 @@ export type NextjsOptions = {
+@@ -87,6 +88,11 @@ export type NextjsOptions = {
    skipConvexDeploymentUrlCheck?: boolean;
  };
  
@@ -951,8 +953,8 @@ index 6d3b7d11d47950fb1a58fd698bad193a6798b72c..b428d8bd914aacf435dd28445262b9f9
  /**
   * Execute a Convex query function and return a `Preloaded`
   * payload which can be passed to {@link react.usePreloadedQuery} in a Client
-@@ -156,11 +162,14 @@ export async function fetchMutation<
-   Mutation extends FunctionReference<"mutation">,
+@@ -163,11 +169,14 @@ export async function fetchMutation<
+     | FunctionReference_future<"mutation">,
  >(
    mutation: Mutation,
 -  ...args: ArgsAndOptions<Mutation, NextjsOptions>
@@ -969,7 +971,7 @@ index 6d3b7d11d47950fb1a58fd698bad193a6798b72c..b428d8bd914aacf435dd28445262b9f9
  
  /**
 diff --git a/src/react/client.ts b/src/react/client.ts
-index b71e6044d1b8037c8215f5067c13b09063bb4787..37ccee6f182ea9c4c5a616d6a99b19ba7c9783d2 100644
+index c62f1ee5115e8d16e1a4c69c56ecfe0a4f2f0762..5546234c0ce849c0279716cb4323a3835b3938f6 100644
 --- a/src/react/client.ts
 +++ b/src/react/client.ts
 @@ -18,6 +18,7 @@ import type { UserIdentityAttributes } from "../browser/sync/protocol.js";
@@ -980,7 +982,7 @@ index b71e6044d1b8037c8215f5067c13b09063bb4787..37ccee6f182ea9c4c5a616d6a99b19ba
  import {
    ArgsAndOptions,
    FunctionArgs,
-@@ -60,9 +61,12 @@ export interface ReactMutation<Mutation extends FunctionReference<"mutation">> {
+@@ -65,9 +66,12 @@ export interface ReactMutation<
     * Execute the mutation on the server, returning a `Promise` of its return value.
     *
     * @param args - Arguments for the mutation to pass up to the server.
@@ -994,7 +996,7 @@ index b71e6044d1b8037c8215f5067c13b09063bb4787..37ccee6f182ea9c4c5a616d6a99b19ba
  
    /**
     * Define an optimistic update to apply as part of this mutation.
-@@ -99,11 +103,16 @@ export function createMutation(
+@@ -106,11 +110,16 @@ export function createMutation(
    client: ConvexReactClient,
    update?: OptimisticUpdate<any>,
  ): ReactMutation<any> {
@@ -1012,7 +1014,7 @@ index b71e6044d1b8037c8215f5067c13b09063bb4787..37ccee6f182ea9c4c5a616d6a99b19ba
      });
    }
    mutation.withOptimisticUpdate = function withOptimisticUpdate(
-@@ -281,6 +290,19 @@ export interface MutationOptions<Args extends Record<string, Value>> {
+@@ -294,6 +303,19 @@ export interface MutationOptions<Args extends Record<string, Value>> {
     * Once the mutation completes, the update will be rolled back.
     */
    optimisticUpdate?: OptimisticUpdate<Args> | undefined;
@@ -1033,11 +1035,11 @@ index b71e6044d1b8037c8215f5067c13b09063bb4787..37ccee6f182ea9c4c5a616d6a99b19ba
  
  /**
 diff --git a/src/server/impl/actions_impl.ts b/src/server/impl/actions_impl.ts
-index 0b32321a4b27af74708cb59ec6c33784e1c93185..344cc3de88c5ef7eae54464f6f475eda06284537 100644
+index 620d85752aedcca42dee737f565bb30eb80a38a0..e83bb9db47b8e63e7a88ea8101baf696ebcabd25 100644
 --- a/src/server/impl/actions_impl.ts
 +++ b/src/server/impl/actions_impl.ts
-@@ -5,6 +5,12 @@ import { parseArgs } from "../../common/index.js";
- import { FunctionReference } from "../../server/api.js";
+@@ -8,6 +8,12 @@ import {
+ } from "../../server/api.js";
  import { getFunctionAddress } from "../components/paths.js";
  import { validateArg } from "./validate.js";
 +import {
@@ -1049,9 +1051,9 @@ index 0b32321a4b27af74708cb59ec6c33784e1c93185..344cc3de88c5ef7eae54464f6f475eda
  
  function syscallArgs(
    requestId: string,
-@@ -35,10 +41,18 @@ export function setupActionCalls(requestId: string) {
-     runMutation: async (
-       mutation: FunctionReference<"mutation", "public" | "internal">,
+@@ -42,10 +48,18 @@ export function setupActionCalls(requestId: string) {
+         | FunctionReference<"mutation", "public" | "internal">
+         | FunctionReference_future<"mutation", "public" | "internal">,
        args?: Record<string, Value>,
 +      options?: WriteConflictRetryOptions,
      ): Promise<any> => {
@@ -1109,10 +1111,10 @@ index 5c7adc0e17a457281cc83510d24fb72d90d0986b..b033c40d905663f20e104a5c1e248648
    const result = await invokeFunction(func, mutationCtx, args as any);
    validateReturnValue(result);
 diff --git a/src/server/registration.ts b/src/server/registration.ts
-index 5f83511b58154999df78c2ec19df50d823029819..672fe8015ef033736678665f9e1d80ab36aca06a 100644
+index e9bd6ffd0d54160702ab093c0b152f338dd02bfe..1ede4cb3ad5ec96f559f2b67987c0ac9f955bdef 100644
 --- a/src/server/registration.ts
 +++ b/src/server/registration.ts
-@@ -27,6 +27,7 @@ import {
+@@ -28,6 +28,7 @@ import {
    ObjectType,
    PropertyValidators,
  } from "../values/validator.js";
@@ -1120,7 +1122,7 @@ index 5f83511b58154999df78c2ec19df50d823029819..672fe8015ef033736678665f9e1d80ab
  import { Id } from "../values/value.js";
  import {
    GenericDataModel,
-@@ -336,6 +337,9 @@ export interface GenericActionCtx<DataModel extends GenericDataModel> {
+@@ -351,6 +352,9 @@ export interface GenericActionCtx<DataModel extends GenericDataModel> {
     *
     * Each `runMutation` call is a separate write transaction. Consider using
     * an {@link internalMutation} to prevent users from calling it directly.
@@ -1130,8 +1132,8 @@ index 5f83511b58154999df78c2ec19df50d823029819..672fe8015ef033736678665f9e1d80ab
     *
     * @example
     * ```typescript
-@@ -350,7 +354,7 @@ export interface GenericActionCtx<DataModel extends GenericDataModel> {
-     Mutation extends FunctionReference<"mutation", "public" | "internal">,
+@@ -367,7 +371,7 @@ export interface GenericActionCtx<DataModel extends GenericDataModel> {
+       | FunctionReference_future<"mutation", "public" | "internal">,
    >(
      mutation: Mutation,
 -    ...args: OptionalRestArgs<Mutation>

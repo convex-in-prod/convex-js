@@ -189,10 +189,10 @@ index d412156e3aa79d909739872b83d25ce98403b4f7..95a34d39441e6d40d5552dea07213d69
 +  );
  });
 diff --git a/src/browser/http_client.ts b/src/browser/http_client.ts
-index d8156145ccbf250c44c80f51c5b7f5888e83932a..dc53d4c0c7ec8a61713e5c701263b90cf3492d3b 100644
+index 125f8d38ac90c9b60bc7b42e9c89a6fca9e267b0..ccaaa10a040292f9deb112c0b9d9354548480f6b 100644
 --- a/src/browser/http_client.ts
 +++ b/src/browser/http_client.ts
-@@ -147,7 +147,16 @@ export function setFetch(f: typeof globalThis.fetch) {
+@@ -148,7 +148,16 @@ export function setFetch(f: typeof globalThis.fetch) {
    specifiedFetch = f;
  }
  
@@ -209,15 +209,15 @@ index d8156145ccbf250c44c80f51c5b7f5888e83932a..dc53d4c0c7ec8a61713e5c701263b90c
    /**
     * Skip the default queue of mutations and run this immediately.
     *
-@@ -181,6 +190,7 @@ export class ConvexHttpClient {
-     mutation: FunctionReference<"mutation">;
+@@ -184,6 +193,7 @@ export class ConvexHttpClient {
+       | FunctionReference_future<"mutation">;
      args: FunctionArgs<any>;
      writeConflictRetryOptions: ValidatedWriteConflictRetryOptions;
 +    priority: HttpMutationPriority;
      resolve: (value: any) => void;
      reject: (error: any) => void;
    }> = [];
-@@ -454,9 +464,10 @@ export class ConvexHttpClient {
+@@ -473,9 +483,10 @@ export class ConvexHttpClient {
      mutation: Mutation,
      mutationArgs: FunctionArgs<Mutation>,
      writeConflictRetryOptions: ValidatedWriteConflictRetryOptions,
@@ -229,7 +229,7 @@ index d8156145ccbf250c44c80f51c5b7f5888e83932a..dc53d4c0c7ec8a61713e5c701263b90c
        writeConflictRetryOptions,
        isHttpWriteConflictRetryableError,
      );
-@@ -467,12 +478,14 @@ export class ConvexHttpClient {
+@@ -488,12 +499,14 @@ export class ConvexHttpClient {
    >(
      mutation: Mutation,
      mutationArgs: FunctionArgs<Mutation>,
@@ -244,7 +244,7 @@ index d8156145ccbf250c44c80f51c5b7f5888e83932a..dc53d4c0c7ec8a61713e5c701263b90c
      });
      const headers: Record<string, string> = {
        "Content-Type": "application/json",
-@@ -522,13 +535,20 @@ export class ConvexHttpClient {
+@@ -543,13 +556,20 @@ export class ConvexHttpClient {
  
      this.isProcessingQueue = true;
      while (this.mutationQueue.length > 0) {
@@ -267,7 +267,7 @@ index d8156145ccbf250c44c80f51c5b7f5888e83932a..dc53d4c0c7ec8a61713e5c701263b90c
          );
          resolve(result);
        } catch (error) {
-@@ -542,12 +562,14 @@ export class ConvexHttpClient {
+@@ -567,12 +587,14 @@ export class ConvexHttpClient {
      mutation: Mutation,
      args: FunctionArgs<Mutation>,
      writeConflictRetryOptions: ValidatedWriteConflictRetryOptions,
@@ -282,7 +282,7 @@ index d8156145ccbf250c44c80f51c5b7f5888e83932a..dc53d4c0c7ec8a61713e5c701263b90c
          resolve,
          reject,
        });
-@@ -571,6 +593,11 @@ export class ConvexHttpClient {
+@@ -600,6 +622,11 @@ export class ConvexHttpClient {
      const [fnArgs, options] = args;
      const mutationArgs = parseArgs(fnArgs);
      const queued = !options?.skipQueue;
@@ -294,7 +294,7 @@ index d8156145ccbf250c44c80f51c5b7f5888e83932a..dc53d4c0c7ec8a61713e5c701263b90c
      const writeConflictRetryOptions =
        validateWriteConflictRetryOptions(options);
  
-@@ -579,12 +606,14 @@ export class ConvexHttpClient {
+@@ -608,12 +635,14 @@ export class ConvexHttpClient {
          mutation,
          mutationArgs,
          writeConflictRetryOptions,

@@ -118,10 +118,10 @@ index 3f4c637656f3e7969a67eaa8e22bb2b1de305ae9..99cda75e004cd62e4c27edde37a0951b
    test("serializes the workload class on the initial Connect and reconnect", async () => {
      await withInMemoryWebSocket(async ({ address, receive, close }) => {
 diff --git a/src/react/client.ts b/src/react/client.ts
-index a80c1ccd0f37cc454d0d8898a7a0c10f0df7ce63..5f46a7f2384eaa3ad9c318ead17ab02fe4203a0e 100644
+index 4abf669affce1b42b3a4a06d31d45d1c5a761018..796fc7a2a4ae55ebcb66dc7ce17b263545b24eb7 100644
 --- a/src/react/client.ts
 +++ b/src/react/client.ts
-@@ -192,9 +192,25 @@ export interface Watch<T> {
+@@ -205,9 +205,25 @@ export interface Watch<T> {
    localQueryResult(): T | undefined;
  
    /**
@@ -149,7 +149,7 @@ index a80c1ccd0f37cc454d0d8898a7a0c10f0df7ce63..5f46a7f2384eaa3ad9c318ead17ab02f
  
    /**
     * Get the current {@link browser.QueryJournal} for this query.
-@@ -551,11 +567,36 @@ export class ConvexReactClient {
+@@ -568,11 +584,36 @@ export class ConvexReactClient {
          return undefined;
        },
  

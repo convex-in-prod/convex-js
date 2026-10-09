@@ -151,7 +151,7 @@ index 0000000000000000000000000000000000000000..41704820d1c7081f8b72a42da1d2be8d
 +contract, but does not prove a global disable unless the previous image,
 +configuration, and complete application analysis establish that state.
 diff --git a/schemas/convex.schema.json b/schemas/convex.schema.json
-index 0acb473379e310693b20b7440135807bff754549..5f1ac6f36682a6ad35e810fd323439c9bbf46a06 100644
+index dbb30198a0988be01ed57ff599e6d900c967ef2d..e698611f8b9d54fd8c0d9ebbb65da3ac9082d6bb 100644
 --- a/schemas/convex.schema.json
 +++ b/schemas/convex.schema.json
 @@ -174,6 +174,34 @@
@@ -667,7 +667,7 @@ index 0000000000000000000000000000000000000000..361ef284f5fb7e7bbcebcf7b9c7ff1b3
 +  return { initializers, initializerByOutput };
 +}
 diff --git a/src/bundler/index.ts b/src/bundler/index.ts
-index 915c65a54f6f45f2b3ec459060ed60e3478684a8..4bad9c7b4a1ab2b72f35ad818d6f0be7f27ecd7f 100644
+index 9539009986ab382504b4e7bed027cc109f3d77ad..7308bdba1ef24e422f6d01ed86c1585b8a89589e 100644
 --- a/src/bundler/index.ts
 +++ b/src/bundler/index.ts
 @@ -16,6 +16,7 @@ import {
@@ -793,7 +793,7 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..4bad9c7b4a1ab2b72f35ad818d6f0be7
  }): Promise<{
    modules: Bundle[];
    externalDependencies: Map<string, string>;
-@@ -239,6 +334,74 @@ export async function bundle({
+@@ -240,6 +335,74 @@ export async function bundle({
    const sourceMaps = new Map();
    const modules: Bundle[] = [];
    const environment = platform === "node" ? "node" : "isolate";
@@ -868,7 +868,7 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..4bad9c7b4a1ab2b72f35ad818d6f0be7
    for (const outputFile of result.outputFiles) {
      const relPath = path.relative(path.normalize("out"), outputFile.path);
      if (path.extname(relPath) === ".map") {
-@@ -246,7 +409,18 @@ export async function bundle({
+@@ -247,7 +410,18 @@ export async function bundle({
        continue;
      }
      const posixRelPath = relPath.split(path.sep).join(path.posix.sep);
@@ -889,10 +889,10 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..4bad9c7b4a1ab2b72f35ad818d6f0be7
    for (const module of modules) {
      const sourceMapPath = module.path + ".map";
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index 598c6127455c29dd1286fd26f2e3c795684ccfc0..894605b3ab072194e6a8346e6b29da1c481b2f1e 100644
+index 027fb05cc59b070fdc403aac70b47f145645e624..60a4b66fabf143a087b72213cce4221f211fdf11 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
-@@ -372,6 +372,12 @@ async function startComponentsPushAndCodegen(
+@@ -379,6 +379,12 @@ async function startComponentsPushAndCodegen(
          verbose: options.verbose,
          includeSourcesContent:
            projectConfig.bundler?.includeSourcesContent ?? false,
@@ -906,7 +906,7 @@ index 598c6127455c29dd1286fd26f2e3c795684ccfc0..894605b3ab072194e6a8346e6b29da1c
      );
    if (options.debugBundlePath) {
 diff --git a/src/cli/lib/components/definition/bundle.ts b/src/cli/lib/components/definition/bundle.ts
-index 31ea965da98b8586f230e2be7caf6a78354468c5..84ca37bf654440ce18a2dbcc8d1bef38ab9e82cb 100644
+index 35629fcd05926426cac111606b91112ad1989db1..7fadaaf4c46d2ba6796b2513d4942327c6b31869 100644
 --- a/src/cli/lib/components/definition/bundle.ts
 +++ b/src/cli/lib/components/definition/bundle.ts
 @@ -626,6 +626,7 @@ export async function bundleImplementations({
@@ -929,7 +929,7 @@ index 31ea965da98b8586f230e2be7caf6a78354468c5..84ca37bf654440ce18a2dbcc8d1bef38
  }): Promise<{
    appImplementation: {
      schema: Bundle | null;
-@@ -684,6 +690,15 @@ export async function bundleImplementations({
+@@ -699,6 +705,15 @@ export async function bundleImplementations({
        platform: "browser",
        extraConditions,
        includeSourcesContent,
@@ -946,7 +946,7 @@ index 31ea965da98b8586f230e2be7caf6a78354468c5..84ca37bf654440ce18a2dbcc8d1bef38
  
      if (convexResult.externalDependencies.size !== 0) {
 diff --git a/src/cli/lib/config.ts b/src/cli/lib/config.ts
-index e8346558630246b45a16d673f9be9785e08d33f0..3c6ec0277e99f27e6726a076a855a7836caa6c5b 100644
+index bd0c325106d6cb7e970a1f97581126e4b4ce7c13..0a4672e361cc2b7d1ef4b52fa4148338ced49ca6 100644
 --- a/src/cli/lib/config.ts
 +++ b/src/cli/lib/config.ts
 @@ -95,6 +95,11 @@ export interface ProjectConfig {

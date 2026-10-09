@@ -179,7 +179,7 @@ index 0000000000000000000000000000000000000000..5506beb91a83daf7d34c9dd7baa25a20
 +  });
 +});
 diff --git a/src/bundler/index.ts b/src/bundler/index.ts
-index 4bad9c7b4a1ab2b72f35ad818d6f0be7f27ecd7f..3ac1721a9bea31089ff62023d6d1a2cf2a39c3b3 100644
+index 7308bdba1ef24e422f6d01ed86c1585b8a89589e..d110aed890c2e04fc1ddbc34e0da3fa030574391 100644
 --- a/src/bundler/index.ts
 +++ b/src/bundler/index.ts
 @@ -47,19 +47,21 @@ export function* walkDir(
@@ -221,7 +221,7 @@ index 4bad9c7b4a1ab2b72f35ad818d6f0be7f27ecd7f..3ac1721a9bea31089ff62023d6d1a2cf
  }): Promise<{
    modules: Bundle[];
    externalDependencies: Map<string, string>;
-@@ -334,6 +338,13 @@ export async function bundle({
+@@ -335,6 +339,13 @@ export async function bundle({
    const sourceMaps = new Map();
    const modules: Bundle[] = [];
    const environment = platform === "node" ? "node" : "isolate";
@@ -235,7 +235,7 @@ index 4bad9c7b4a1ab2b72f35ad818d6f0be7f27ecd7f..3ac1721a9bea31089ff62023d6d1a2cf
    const contextReuseOutputPolicy = new Map<string, ContextReuseOutputPolicy>();
    if (experimentalContextReuse !== undefined) {
      const unmatchedExcludedEntries = new Set(
-@@ -420,7 +431,33 @@ export async function bundle({
+@@ -421,7 +432,33 @@ export async function bundle({
          contextReusePolicy,
        );
      }
@@ -270,7 +270,7 @@ index 4bad9c7b4a1ab2b72f35ad818d6f0be7f27ecd7f..3ac1721a9bea31089ff62023d6d1a2cf
    }
    for (const module of modules) {
      const sourceMapPath = module.path + ".map";
-@@ -673,13 +710,16 @@ export async function entryPoints(
+@@ -678,13 +715,16 @@ export async function entryPoints(
  
  // A fallback regex in case we fail to parse the AST.
  export const useNodeDirectiveRegex = /^\s*("|')use node("|');?\s*$/;
@@ -289,7 +289,7 @@ index 4bad9c7b4a1ab2b72f35ad818d6f0be7f27ecd7f..3ac1721a9bea31089ff62023d6d1a2cf
    }
  
    // We parse the AST here to extract the "use node" declaration. This is more
-@@ -693,27 +733,26 @@ function hasUseNodeDirective(ctx: Context, fpath: string): boolean {
+@@ -698,27 +738,26 @@ function hasUseNodeDirective(ctx: Context, fpath: string): boolean {
        // here too.
        plugins: ["jsx", "typescript"],
      });
@@ -326,7 +326,7 @@ index 4bad9c7b4a1ab2b72f35ad818d6f0be7f27ecd7f..3ac1721a9bea31089ff62023d6d1a2cf
    }
  }
  
-@@ -731,7 +770,41 @@ async function determineEnvironment(
+@@ -736,7 +775,41 @@ async function determineEnvironment(
  ): Promise<ModuleEnvironment> {
    const relPath = path.relative(dir, fpath);
  
@@ -369,7 +369,7 @@ index 4bad9c7b4a1ab2b72f35ad818d6f0be7f27ecd7f..3ac1721a9bea31089ff62023d6d1a2cf
    if (useNodeDirectiveFound) {
      if (mustBeIsolate(relPath)) {
        return await ctx.crash({
-@@ -740,7 +813,7 @@ async function determineEnvironment(
+@@ -745,7 +818,7 @@ async function determineEnvironment(
          printedMessage: `"use node" directive is not allowed for ${relPath}.`,
        });
      }
@@ -378,7 +378,7 @@ index 4bad9c7b4a1ab2b72f35ad818d6f0be7f27ecd7f..3ac1721a9bea31089ff62023d6d1a2cf
    }
  
    const actionsPrefix = actionsDir + path.sep;
-@@ -758,14 +831,18 @@ async function determineEnvironment(
+@@ -763,14 +836,18 @@ async function determineEnvironment(
  export async function entryPointsByEnvironment(ctx: Context, dir: string) {
    const isolate = [];
    const node = [];
@@ -400,27 +400,27 @@ index 4bad9c7b4a1ab2b72f35ad818d6f0be7f27ecd7f..3ac1721a9bea31089ff62023d6d1a2cf
 +  return { isolate, node, nodePools };
  }
 diff --git a/src/cli/deploy.ts b/src/cli/deploy.ts
-index aa6f3d863f0ea179d87508ee4e69e41aac5ad9ae..00d79dda73af68ffe32d610c113ecb5c4eb5f4d5 100644
+index c4a72af5a0c7ce94926e9cc001471acd2b72c53f..a290ba4bd527082a6de22ee109575a8b032455aa 100644
 --- a/src/cli/deploy.ts
 +++ b/src/cli/deploy.ts
-@@ -238,6 +238,7 @@ async function deployToNewPreviewDeployment(
-     debugBundlePath?: string | undefined;
+@@ -248,6 +248,7 @@ async function deployToNewPreviewDeployment(
      skipWorkosCheck?: boolean | undefined;
+     skipLargeIndexesCheck: boolean;
      message: string | null;
 +    forceNodeCutover?: boolean | undefined;
    },
  ) {
    const previewName = options.previewName ?? null;
-@@ -335,6 +336,7 @@ async function deployToNewPreviewDeployment(
-     largeIndexDeletionCheck: "no verification", // fine for preview deployments
+@@ -353,6 +354,7 @@ async function deployToNewPreviewDeployment(
+         : "ask for confirmation",
      warnOnSlowSchemaValidation: true,
      message: options.message,
 +    forceNodeCutover: !!options.forceNodeCutover,
    };
    showSpinner(`Deploying to ${previewUrl}...`);
    await runPush(ctx, pushOptions);
-@@ -380,6 +382,7 @@ async function deployToExistingDeployment(
-     skipWorkosCheck?: boolean | undefined;
+@@ -399,6 +401,7 @@ async function deployToExistingDeployment(
+     skipLargeIndexesCheck: boolean;
      allowDeletingLargeIndexes: boolean;
      message: string | null;
 +    forceNodeCutover?: boolean | undefined;
@@ -451,10 +451,10 @@ index 8da9f8ee16b46e58d25bce70e39cd1212e7e51bb..8d3a248837e3fe2bc7e941dda6d46945
        new Option(
          "-y, --yes",
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index 894605b3ab072194e6a8346e6b29da1c481b2f1e..0a7dba27d9abac4946d8e8f95ee53ef35b2b069c 100644
+index 60a4b66fabf143a087b72213cce4221f211fdf11..0a9730fa215d41fad6db5bfead88b632ed4260bf 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
-@@ -81,6 +81,7 @@ export type PushOptions = {
+@@ -87,6 +87,7 @@ export type PushOptions = {
    // runs never deploy (e.g. codegen).
    warnOnSlowSchemaValidation: boolean;
    message: string | null;
@@ -462,7 +462,7 @@ index 894605b3ab072194e6a8346e6b29da1c481b2f1e..0a7dba27d9abac4946d8e8f95ee53ef3
  };
  
  export async function runCodegen(
-@@ -155,6 +156,7 @@ export function hash(bundle: Bundle) {
+@@ -161,6 +162,7 @@ export function hash(bundle: Bundle) {
  function isModuleTheSame(newBundle: Bundle, oldBundleHash: BundleHash) {
    return (
      newBundle.environment === oldBundleHash.environment &&
@@ -470,7 +470,7 @@ index 894605b3ab072194e6a8346e6b29da1c481b2f1e..0a7dba27d9abac4946d8e8f95ee53ef3
      hash(newBundle) === oldBundleHash.hash
    );
  }
-@@ -175,6 +177,7 @@ export function partitionModulesByChanges(
+@@ -181,6 +183,7 @@ export function partitionModulesByChanges(
      .map((func) => ({
        path: func.path,
        environment: func.environment,
@@ -478,15 +478,15 @@ index 894605b3ab072194e6a8346e6b29da1c481b2f1e..0a7dba27d9abac4946d8e8f95ee53ef3
        sha256: hash(func),
      }));
    const changedModules = functions.filter((newBundle) => {
-@@ -236,6 +239,7 @@ async function startComponentsPushAndCodegen(
-     largeIndexDeletionCheck: LargeIndexDeletionCheck;
+@@ -243,6 +246,7 @@ async function startComponentsPushAndCodegen(
+     largeIndexBackfillCheck: LargeIndexBackfillCheck;
      warnOnSlowSchemaValidation: boolean;
      codegenOnlyThisComponent?: string | undefined;
 +    forceNodeCutover?: boolean | undefined;
    },
  ): Promise<StartPushResponse | null> {
    const convexDir = await getFunctionsDirectoryPath(ctx);
-@@ -486,6 +490,22 @@ async function startComponentsPushAndCodegen(
+@@ -508,6 +512,22 @@ async function startComponentsPushAndCodegen(
      startPush(ctx, span, startPushRequest, options),
    );
  
@@ -509,7 +509,7 @@ index 894605b3ab072194e6a8346e6b29da1c481b2f1e..0a7dba27d9abac4946d8e8f95ee53ef3
    if (options.verbose) {
      logMessage("startPush: " + JSON.stringify(startPushResponse, null, 2));
    }
-@@ -581,7 +601,10 @@ function logStartPushSizes(span: Span, startPushRequest: StartPushRequest) {
+@@ -603,7 +623,10 @@ function logStartPushSizes(span: Span, startPushRequest: StartPushRequest) {
        if (module.environment === "isolate") {
          v8Size += module.source.length + (module.sourceMap ?? "").length;
          v8Count += 1;
@@ -522,10 +522,10 @@ index 894605b3ab072194e6a8346e6b29da1c481b2f1e..0a7dba27d9abac4946d8e8f95ee53ef3
          nodeCount += 1;
        }
 diff --git a/src/cli/lib/components/definition/bundle.ts b/src/cli/lib/components/definition/bundle.ts
-index 84ca37bf654440ce18a2dbcc8d1bef38ab9e82cb..7ded319d58dac723d5815ca623d98490790438ef 100644
+index 7fadaaf4c46d2ba6796b2513d4942327c6b31869..973f141f6b7567533e8e0e59277cb35c41862690 100644
 --- a/src/cli/lib/components/definition/bundle.ts
 +++ b/src/cli/lib/components/definition/bundle.ts
-@@ -721,6 +721,7 @@ export async function bundleImplementations({
+@@ -740,6 +740,7 @@ export async function bundleImplementations({
          ctx,
          dir: resolvedPath,
          entryPoints: entryPoints.node,
@@ -533,7 +533,7 @@ index 84ca37bf654440ce18a2dbcc8d1bef38ab9e82cb..7ded319d58dac723d5815ca623d98490
          generateSourceMaps: true,
          platform: "node",
          chunksFolder: path.join("_deps", "node"),
-@@ -756,6 +757,7 @@ export async function bundleImplementations({
+@@ -783,6 +784,7 @@ export async function bundleImplementations({
            ctx,
            dir: resolvedPath,
            entryPoints: entryPoints.node,
@@ -542,7 +542,7 @@ index 84ca37bf654440ce18a2dbcc8d1bef38ab9e82cb..7ded319d58dac723d5815ca623d98490
            platform: "node",
            chunksFolder: path.join("_deps", "node"),
 diff --git a/src/cli/lib/config.ts b/src/cli/lib/config.ts
-index 3c6ec0277e99f27e6726a076a855a7836caa6c5b..425ffea3050498b98808233ca7db5cccc8d5c21e 100644
+index 0a4672e361cc2b7d1ef4b52fa4148338ced49ca6..4bd8b609cda308647c595ce69762b91bbeea5cdc 100644
 --- a/src/cli/lib/config.ts
 +++ b/src/cli/lib/config.ts
 @@ -702,6 +702,7 @@ export async function configFromProjectConfig(
@@ -554,7 +554,7 @@ index 3c6ec0277e99f27e6726a076a855a7836caa6c5b..425ffea3050498b98808233ca7db5ccc
      platform: "node",
      chunksFolder: path.join("_deps", "node"),
 diff --git a/src/cli/lib/deploy2.ts b/src/cli/lib/deploy2.ts
-index d275b0b8e2bb89671ec3a7c42f7e7ea4175f3a32..5e89501e7900116935f193b8b8ce08095ebc87fd 100644
+index 6a77081b1a1d327bc8fda92ba65c2d44a2697661..9dccc15fa8c48dd93b5dc3e1b8c5520a5546596a 100644
 --- a/src/cli/lib/deploy2.ts
 +++ b/src/cli/lib/deploy2.ts
 @@ -11,6 +11,7 @@ import { spawnSync } from "child_process";
@@ -600,15 +600,15 @@ index d275b0b8e2bb89671ec3a7c42f7e7ea4175f3a32..5e89501e7900116935f193b8b8ce0809
      return await handlePushConfigError(
        ctx,
        error,
-@@ -459,6 +474,7 @@ export async function deployToDeployment(
-     skipWorkosCheck?: boolean | undefined;
+@@ -460,6 +475,7 @@ export async function deployToDeployment(
+     skipLargeIndexesCheck: boolean;
      allowDeletingLargeIndexes: boolean;
      message: string | null;
 +    forceNodeCutover?: boolean | undefined;
    },
  ) {
    const { url, adminKey } = credentials;
-@@ -509,6 +525,7 @@ export async function deployToDeployment(
+@@ -514,6 +530,7 @@ export async function deployToDeployment(
        : "ask for confirmation",
      warnOnSlowSchemaValidation: true,
      message: options.message,
@@ -722,7 +722,7 @@ index 0d4d050161165366badcdf343bb2556ae78435fc..7e9a9e4c7b69eca4a581e57b5bf294c4
  export type StartPushResponse = z.infer<typeof startPushResponse>;
  
 diff --git a/src/cli/lib/dev.ts b/src/cli/lib/dev.ts
-index ff0421a339f72b1df3d893f12600bf52e3f8f465..6e0cdc1a060308554a6762f5c64c887917b2d24b 100644
+index a049abe7f409c8e60eaf890673232b7f35b68f3e..1b796c7ce570dcfac5ff0f3a4449ca374c441f32 100644
 --- a/src/cli/lib/dev.ts
 +++ b/src/cli/lib/dev.ts
 @@ -138,6 +138,7 @@ export async function devAgainstDeployment(
@@ -734,7 +734,7 @@ index ff0421a339f72b1df3d893f12600bf52e3f8f465..6e0cdc1a060308554a6762f5c64c8879
          typecheckComponents: devOptions.typecheckComponents,
          debug: false,
 diff --git a/src/cli/lib/run.ts b/src/cli/lib/run.ts
-index b4e770c4131a561b53d8675b5ab57e1b1ec593cd..477bd93fa73f3c6962932d8df8ca6a1811f34b89 100644
+index 9fd16b3db87682155ebc924a826346303b6a30bf..1e6abf9edd26de003881a971950bdcd85bb7407d 100644
 --- a/src/cli/lib/run.ts
 +++ b/src/cli/lib/run.ts
 @@ -527,6 +527,7 @@ export async function pushToDeployment(
@@ -746,13 +746,13 @@ index b4e770c4131a561b53d8675b5ab57e1b1ec593cd..477bd93fa73f3c6962932d8df8ca6a18
        typecheckComponents: args.typecheckComponents,
        debug: false,
 diff --git a/src/server/index.ts b/src/server/index.ts
-index 04cb3c4bb9aaeace8921736f5e83c475dc74a5fa..4b76617d85f551875d0fb533815f5d056d8d76f5 100644
+index 1ceccc0c20a689c9a15f89e3672fac5adb1ca3f8..d9c048bc929a8fb7a98fdff6bff03a9597847ce5 100644
 --- a/src/server/index.ts
 +++ b/src/server/index.ts
-@@ -104,6 +104,12 @@ export {
-   internalQueryGeneric,
- } from "./impl/registration_impl.js";
- export { getServiceToken } from "./impl/actions_impl.js";
+@@ -108,6 +108,12 @@ export {
+   getServiceUrl,
+   type ServiceName,
+ } from "./impl/actions_impl.js";
 +export {
 +  onNodePoolRetirement,
 +  type NodePoolRetirementDeadline,
