@@ -18,24 +18,36 @@ Leave imported components, Node modules, schema bundles, and auth
 configuration bundles unchanged. Document the backend compatibility
 contract and cover boolean and typed marker insertion, exclusions,
 conflicts, and stale exclusion paths.
+
+Under the same opt-in, group forwarding-only entries with identical ordered
+static chunk imports. Emit a fixed initializer importing all members and carry
+its canonical dependency path in the typed policy. Supporting backends share
+the database context and validate every member; older typed-policy backends
+retain per-entry reuse, and boolean-only backends run grouped entries fresh.
+
+Keep actions, HTTP action keys, exclusions, and source-policy ownership intact.
+Bind group identity to member contents and dependencies, fit generated paths
+within the backend component limit, and exercise the emitted ESM graph.
 ---
- .../default_database_context_reuse/README.md  |  70 ++++++
- schemas/convex.schema.json                    |  28 +++
- src/bundler/contextReuse.test.ts              | 212 ++++++++++++++++++
- src/bundler/index.ts                          | 147 +++++++++++-
+ .../default_database_context_reuse/README.md  | 102 ++++++
+ schemas/convex.schema.json                    |  28 ++
+ src/bundler/contextReuse.test.ts              | 339 ++++++++++++++++++
+ src/bundler/contextReuseGroups.ts             | 126 +++++++
+ src/bundler/index.ts                          | 176 ++++++++-
  src/cli/lib/components.ts                     |   6 +
- src/cli/lib/components/definition/bundle.ts   |  15 ++
- src/cli/lib/config.ts                         |  51 +++++
- 7 files changed, 528 insertions(+), 1 deletion(-)
+ src/cli/lib/components/definition/bundle.ts   |  15 +
+ src/cli/lib/config.ts                         |  51 +++
+ 8 files changed, 842 insertions(+), 1 deletion(-)
  create mode 100644 patches/default_database_context_reuse/README.md
  create mode 100644 src/bundler/contextReuse.test.ts
+ create mode 100644 src/bundler/contextReuseGroups.ts
 
 diff --git a/patches/default_database_context_reuse/README.md b/patches/default_database_context_reuse/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..2cc8d9e53ff23622038ad54a84d3df9b6be586ab
+index 0000000000000000000000000000000000000000..41704820d1c7081f8b72a42da1d2be8dffbf8233
 --- /dev/null
 +++ b/patches/default_database_context_reuse/README.md
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,102 @@
 +# Default context reuse during bundling
 +
 +## Purpose
@@ -62,11 +74,12 @@ index 0000000000000000000000000000000000000000..2cc8d9e53ff23622038ad54a84d3df9b
 +}
 +```
 +
-+When `httpActions` is absent or false, the isolate bundler adds the ordinary
-+upstream `experimental_reuseContext = true` export to every root-application
-+isolate entry output except the listed paths. When `httpActions` is true, it
-+instead emits one typed policy that enables queries, mutations, and HTTP actions
-+while leaving ordinary actions disabled. Paths are relative to the configured
++For entries without a shared initialization group, when `httpActions` is absent
++or false, the isolate bundler adds the ordinary upstream
++`experimental_reuseContext = true` export to every root-application isolate
++entry output except the listed paths. When `httpActions` is true, it instead
++emits one typed policy that enables queries, mutations, and HTTP actions while
++leaving ordinary actions disabled. Paths are relative to the configured
 +functions directory. Imported Convex components retain their own source policy.
 +The backend receives no application module allowlist. Node entry modules, schema
 +bundles, and auth configuration bundles are unchanged.
@@ -78,21 +91,52 @@ index 0000000000000000000000000000000000000000..2cc8d9e53ff23622038ad54a84d3df9b
 +graph before enabling the default. The CLI setting is not a substitute for that
 +source and emitted-bundle review.
 +
++## Shared initialization groups
++
++Under the same opt-in, the bundler groups enabled entry outputs that contain
++only imports and re-exports and have exactly the same ordered static imports of
++emitted non-entry chunks. Entries with local initialization, directives,
++external or dynamic imports, or different import order keep their existing
++per-entry policy. Excluded entries never join a group. This does not introduce
++manual group lists or approximate dependency matching.
++
++For each group of at least two entries, the bundler emits a
++`_deps/context_init_<hash>.js` module that statically imports every member. It
++is emitted after bundling so those entry dependencies remain visible to backend
++read-set capture. Membership, member contents and dependency identities
++determine the hash. Each member receives a typed reuse policy with
++`initializationModule` pointing to that path; query/mutation reuse and the
++configured HTTP permission remain unchanged, and ordinary actions remain
++disabled.
++
++A supporting backend uses this root for database cache identity and cold
++initialization. It loads all members before the first handler runs and validates
++the complete initialization read set on reuse, including entries not previously
++called. It never adds a member on a warm hit. Invocation still uses the
++requested function and fresh request state. Actions and HTTP actions keep
++per-entry keys. The shared chunks would already be initialized by each member
++independently; grouping avoids retaining duplicate copies of that graph merely
++because the forwarding entry differs.
++
 +## Compatibility and safety
 +
 +The setting is absent by default, preserving upstream explicit opt-in behavior.
-+`httpActions` separately defaults to false, so existing users continue to emit
-+the upstream boolean marker. Enabling it requires a backend that accepts typed
-+context-reuse policy; an ordinary upstream backend does not interpret the typed
-+object as an opt-in. When the setting is enabled, entry source files must not
-+also export `experimental_reuseContext`; one authority owns the emitted marker
-+so source and bundle policy cannot silently disagree.
++`httpActions` separately defaults to false. Grouped entries always emit a typed
++policy; other entries still emit the upstream boolean marker unless HTTP reuse
++is enabled. Older backends with typed-policy support ignore
++`initializationModule` and keep per-entry reuse. Ordinary upstream backends do
++not interpret a typed object as an opt-in and run those entries fresh. Backend
++grouping support must precede the new CLI output to obtain shared contexts. When
++the setting is enabled, entry source files must not also export
++`experimental_reuseContext`; one authority owns the emitted marker so source and
++bundle policy cannot silently disagree.
 +
-+The patch changes only module analysis input. Reuse remains opportunistic and
-+all backend eligibility, UDF-type, cancellation, read-set validation, cache, and
-+memory-pressure rules continue to apply. An exclusion simply leaves the upstream
-+export absent, so the entry executes fresh on both patched and ordinary
-+backends.
++The patch adds policy exports and, for grouped entries, an executable
++initializer to the deployed graph. Reuse remains opportunistic and all backend
++eligibility, UDF-type, cancellation, read-set validation, cache, and
++memory-pressure rules continue to apply. An exclusion leaves the policy export
++absent and removes the entry from any generated group, so the entry executes
++fresh on both patched and ordinary backends.
 +
 +## Rollback
 +
@@ -147,13 +191,16 @@ index 0acb473379e310693b20b7440135807bff754549..5f1ac6f36682a6ad35e810fd323439c9
      },
 diff --git a/src/bundler/contextReuse.test.ts b/src/bundler/contextReuse.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..30a340f6e1587371d6ab826c242f237fa7a66d1c
+index 0000000000000000000000000000000000000000..339afb7d6a5c5995b87b1c7d1050819b1f621ae9
 --- /dev/null
 +++ b/src/bundler/contextReuse.test.ts
-@@ -0,0 +1,212 @@
-+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+@@ -0,0 +1,339 @@
++import { execFile } from "node:child_process";
++import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 +import { tmpdir } from "node:os";
 +import path from "node:path";
++import { pathToFileURL } from "node:url";
++import { promisify } from "node:util";
 +import { describe, expect, test } from "vitest";
 +import { hash, partitionModulesByChanges } from "../cli/lib/components.js";
 +import type { Context } from "./context.js";
@@ -362,12 +409,276 @@ index 0000000000000000000000000000000000000000..30a340f6e1587371d6ab826c242f237f
 +      await rm(rootDir, { force: true, recursive: true });
 +    }
 +  });
++
++  test("initializes equivalent forwarding entries together and preserves their exports", async () => {
++    const rootDir = await mkdtemp(path.join(tmpdir(), "convex-context-group-"));
++    try {
++      await Promise.all([
++        writeFile(
++          path.join(rootDir, "shared.ts"),
++          `
++          globalThis.loads = (globalThis.loads ?? 0) + 1;
++          export const first = (arg) => ["first", arg, globalThis.loads];
++          export const second = (arg) => ["second", arg, globalThis.loads];
++          export const third = () => "third";
++        `,
++        ),
++        ...["first", "second", "third"].map((name) =>
++          writeFile(
++            path.join(rootDir, `${name}.ts`),
++            `export { ${name} as run } from "./shared";`,
++          ),
++        ),
++        writeFile(
++          path.join(rootDir, "local.ts"),
++          `
++          import { first } from "./shared";
++          export const run = first(Date.now());
++        `,
++        ),
++      ]);
++      const options = {
++        ctx: testContext,
++        dir: rootDir,
++        entryPoints: ["first", "second", "third", "local"].map((name) =>
++          path.join(rootDir, `${name}.ts`),
++        ),
++        generateSourceMaps: true,
++        platform: "browser" as const,
++      };
++      const full = await bundle({
++        ...options,
++        experimentalContextReuse: {
++          rootDir,
++          exclusions: {},
++          httpActions: true,
++        },
++      });
++      const initializer = full.modules.find((m) =>
++        m.path.includes("context_init_"),
++      );
++      expect(initializer).toBeDefined();
++      // Backend module paths limit each component, including `.js`, to 64 bytes.
++      expect(
++        Buffer.byteLength(path.posix.basename(initializer!.path)),
++      ).toBeLessThanOrEqual(64);
++      expect(initializer!.source).not.toContain("local.js");
++      expect(
++        full.modules.find((m) => m.path === "local.js")!.source,
++      ).not.toContain("initializationModule");
++
++      // Execute the deployed ESM graph, including the unbundled initializer.
++      // A text-only assertion would miss broken relative imports or exports.
++      const deployed = path.join(rootDir, "deployed");
++      await mkdir(deployed);
++      await writeFile(path.join(deployed, "package.json"), '{"type":"module"}');
++      await Promise.all(
++        full.modules.map(async (m) => {
++          const target = path.join(deployed, m.path);
++          await mkdir(path.dirname(target), { recursive: true });
++          await writeFile(target, m.source);
++        }),
++      );
++      const url = (name: string) =>
++        JSON.stringify(pathToFileURL(path.join(deployed, name)).href);
++      const { stdout } = await promisify(execFile)(process.execPath, [
++        "--input-type=module",
++        "-e",
++        `
++          await import(${url(initializer!.path)});
++          const first = await import(${url("first.js")});
++          const second = await import(${url("second.js")});
++          console.log(JSON.stringify({
++            results: [first.run(10), second.run(20)],
++            policies: [first.experimental_reuseContext, second.experimental_reuseContext],
++          }));
++        `,
++      ]);
++      expect(JSON.parse(stdout)).toEqual({
++        results: [
++          ["first", 10, 1],
++          ["second", 20, 1],
++        ],
++        policies: [0, 1].map(() => ({
++          queries: true,
++          mutations: true,
++          actions: false,
++          httpActions: true,
++          initializationModule: initializer!.path,
++        })),
++      });
++
++      const excluded = await bundle({
++        ...options,
++        experimentalContextReuse: {
++          rootDir,
++          exclusions: { "third.ts": "Keep this entry fresh." },
++          httpActions: true,
++        },
++      });
++      const smaller = excluded.modules.find((m) =>
++        m.path.includes("context_init_"),
++      )!;
++      expect(smaller.path).not.toBe(initializer!.path);
++      expect(smaller.source).not.toContain("third.js");
++      expect(
++        excluded.modules.find((m) => m.path === "third.js")!.source,
++      ).not.toContain("experimental_reuseContext");
++
++      const disabled = await bundle(options);
++      expect(
++        disabled.modules.some((m) => m.path.includes("context_init_")),
++      ).toBe(false);
++    } finally {
++      await rm(rootDir, { recursive: true, force: true });
++    }
++  });
 +});
+diff --git a/src/bundler/contextReuseGroups.ts b/src/bundler/contextReuseGroups.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..361ef284f5fb7e7bbcebcf7b9c7ff1b36e14acf0
+--- /dev/null
++++ b/src/bundler/contextReuseGroups.ts
+@@ -0,0 +1,126 @@
++import { createHash } from "node:crypto";
++import path from "node:path";
++import { parse } from "@babel/parser";
++import type { Metafile, OutputFile } from "esbuild";
++import type { Context } from "./context.js";
++
++/** Find forwarding entries whose initialization executes the same ordered imports. */
++export async function contextReuseGroups(
++  ctx: Context,
++  outputFiles: OutputFile[],
++  metafile: Metafile,
++  includedOutputs: ReadonlySet<string>,
++  chunksFolder: string,
++): Promise<{
++  initializers: { path: string; source: string }[];
++  initializerByOutput: Map<string, string>;
++}> {
++  const groups = new Map<string, { path: string; source: string }[]>();
++  for (const file of outputFiles) {
++    if (!includedOutputs.has(file.path)) continue;
++    const outputPath = path
++      .relative(process.cwd(), file.path)
++      .split(path.sep)
++      .join("/");
++    const output = metafile.outputs[outputPath];
++    if (
++      output === undefined ||
++      output.imports.length === 0 ||
++      output.imports.some(
++        (dependency) =>
++          dependency.external ||
++          dependency.kind !== "import-statement" ||
++          metafile.outputs[dependency.path] === undefined ||
++          metafile.outputs[dependency.path].entryPoint !== undefined,
++      )
++    )
++      continue;
++
++    const ast = parse(file.text, { sourceType: "module" });
++    // Equal dependency sets alone are insufficient: entry-local initialization
++    // and a different import order can change observable module state.
++    if (
++      ast.program.directives.length !== 0 ||
++      !ast.program.body.every(
++        (statement) =>
++          statement.type === "ImportDeclaration" ||
++          statement.type === "ExportAllDeclaration" ||
++          (statement.type === "ExportNamedDeclaration" &&
++            statement.declaration === null) ||
++          statement.type === "EmptyStatement",
++      )
++    )
++      continue;
++
++    // Read evaluation order from emitted syntax, rather than depending on the
++    // metafile's bookkeeping order. Resolve relative paths so nested entries
++    // can share the same group as root entries.
++    const imports = ast.program.body.flatMap((statement) =>
++      "source" in statement && statement.source
++        ? [
++            path.posix.normalize(
++              path.posix.join(
++                path.posix.dirname(outputPath),
++                statement.source.value,
++              ),
++            ),
++          ]
++        : [],
++    );
++    const signature = JSON.stringify(imports);
++    const members = groups.get(signature) ?? [];
++    members.push({
++      path: path.relative("out", file.path).split(path.sep).join("/"),
++      source: file.text,
++    });
++    groups.set(signature, members);
++  }
++
++  const initializers: { path: string; source: string }[] = [];
++  const initializerByOutput = new Map<string, string>();
++  for (const [imports, members] of groups) {
++    if (members.length < 2) continue;
++    members.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
++    // Membership, entry contents, and dependency identities all participate.
++    // An exclusion or a changed bundle must not retain the former group key.
++    // Leave room for the prefix and `.js` within the backend's 64-byte path
++    // component limit. The 48 hex characters retain 192 bits of the digest.
++    const hash = createHash("sha256")
++      .update(JSON.stringify([imports, members]))
++      .digest("hex")
++      .slice(0, 48);
++    const initializerPath = path.posix.join(
++      chunksFolder.split(path.sep).join("/"),
++      `context_init_${hash}.js`,
++    );
++    if (
++      metafile.outputs[path.posix.join("out", initializerPath)] !== undefined
++    ) {
++      return await ctx.crash({
++        exitCode: 1,
++        errorType: "invalid filesystem data",
++        printedMessage: `Context initialization module collides with bundled output: ${initializerPath}`,
++      });
++    }
++    const source = members
++      .map((member) => {
++        const relativePath = path.posix.relative(
++          path.posix.dirname(initializerPath),
++          member.path,
++        );
++        const specifier = relativePath.startsWith(".")
++          ? relativePath
++          : `./${relativePath}`;
++        initializerByOutput.set(
++          path.resolve("out", member.path),
++          initializerPath,
++        );
++        return `import ${JSON.stringify(specifier)};\n`;
++      })
++      .join("");
++    // Do not rebundle this module: the entry imports must remain in the deployed
++    // graph so the backend captures every member in its initialization read set.
++    initializers.push({ path: initializerPath, source });
++  }
++  return { initializers, initializerByOutput };
++}
 diff --git a/src/bundler/index.ts b/src/bundler/index.ts
-index 915c65a54f6f45f2b3ec459060ed60e3478684a8..b8f1317c68b38cc3b06c47da0664e2e7463d0328 100644
+index 915c65a54f6f45f2b3ec459060ed60e3478684a8..4bad9c7b4a1ab2b72f35ad818d6f0be7f27ecd7f 100644
 --- a/src/bundler/index.ts
 +++ b/src/bundler/index.ts
-@@ -69,6 +69,93 @@ type EsBuildResult = esbuild.BuildResult & {
+@@ -16,6 +16,7 @@ import {
+   findExactVersionAndDependencies,
+ } from "./external.js";
+ import { innerEsbuild, isEsbuildBuildError } from "./debugBundle.js";
++import { contextReuseGroups } from "./contextReuseGroups.js";
+ export { nodeFs, RecordingFs } from "./fs.js";
+ export type { Filesystem } from "./fs.js";
+ 
+@@ -69,6 +70,98 @@ type EsBuildResult = esbuild.BuildResult & {
    bundledModuleNames: Set<string>;
  };
  
@@ -387,6 +698,8 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..b8f1317c68b38cc3b06c47da0664e2e7
 +  enabled: boolean;
 +  httpActions: boolean;
 +  entry: string;
++  // Absent for entries that retain the existing per-module reuse contract.
++  initializationModule?: string;
 +};
 +
 +function exportedName(identifier: Identifier | { value: string }): string {
@@ -441,9 +754,12 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..b8f1317c68b38cc3b06c47da0664e2e7
 +    return source;
 +  }
 +
-+  const contextReuseExport = policy.httpActions
-+    ? defaultDatabaseAndHttpActionContextReuseExport
-+    : defaultDatabaseContextReuseExport;
++  const contextReuseExport =
++    policy.initializationModule !== undefined
++      ? `export const experimental_reuseContext = { queries: true, mutations: true, actions: false, httpActions: ${policy.httpActions}, initializationModule: ${JSON.stringify(policy.initializationModule)} };\n`
++      : policy.httpActions
++        ? defaultDatabaseAndHttpActionContextReuseExport
++        : defaultDatabaseContextReuseExport;
 +  const sourceMapComment = source.match(/\/\/# sourceMappingURL=[^\n]*\n?$/u);
 +  if (sourceMapComment === null || sourceMapComment.index === undefined) {
 +    return `${source.endsWith("\n") ? source : `${source}\n`}${contextReuseExport}`;
@@ -461,7 +777,7 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..b8f1317c68b38cc3b06c47da0664e2e7
  async function doEsbuild({
    ctx,
    dir,
-@@ -190,6 +277,7 @@ export async function bundle({
+@@ -190,6 +283,7 @@ export async function bundle({
    extraConditions = [],
    includeSourcesContent = false,
    splitting,
@@ -469,7 +785,7 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..b8f1317c68b38cc3b06c47da0664e2e7
  }: {
    ctx: Context;
    dir: string;
-@@ -201,6 +289,7 @@ export async function bundle({
+@@ -201,6 +295,7 @@ export async function bundle({
    extraConditions?: string[];
    includeSourcesContent?: boolean;
    splitting?: boolean;
@@ -477,7 +793,7 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..b8f1317c68b38cc3b06c47da0664e2e7
  }): Promise<{
    modules: Bundle[];
    externalDependencies: Map<string, string>;
-@@ -239,6 +328,51 @@ export async function bundle({
+@@ -239,6 +334,74 @@ export async function bundle({
    const sourceMaps = new Map();
    const modules: Bundle[] = [];
    const environment = platform === "node" ? "node" : "isolate";
@@ -526,10 +842,33 @@ index 915c65a54f6f45f2b3ec459060ed60e3478684a8..b8f1317c68b38cc3b06c47da0664e2e7
 +      }
 +    }
 +  }
++  if (platform === "browser" && experimentalContextReuse !== undefined) {
++    const { initializers, initializerByOutput } = await contextReuseGroups(
++      ctx,
++      result.outputFiles,
++      result.metafile!,
++      new Set(
++        [...contextReuseOutputPolicy]
++          .filter(([, policy]) => policy.enabled)
++          .map(([output]) => output),
++      ),
++      chunksFolder,
++    );
++    for (const [output, initializationModule] of initializerByOutput) {
++      contextReuseOutputPolicy.get(output)!.initializationModule =
++        initializationModule;
++    }
++    modules.push(
++      ...initializers.map((module) => ({
++        ...module,
++        environment: "isolate" as const,
++      })),
++    );
++  }
    for (const outputFile of result.outputFiles) {
      const relPath = path.relative(path.normalize("out"), outputFile.path);
      if (path.extname(relPath) === ".map") {
-@@ -246,7 +380,18 @@ export async function bundle({
+@@ -246,7 +409,18 @@ export async function bundle({
        continue;
      }
      const posixRelPath = relPath.split(path.sep).join(path.posix.sep);

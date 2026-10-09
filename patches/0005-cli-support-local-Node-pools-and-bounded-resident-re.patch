@@ -179,10 +179,10 @@ index 0000000000000000000000000000000000000000..5506beb91a83daf7d34c9dd7baa25a20
 +  });
 +});
 diff --git a/src/bundler/index.ts b/src/bundler/index.ts
-index b8f1317c68b38cc3b06c47da0664e2e7463d0328..e872d0a7a8fff43904f9eec740bba552feb0c41c 100644
+index 4bad9c7b4a1ab2b72f35ad818d6f0be7f27ecd7f..3ac1721a9bea31089ff62023d6d1a2cf2a39c3b3 100644
 --- a/src/bundler/index.ts
 +++ b/src/bundler/index.ts
-@@ -46,19 +46,21 @@ export function* walkDir(
+@@ -47,19 +47,21 @@ export function* walkDir(
  }
  
  // Convex specific module environment.
@@ -205,7 +205,7 @@ index b8f1317c68b38cc3b06c47da0664e2e7463d0328..e872d0a7a8fff43904f9eec740bba552
  }
  
  type EsBuildResult = esbuild.BuildResult & {
-@@ -278,6 +280,7 @@ export async function bundle({
+@@ -284,6 +286,7 @@ export async function bundle({
    includeSourcesContent = false,
    splitting,
    experimentalContextReuse,
@@ -213,7 +213,7 @@ index b8f1317c68b38cc3b06c47da0664e2e7463d0328..e872d0a7a8fff43904f9eec740bba552
  }: {
    ctx: Context;
    dir: string;
-@@ -290,6 +293,7 @@ export async function bundle({
+@@ -296,6 +299,7 @@ export async function bundle({
    includeSourcesContent?: boolean;
    splitting?: boolean;
    experimentalContextReuse?: ExperimentalContextReuse;
@@ -221,7 +221,7 @@ index b8f1317c68b38cc3b06c47da0664e2e7463d0328..e872d0a7a8fff43904f9eec740bba552
  }): Promise<{
    modules: Bundle[];
    externalDependencies: Map<string, string>;
-@@ -328,6 +332,13 @@ export async function bundle({
+@@ -334,6 +338,13 @@ export async function bundle({
    const sourceMaps = new Map();
    const modules: Bundle[] = [];
    const environment = platform === "node" ? "node" : "isolate";
@@ -235,7 +235,7 @@ index b8f1317c68b38cc3b06c47da0664e2e7463d0328..e872d0a7a8fff43904f9eec740bba552
    const contextReuseOutputPolicy = new Map<string, ContextReuseOutputPolicy>();
    if (experimentalContextReuse !== undefined) {
      const unmatchedExcludedEntries = new Set(
-@@ -391,7 +402,33 @@ export async function bundle({
+@@ -420,7 +431,33 @@ export async function bundle({
          contextReusePolicy,
        );
      }
@@ -270,7 +270,7 @@ index b8f1317c68b38cc3b06c47da0664e2e7463d0328..e872d0a7a8fff43904f9eec740bba552
    }
    for (const module of modules) {
      const sourceMapPath = module.path + ".map";
-@@ -644,13 +681,16 @@ export async function entryPoints(
+@@ -673,13 +710,16 @@ export async function entryPoints(
  
  // A fallback regex in case we fail to parse the AST.
  export const useNodeDirectiveRegex = /^\s*("|')use node("|');?\s*$/;
@@ -289,7 +289,7 @@ index b8f1317c68b38cc3b06c47da0664e2e7463d0328..e872d0a7a8fff43904f9eec740bba552
    }
  
    // We parse the AST here to extract the "use node" declaration. This is more
-@@ -664,27 +704,26 @@ function hasUseNodeDirective(ctx: Context, fpath: string): boolean {
+@@ -693,27 +733,26 @@ function hasUseNodeDirective(ctx: Context, fpath: string): boolean {
        // here too.
        plugins: ["jsx", "typescript"],
      });
@@ -326,7 +326,7 @@ index b8f1317c68b38cc3b06c47da0664e2e7463d0328..e872d0a7a8fff43904f9eec740bba552
    }
  }
  
-@@ -702,7 +741,41 @@ async function determineEnvironment(
+@@ -731,7 +770,41 @@ async function determineEnvironment(
  ): Promise<ModuleEnvironment> {
    const relPath = path.relative(dir, fpath);
  
@@ -369,7 +369,7 @@ index b8f1317c68b38cc3b06c47da0664e2e7463d0328..e872d0a7a8fff43904f9eec740bba552
    if (useNodeDirectiveFound) {
      if (mustBeIsolate(relPath)) {
        return await ctx.crash({
-@@ -711,7 +784,7 @@ async function determineEnvironment(
+@@ -740,7 +813,7 @@ async function determineEnvironment(
          printedMessage: `"use node" directive is not allowed for ${relPath}.`,
        });
      }
@@ -378,7 +378,7 @@ index b8f1317c68b38cc3b06c47da0664e2e7463d0328..e872d0a7a8fff43904f9eec740bba552
    }
  
    const actionsPrefix = actionsDir + path.sep;
-@@ -729,14 +802,18 @@ async function determineEnvironment(
+@@ -758,14 +831,18 @@ async function determineEnvironment(
  export async function entryPointsByEnvironment(ctx: Context, dir: string) {
    const isolate = [];
    const node = [];
