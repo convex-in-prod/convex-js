@@ -9,4 +9,4 @@
 0008-sdk-support-typed-runtime-values-and-bulk-query-coll.patch e6500f44e6bedd217344da0598e95aa803672fcf
 0009-http-client-preserve-per-call-mutation-priority-thro.patch 54a53b2be7879bb970eb106fc00ab070d3d25d81
 0010-deployment-publish-native-resident-selection-and-met.patch d7ae2e572a768b681ded3d54acf4abc122665f0f
-0011-packaging-keep-source-provenance-separate-from-immut.patch e75af0d23c4ca0c33c05c859a31af650c0694284
+0011-packaging-keep-source-provenance-separate-from-immut.patch ed1c0fe7f243eecfa949ca7793296fb6d916decf
