@@ -18,22 +18,22 @@ Keep action scheduling and ordinary V8 execution on their existing adapters.
  src/server/impl/actions_impl.ts               |   9 +-
  src/server/impl/authentication_impl.ts        |  11 +-
  src/server/impl/database_impl.ts              |  94 ++++----
- src/server/impl/filter_builder_impl.ts        | 162 +++++++++----
- src/server/impl/index_range_builder_impl.ts   |  99 ++++----
+ src/server/impl/filter_builder_impl.ts        | 167 ++++++++++----
+ src/server/impl/index_range_builder_impl.ts   | 105 ++++-----
  src/server/impl/meta_impl.ts                  |  48 ++--
- src/server/impl/query_builder.test.ts         |  80 +++++++
+ src/server/impl/query_builder.test.ts         | 141 +++++++++++
  src/server/impl/query_impl.ts                 | 126 +++++++---
- src/server/impl/query_value.ts                |  33 +++
+ src/server/impl/query_value.ts                |  43 ++++
  src/server/impl/registration_impl.ts          |  57 +++--
  src/server/impl/scheduler_impl.ts             |  62 ++++-
- src/server/impl/search_filter_builder_impl.ts |  43 ++--
+ src/server/impl/search_filter_builder_impl.ts |  51 ++--
  src/server/impl/storage_impl.ts               |  50 ++--
  src/server/impl/syscall.ts                    | 218 +++++++++++++++++-
  src/server/impl/value_syscall.test.ts         | 112 +++++++++
  src/server/registration.ts                    |   6 +
  src/values/value.ts                           |  51 +++-
  src/values/value_owned.test.ts                |  47 ++++
- 19 files changed, 1048 insertions(+), 272 deletions(-)
+ 19 files changed, 1136 insertions(+), 274 deletions(-)
  create mode 100644 src/server/impl/query_builder.test.ts
  create mode 100644 src/server/impl/query_value.ts
  create mode 100644 src/server/impl/value_syscall.test.ts
@@ -297,10 +297,10 @@ index b031f5ed9c885e651f3b56efd7603dbe109b1685..42f073b1de0abad625258fb553e2ab4d
      return insert(this.tableName, value);
    }
 diff --git a/src/server/impl/filter_builder_impl.ts b/src/server/impl/filter_builder_impl.ts
-index 10fb3ea0e607cec6f086dfe1a47505af2fcfde0a..bd130184e0fad33a1d27d64bcd71bc9025495e6b 100644
+index 10fb3ea0e607cec6f086dfe1a47505af2fcfde0a..f46ffbab3fab48ffbfb413058bbdae9a57176eac 100644
 --- a/src/server/impl/filter_builder_impl.ts
 +++ b/src/server/impl/filter_builder_impl.ts
-@@ -1,5 +1,10 @@
+@@ -1,5 +1,11 @@
 -import { JSONValue, Value, NumericValue } from "../../values/index.js";
 -import { convexOrUndefinedToJson } from "../../values/value.js";
 +import { Value, NumericValue } from "../../values/index.js";
@@ -309,11 +309,12 @@ index 10fb3ea0e607cec6f086dfe1a47505af2fcfde0a..bd130184e0fad33a1d27d64bcd71bc90
 +  queryValueArg,
 +  QueryRecord,
 +  queryRecordBuilder,
++  queryValueRecordBuilder,
 +} from "./query_value.js";
  import { GenericTableInfo } from "../data_model.js";
  import {
    Expression,
-@@ -7,29 +12,40 @@ import {
+@@ -7,29 +13,44 @@ import {
    FilterBuilder,
  } from "../filter_builder.js";
  
@@ -355,13 +356,17 @@ index 10fb3ea0e607cec6f086dfe1a47505af2fcfde0a..bd130184e0fad33a1d27d64bcd71bc90
 -    return { $literal: convexOrUndefinedToJson(expr as Value | undefined) };
 +    // Capture the literal now so mutations after query construction cannot
 +    // change the value observed when the query runs.
++    const valueRecord = queryValueRecordBuilder();
++    if (valueRecord !== undefined) {
++      return valueRecord(1, undefined, expr as Value | undefined);
++    }
 +    const captured = queryValueArg(expr as Value | undefined);
 +    const record = queryRecordBuilder();
 +    return record === undefined ? { $literal: captured } : record(1, captured);
    }
  }
  
-@@ -40,54 +56,72 @@ export const filterBuilderImpl: FilterBuilder<GenericTableInfo> = {
+@@ -40,54 +61,72 @@ export const filterBuilderImpl: FilterBuilder<GenericTableInfo> = {
      l: ExpressionOrValue<T>,
      r: ExpressionOrValue<T>,
    ): Expression<boolean> {
@@ -452,7 +457,7 @@ index 10fb3ea0e607cec6f086dfe1a47505af2fcfde0a..bd130184e0fad33a1d27d64bcd71bc90
    },
  
    //  Arithmetic  //////////////////////////////////////////////////////////////
-@@ -96,67 +130,101 @@ export const filterBuilderImpl: FilterBuilder<GenericTableInfo> = {
+@@ -96,67 +135,101 @@ export const filterBuilderImpl: FilterBuilder<GenericTableInfo> = {
      l: ExpressionOrValue<T>,
      r: ExpressionOrValue<T>,
    ): Expression<T> {
@@ -575,10 +580,10 @@ index 10fb3ea0e607cec6f086dfe1a47505af2fcfde0a..bd130184e0fad33a1d27d64bcd71bc90
    },
  };
 diff --git a/src/server/impl/index_range_builder_impl.ts b/src/server/impl/index_range_builder_impl.ts
-index d0bc59047898f33eb588df94937ceb5e6b3668e5..5ab86d8ce593a80e51f15e5690a7e5afde96412b 100644
+index d0bc59047898f33eb588df94937ceb5e6b3668e5..a7aca0b76a67a9bc5acc78a8f53c83a51ec41c20 100644
 --- a/src/server/impl/index_range_builder_impl.ts
 +++ b/src/server/impl/index_range_builder_impl.ts
-@@ -1,5 +1,10 @@
+@@ -1,5 +1,11 @@
 -import { JSONValue, Value } from "../../values/index.js";
 -import { convexOrUndefinedToJson } from "../../values/value.js";
 +import { Value } from "../../values/index.js";
@@ -587,11 +592,12 @@ index d0bc59047898f33eb588df94937ceb5e6b3668e5..5ab86d8ce593a80e51f15e5690a7e5af
 +  queryValueArg,
 +  QueryRecord,
 +  queryRecordBuilder,
++  queryValueRecordBuilder,
 +} from "./query_value.js";
  import { GenericDocument, GenericIndexFields } from "../data_model.js";
  import {
    IndexRange,
-@@ -8,11 +13,14 @@ import {
+@@ -8,11 +14,14 @@ import {
    UpperBoundIndexRangeBuilder,
  } from "../index_range_builder.js";
  
@@ -611,7 +617,7 @@ index d0bc59047898f33eb588df94937ceb5e6b3668e5..5ab86d8ce593a80e51f15e5690a7e5af
  
  export class IndexRangeBuilderImpl
    extends IndexRange
-@@ -21,11 +29,9 @@ export class IndexRangeBuilderImpl
+@@ -21,11 +30,9 @@ export class IndexRangeBuilderImpl
      LowerBoundIndexRangeBuilder<GenericDocument, string>,
      UpperBoundIndexRangeBuilder<GenericDocument, string>
  {
@@ -625,7 +631,7 @@ index d0bc59047898f33eb588df94937ceb5e6b3668e5..5ab86d8ce593a80e51f15e5690a7e5af
      super();
      this.rangeExpressions = rangeExpressions;
      this.isConsumed = false;
-@@ -44,59 +50,50 @@ export class IndexRangeBuilderImpl
+@@ -44,59 +51,53 @@ export class IndexRangeBuilderImpl
      this.isConsumed = true;
    }
  
@@ -638,27 +644,31 @@ index d0bc59047898f33eb588df94937ceb5e6b3668e5..5ab86d8ce593a80e51f15e5690a7e5af
 -        fieldPath: fieldName,
 -        value: convexOrUndefinedToJson(value),
 -      }),
+-    );
 +    // Only the successor may use this storage. Capture the value after consuming
 +    // this wrapper so a reentrant getter cannot branch from the same builder.
-+    const captured = queryValueArg(value);
-+    const record = queryRecordBuilder();
-+    this.rangeExpressions.push(
-+      record === undefined
-+        ? { type, fieldPath: fieldName, value: captured }
-+        : record(
-+            type === "Eq"
-+              ? 21
-+              : type === "Gt"
-+                ? 22
-+                : type === "Gte"
-+                  ? 23
-+                  : type === "Lt"
-+                    ? 24
-+                    : 25,
-+            fieldName,
-+            captured,
-+          ),
-     );
++    const kind =
++      type === "Eq"
++        ? 21
++        : type === "Gt"
++          ? 22
++          : type === "Gte"
++            ? 23
++            : type === "Lt"
++              ? 24
++              : 25;
++    const valueRecord = queryValueRecordBuilder();
++    if (valueRecord !== undefined) {
++      this.rangeExpressions.push(valueRecord(kind, fieldName, value));
++    } else {
++      const captured = queryValueArg(value);
++      const record = queryRecordBuilder();
++      this.rangeExpressions.push(
++        record === undefined
++          ? { type, fieldPath: fieldName, value: captured }
++          : record(kind, fieldName, captured),
++      );
++    }
 +    return new IndexRangeBuilderImpl(this.rangeExpressions);
 +  }
 +
@@ -816,14 +826,15 @@ index 46b760e1b28e7e8e0d98489d601e35d91f9a71ee..b02da7b88db793e8663e1d574ab3f8ca
  
 diff --git a/src/server/impl/query_builder.test.ts b/src/server/impl/query_builder.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..fe9a383d436847b59e4c3c19abc66f3fdfa3dd63
+index 0000000000000000000000000000000000000000..6a1f57c1c088d1f941cc3670c56fd14e55184056
 --- /dev/null
 +++ b/src/server/impl/query_builder.test.ts
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,141 @@
 +import { afterEach, expect, test, vi } from "vitest";
 +import { IndexRangeBuilderImpl } from "./index_range_builder_impl.js";
 +import { SearchFilterBuilderImpl } from "./search_filter_builder_impl.js";
 +import { Value } from "../../values/value.js";
++import { serializeExpression } from "./filter_builder_impl.js";
 +
 +afterEach(() => vi.unstubAllGlobals());
 +
@@ -896,6 +907,66 @@ index 0000000000000000000000000000000000000000..fe9a383d436847b59e4c3c19abc66f3f
 +        throw new Error("capture failed");
 +      },
 +    };
++    expect(() => builder.eq("a", value)).toThrow("capture failed");
++    expect(() => builder.export()).toThrow("already been used");
++  }
++});
++
++test("combined records snapshot values and preserve consumed builders on failure", () => {
++  const records = new Map<
++    object,
++    { kind: number; field: string | undefined; value: Value | undefined }
++  >();
++  vi.stubGlobal("Convex", {
++    queryValueRecord: (
++      kind: number,
++      field: string | undefined,
++      value: Value | undefined,
++    ) => {
++      const record = Object.freeze({});
++      records.set(record, { kind, field, value: structuredClone(value) });
++      return record;
++    },
++  });
++  const value = { nested: [1] };
++  const root = IndexRangeBuilderImpl.new();
++  const range = root.eq("a", value).gte("b", 2).lt("b", 8).export();
++  const search = SearchFilterBuilderImpl.new().eq(
++    "a",
++    value,
++  ) as SearchFilterBuilderImpl;
++  const literal = serializeExpression(value);
++  const missing = serializeExpression(undefined);
++  value.nested.push(9);
++  expect(range.map((entry) => records.get(entry)?.kind)).toEqual([21, 23, 24]);
++  expect(records.get(range[0])?.value).toEqual({ nested: [1] });
++  expect(records.get(search.export()[0])).toEqual({
++    kind: 27,
++    field: "a",
++    value: { nested: [1] },
++  });
++  expect(records.get(literal)).toEqual({
++    kind: 1,
++    field: undefined,
++    value: { nested: [1] },
++  });
++  expect(records.get(missing)).toEqual({
++    kind: 1,
++    field: undefined,
++    value: undefined,
++  });
++  expect(() => root.export()).toThrow("already been used");
++
++  for (const builder of [
++    IndexRangeBuilderImpl.new(),
++    SearchFilterBuilderImpl.new(),
++  ]) {
++    vi.stubGlobal("Convex", {
++      queryValueRecord: () => {
++        expect(() => builder.eq("again", 1)).toThrow("already been used");
++        throw new Error("capture failed");
++      },
++    });
 +    expect(() => builder.eq("a", value)).toThrow("capture failed");
 +    expect(() => builder.export()).toThrow("already been used");
 +  }
@@ -1110,10 +1181,10 @@ index ea836a6ef06ef3ffb2b06d9d00c84285638ca166..0217bec41f2e74203c34bc238503de80
        out.push(item);
 diff --git a/src/server/impl/query_value.ts b/src/server/impl/query_value.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b8a6e6a2c5a28ac5e7cd7823cbaea9f59e609e6
+index 0000000000000000000000000000000000000000..ddfb687e64a318cb62d910915696831eb57e7daa
 --- /dev/null
 +++ b/src/server/impl/query_value.ts
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,43 @@
 +import {
 +  JSONValue,
 +  Value,
@@ -1123,6 +1194,11 @@ index 0000000000000000000000000000000000000000..5b8a6e6a2c5a28ac5e7cd7823cbaea9f
 +declare const Convex: {
 +  typedQueryArgs?: true;
 +  queryRecord?: (kind: number, first: unknown, second?: unknown) => QueryRecord;
++  queryValueRecord?: (
++    kind: number,
++    field: string | undefined,
++    value: Value | undefined,
++  ) => QueryRecord;
 +  captureQueryValue?: (value: Value) => ArrayBuffer;
 +};
 +
@@ -1146,6 +1222,11 @@ index 0000000000000000000000000000000000000000..5b8a6e6a2c5a28ac5e7cd7823cbaea9f
 +
 +export function queryRecordBuilder() {
 +  return typeof Convex === "undefined" ? undefined : Convex.queryRecord;
++}
++
++// Older runtimes still capture values separately before constructing records.
++export function queryValueRecordBuilder() {
++  return typeof Convex === "undefined" ? undefined : Convex.queryValueRecord;
 +}
 diff --git a/src/server/impl/registration_impl.ts b/src/server/impl/registration_impl.ts
 index b033c40d905663f20e104a5c1e248648f4e5f9a3..2f1348edcc5479672a434aa64e00771e3712529f 100644
@@ -1420,21 +1501,22 @@ index aac0bfe85671ddda3fb99b9cd26369100e82cfff..deb1a055322f9785529cbfc1e5467c31
    };
  }
 diff --git a/src/server/impl/search_filter_builder_impl.ts b/src/server/impl/search_filter_builder_impl.ts
-index e9a58c8abc000302ce6d85198d85c029d131dfc4..e1976c77bfc35655914a823c61151f8aaf5ff200 100644
+index e9a58c8abc000302ce6d85198d85c029d131dfc4..46246426b6bcd7e48a13c2f96b076103f89ff9d2 100644
 --- a/src/server/impl/search_filter_builder_impl.ts
 +++ b/src/server/impl/search_filter_builder_impl.ts
-@@ -1,4 +1,9 @@
+@@ -1,4 +1,10 @@
 -import { JSONValue, convexOrUndefinedToJson } from "../../values/value.js";
 +import {
 +  QueryValue,
 +  queryValueArg,
 +  QueryRecord,
 +  queryRecordBuilder,
++  queryValueRecordBuilder,
 +} from "./query_value.js";
  import {
    FieldTypeFromFieldPath,
    GenericDocument,
-@@ -12,6 +17,7 @@ import {
+@@ -12,6 +18,7 @@ import {
  import { validateArg } from "./validate.js";
  
  export type SerializedSearchFilter =
@@ -1442,7 +1524,7 @@ index e9a58c8abc000302ce6d85198d85c029d131dfc4..e1976c77bfc35655914a823c61151f8a
    | {
        type: "Search";
        fieldPath: string;
-@@ -20,7 +26,7 @@ export type SerializedSearchFilter =
+@@ -20,7 +27,7 @@ export type SerializedSearchFilter =
    | {
        type: "Eq";
        fieldPath: string;
@@ -1451,7 +1533,7 @@ index e9a58c8abc000302ce6d85198d85c029d131dfc4..e1976c77bfc35655914a823c61151f8a
      };
  
  export class SearchFilterBuilderImpl
-@@ -29,9 +35,9 @@ export class SearchFilterBuilderImpl
+@@ -29,9 +36,9 @@ export class SearchFilterBuilderImpl
      SearchFilterBuilder<GenericDocument, GenericSearchIndexConfig>,
      SearchFilterFinalizer<GenericDocument, GenericSearchIndexConfig>
  {
@@ -1463,7 +1545,7 @@ index e9a58c8abc000302ce6d85198d85c029d131dfc4..e1976c77bfc35655914a823c61151f8a
      super();
      this.filters = filters;
      this.isConsumed = false;
-@@ -57,13 +63,15 @@ export class SearchFilterBuilderImpl
+@@ -57,13 +64,15 @@ export class SearchFilterBuilderImpl
      validateArg(fieldName, 1, "search", "fieldName");
      validateArg(query, 2, "search", "query");
      this.consume();
@@ -1485,7 +1567,7 @@ index e9a58c8abc000302ce6d85198d85c029d131dfc4..e1976c77bfc35655914a823c61151f8a
    }
    eq<FieldName extends string>(
      fieldName: FieldName,
-@@ -75,16 +83,17 @@ export class SearchFilterBuilderImpl
+@@ -75,16 +84,22 @@ export class SearchFilterBuilderImpl
        validateArg(value, 2, "search", "value");
      }
      this.consume();
@@ -1495,13 +1577,19 @@ index e9a58c8abc000302ce6d85198d85c029d131dfc4..e1976c77bfc35655914a823c61151f8a
 -        fieldPath: fieldName,
 -        value: convexOrUndefinedToJson(value),
 -      }),
-+    const captured = queryValueArg(value);
-+    const record = queryRecordBuilder();
-+    this.filters.push(
-+      record === undefined
-+        ? { type: "Eq", fieldPath: fieldName, value: captured }
-+        : record(27, fieldName, captured),
-     );
+-    );
++    const valueRecord = queryValueRecordBuilder();
++    if (valueRecord !== undefined) {
++      this.filters.push(valueRecord(27, fieldName, value));
++    } else {
++      const captured = queryValueArg(value);
++      const record = queryRecordBuilder();
++      this.filters.push(
++        record === undefined
++          ? { type: "Eq", fieldPath: fieldName, value: captured }
++          : record(27, fieldName, captured),
++      );
++    }
 +    return new SearchFilterBuilderImpl(this.filters);
    }
  
