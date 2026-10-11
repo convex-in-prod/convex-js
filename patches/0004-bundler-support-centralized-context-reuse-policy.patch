@@ -29,15 +29,15 @@ Keep actions, HTTP action keys, exclusions, and source-policy ownership intact.
 Bind group identity to member contents and dependencies, fit generated paths
 within the backend component limit, and exercise the emitted ESM graph.
 ---
- .../default_database_context_reuse/README.md  | 102 ++++++
+ .../default_database_context_reuse/README.md  | 102 +++++
  schemas/convex.schema.json                    |  28 ++
- src/bundler/contextReuse.test.ts              | 339 ++++++++++++++++++
- src/bundler/contextReuseGroups.ts             | 126 +++++++
- src/bundler/index.ts                          | 176 ++++++++-
+ src/bundler/contextReuse.test.ts              | 361 ++++++++++++++++++
+ src/bundler/contextReuseGroups.ts             | 126 ++++++
+ src/bundler/index.ts                          | 180 ++++++++-
  src/cli/lib/components.ts                     |   6 +
  src/cli/lib/components/definition/bundle.ts   |  15 +
  src/cli/lib/config.ts                         |  51 +++
- 8 files changed, 842 insertions(+), 1 deletion(-)
+ 8 files changed, 868 insertions(+), 1 deletion(-)
  create mode 100644 patches/default_database_context_reuse/README.md
  create mode 100644 src/bundler/contextReuse.test.ts
  create mode 100644 src/bundler/contextReuseGroups.ts
@@ -191,10 +191,10 @@ index dbb30198a0988be01ed57ff599e6d900c967ef2d..e698611f8b9d54fd8c0d9ebbb65da3ac
      },
 diff --git a/src/bundler/contextReuse.test.ts b/src/bundler/contextReuse.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..339afb7d6a5c5995b87b1c7d1050819b1f621ae9
+index 0000000000000000000000000000000000000000..5febd80e5f6df10ec336f089a66737d43a2612b0
 --- /dev/null
 +++ b/src/bundler/contextReuse.test.ts
-@@ -0,0 +1,339 @@
+@@ -0,0 +1,361 @@
 +import { execFile } from "node:child_process";
 +import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 +import { tmpdir } from "node:os";
@@ -458,6 +458,12 @@ index 0000000000000000000000000000000000000000..339afb7d6a5c5995b87b1c7d1050819b
 +        m.path.includes("context_init_"),
 +      );
 +      expect(initializer).toBeDefined();
++      expect(JSON.parse(initializer!.sourceMap!)).toEqual({
++        version: 3,
++        sources: [],
++        names: [],
++        mappings: "",
++      });
 +      // Backend module paths limit each component, including `.js`, to 64 bytes.
 +      expect(
 +        Buffer.byteLength(path.posix.basename(initializer!.path)),
@@ -524,6 +530,22 @@ index 0000000000000000000000000000000000000000..339afb7d6a5c5995b87b1c7d1050819b
 +      expect(
 +        excluded.modules.find((m) => m.path === "third.js")!.source,
 +      ).not.toContain("experimental_reuseContext");
++
++      const withoutSourceMaps = await bundle({
++        ...options,
++        generateSourceMaps: false,
++        experimentalContextReuse: {
++          rootDir,
++          exclusions: {},
++          httpActions: true,
++        },
++      });
++      const unmappedInitializer = withoutSourceMaps.modules.find((m) =>
++        m.path.includes("context_init_"),
++      );
++      expect(unmappedInitializer).toBeDefined();
++      expect(unmappedInitializer!.source).toBe(initializer!.source);
++      expect(unmappedInitializer!.sourceMap).toBeUndefined();
 +
 +      const disabled = await bundle(options);
 +      expect(
@@ -667,7 +689,7 @@ index 0000000000000000000000000000000000000000..361ef284f5fb7e7bbcebcf7b9c7ff1b3
 +  return { initializers, initializerByOutput };
 +}
 diff --git a/src/bundler/index.ts b/src/bundler/index.ts
-index 9539009986ab382504b4e7bed027cc109f3d77ad..7308bdba1ef24e422f6d01ed86c1585b8a89589e 100644
+index 9539009986ab382504b4e7bed027cc109f3d77ad..367da034994d5a72544bb1cc00a7e4009e4fc10c 100644
 --- a/src/bundler/index.ts
 +++ b/src/bundler/index.ts
 @@ -16,6 +16,7 @@ import {
@@ -793,7 +815,7 @@ index 9539009986ab382504b4e7bed027cc109f3d77ad..7308bdba1ef24e422f6d01ed86c1585b
  }): Promise<{
    modules: Bundle[];
    externalDependencies: Map<string, string>;
-@@ -240,6 +335,74 @@ export async function bundle({
+@@ -240,6 +335,78 @@ export async function bundle({
    const sourceMaps = new Map();
    const modules: Bundle[] = [];
    const environment = platform === "node" ? "node" : "isolate";
@@ -861,6 +883,10 @@ index 9539009986ab382504b4e7bed027cc109f3d77ad..7308bdba1ef24e422f6d01ed86c1585b
 +    modules.push(
 +      ...initializers.map((module) => ({
 +        ...module,
++        // Generated import glue has no original source positions to map.
++        sourceMap: generateSourceMaps
++          ? JSON.stringify({ version: 3, sources: [], names: [], mappings: "" })
++          : undefined,
 +        environment: "isolate" as const,
 +      })),
 +    );
@@ -868,7 +894,7 @@ index 9539009986ab382504b4e7bed027cc109f3d77ad..7308bdba1ef24e422f6d01ed86c1585b
    for (const outputFile of result.outputFiles) {
      const relPath = path.relative(path.normalize("out"), outputFile.path);
      if (path.extname(relPath) === ".map") {
-@@ -247,7 +410,18 @@ export async function bundle({
+@@ -247,7 +414,18 @@ export async function bundle({
        continue;
      }
      const posixRelPath = relPath.split(path.sep).join(path.posix.sep);
