@@ -915,10 +915,10 @@ index 9539009986ab382504b4e7bed027cc109f3d77ad..367da034994d5a72544bb1cc00a7e400
    for (const module of modules) {
      const sourceMapPath = module.path + ".map";
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index 027fb05cc59b070fdc403aac70b47f145645e624..60a4b66fabf143a087b72213cce4221f211fdf11 100644
+index 70f6ce7dba711bf572bb4324512b36e41de93744..e8546915f10960e7a0881814502d60eaf428a9e4 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
-@@ -379,6 +379,12 @@ async function startComponentsPushAndCodegen(
+@@ -393,6 +393,12 @@ async function startComponentsPushAndCodegen(
          verbose: options.verbose,
          includeSourcesContent:
            projectConfig.bundler?.includeSourcesContent ?? false,
@@ -932,7 +932,7 @@ index 027fb05cc59b070fdc403aac70b47f145645e624..60a4b66fabf143a087b72213cce4221f
      );
    if (options.debugBundlePath) {
 diff --git a/src/cli/lib/components/definition/bundle.ts b/src/cli/lib/components/definition/bundle.ts
-index 35629fcd05926426cac111606b91112ad1989db1..7fadaaf4c46d2ba6796b2513d4942327c6b31869 100644
+index 7fd31848703f709398990a48d564d5635d79cf80..1631eef806f394e0acdfdb2d8e0b1715faaf658a 100644
 --- a/src/cli/lib/components/definition/bundle.ts
 +++ b/src/cli/lib/components/definition/bundle.ts
 @@ -626,6 +626,7 @@ export async function bundleImplementations({
@@ -972,10 +972,10 @@ index 35629fcd05926426cac111606b91112ad1989db1..7fadaaf4c46d2ba6796b2513d4942327
  
      if (convexResult.externalDependencies.size !== 0) {
 diff --git a/src/cli/lib/config.ts b/src/cli/lib/config.ts
-index bd0c325106d6cb7e970a1f97581126e4b4ce7c13..0a4672e361cc2b7d1ef4b52fa4148338ced49ca6 100644
+index 8ee4a743fe287f008c919e2f24784fa62aed2609..99ced1dd2dbf71de27ef57bbfdd5cf26e05206f0 100644
 --- a/src/cli/lib/config.ts
 +++ b/src/cli/lib/config.ts
-@@ -95,6 +95,11 @@ export interface ProjectConfig {
+@@ -96,6 +96,11 @@ export interface ProjectConfig {
  
    bundler?: {
      includeSourcesContent?: boolean;
@@ -987,7 +987,7 @@ index bd0c325106d6cb7e970a1f97581126e4b4ce7c13..0a4672e361cc2b7d1ef4b52fa4148338
    };
  
    typescriptCompiler?: TypescriptCompiler;
-@@ -296,6 +301,41 @@ const BundlerSchema = z.object({
+@@ -297,6 +302,41 @@ const BundlerSchema = z.object({
      .describe(
        "Whether to include original source code in source maps. Set to false to reduce bundle size.",
      ),
@@ -1029,7 +1029,7 @@ index bd0c325106d6cb7e970a1f97581126e4b4ce7c13..0a4672e361cc2b7d1ef4b52fa4148338
  });
  
  const AiFilesSchema = z.object({
-@@ -635,6 +675,17 @@ export async function configFromProjectConfig(
+@@ -636,6 +676,17 @@ export async function configFromProjectConfig(
      entryPoints: entryPoints.isolate,
      generateSourceMaps: true,
      platform: "browser",

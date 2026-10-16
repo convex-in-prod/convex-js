@@ -9,14 +9,14 @@ Keep dev and deploy on start_push, omit the analysis request from deployment pre
 
 Add response-decoder coverage, operator patch guidance, and an Unreleased changelog entry.
 ---
- src/cli/codegen_templates/component_api.ts |  28 ++---
- src/cli/codegen_templates/dataModel.ts     |  16 +--
- src/cli/lib/codegen.ts                     |  38 ++++---
- src/cli/lib/components.ts                  | 121 +++++++++++++--------
+ src/cli/codegen_templates/component_api.ts |  28 ++--
+ src/cli/codegen_templates/dataModel.ts     |  16 +-
+ src/cli/lib/codegen.ts                     |  38 +++--
+ src/cli/lib/components.ts                  | 182 ++++++++++++---------
  src/cli/lib/deploy2.ts                     |  10 +-
- src/cli/lib/deployApi/startPush.test.ts    |  22 ++++
- src/cli/lib/deployApi/startPush.ts         |  14 ++-
- 7 files changed, 164 insertions(+), 85 deletions(-)
+ src/cli/lib/deployApi/startPush.test.ts    |  22 +++
+ src/cli/lib/deployApi/startPush.ts         |  14 +-
+ 7 files changed, 194 insertions(+), 116 deletions(-)
  create mode 100644 src/cli/lib/deployApi/startPush.test.ts
 
 diff --git a/src/cli/codegen_templates/component_api.ts b/src/cli/codegen_templates/component_api.ts
@@ -210,7 +210,7 @@ index 4ec0f9724ce0a820abbe54a116c366309f3db745..cd8377ed780313ccdd7bb046e76c7598
      componentDirectory,
      true,
 diff --git a/src/cli/lib/codegen.ts b/src/cli/lib/codegen.ts
-index adc8050c2c99448df776c28e852ebb0fe4396f35..6e80ca87abb79320e6d5b95f093d18c2a1e35e24 100644
+index a8eb621e779b0596084497b64ad16f7a6af7135b..3c2336850a6bda90716ebef90d84fca0a01b4ba8 100644
 --- a/src/cli/lib/codegen.ts
 +++ b/src/cli/lib/codegen.ts
 @@ -35,7 +35,7 @@ import {
@@ -222,7 +222,7 @@ index adc8050c2c99448df776c28e852ebb0fe4396f35..6e80ca87abb79320e6d5b95f093d18c2
  import {
    componentApiDTS,
    componentApiJs,
-@@ -329,7 +329,7 @@ export async function doFinalComponentCodegen(
+@@ -324,7 +324,7 @@ export async function doFinalComponentCodegen(
    tmpDir: TempDir,
    rootComponent: ComponentDirectory,
    componentDirectory: ComponentDirectory,
@@ -231,7 +231,7 @@ index adc8050c2c99448df776c28e852ebb0fe4396f35..6e80ca87abb79320e6d5b95f093d18c2
    componentsMap: Map<string, ComponentDirectory>,
    opts?: {
      dryRun?: boolean;
-@@ -354,9 +354,20 @@ export async function doFinalComponentCodegen(
+@@ -349,9 +349,20 @@ export async function doFinalComponentCodegen(
    const useTypeScript =
      !componentDirectory.isRoot || usesTypeScriptCodegen(projectConfig);
  
@@ -255,7 +255,7 @@ index adc8050c2c99448df776c28e852ebb0fe4396f35..6e80ca87abb79320e6d5b95f093d18c2
  
    // dataModel
    const hasSchemaFile = schemaFileExists(ctx, componentDirectory.path);
-@@ -366,13 +377,13 @@ export async function doFinalComponentCodegen(
+@@ -361,13 +372,13 @@ export async function doFinalComponentCodegen(
        dataModelContents = useTypeScript
          ? await staticDataModelTS(
              ctx,
@@ -271,7 +271,7 @@ index adc8050c2c99448df776c28e852ebb0fe4396f35..6e80ca87abb79320e6d5b95f093d18c2
              rootComponent,
              componentDirectory,
            );
-@@ -404,7 +415,7 @@ export async function doFinalComponentCodegen(
+@@ -399,7 +410,7 @@ export async function doFinalComponentCodegen(
      const componentTSPath = path.join(codegenDir, "component.ts");
      const componentTSContents = await componentTS(
        ctx,
@@ -280,7 +280,7 @@ index adc8050c2c99448df776c28e852ebb0fe4396f35..6e80ca87abb79320e6d5b95f093d18c2
        rootComponent,
        componentDirectory,
      );
-@@ -419,13 +430,8 @@ export async function doFinalComponentCodegen(
+@@ -414,13 +425,8 @@ export async function doFinalComponentCodegen(
    }
  
    // server.ts - regenerate it in final codegen so we can emit typed env vars.
@@ -295,7 +295,7 @@ index adc8050c2c99448df776c28e852ebb0fe4396f35..6e80ca87abb79320e6d5b95f093d18c2
        ? analysis.definition.envVars
        : [];
    await writeServerFilesForComponent(
-@@ -443,7 +449,7 @@ export async function doFinalComponentCodegen(
+@@ -438,7 +444,7 @@ export async function doFinalComponentCodegen(
      const apiDTSPath = path.join(codegenDir, "api.d.ts");
      const apiContents = await componentApiDTS(
        ctx,
@@ -304,7 +304,7 @@ index adc8050c2c99448df776c28e852ebb0fe4396f35..6e80ca87abb79320e6d5b95f093d18c2
        rootComponent,
        componentDirectory,
        componentsMap,
-@@ -476,7 +482,7 @@ export async function doFinalComponentCodegen(
+@@ -471,7 +477,7 @@ export async function doFinalComponentCodegen(
      const apiTSPath = path.join(codegenDir, "api.ts");
      const apiContents = await componentApiTSWithTypes(
        ctx,
@@ -314,7 +314,7 @@ index adc8050c2c99448df776c28e852ebb0fe4396f35..6e80ca87abb79320e6d5b95f093d18c2
        componentDirectory,
        componentsMap,
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index 0a9730fa215d41fad6db5bfead88b632ed4260bf..80fe1e1e55c8212df3c18f8838724948c62e6c94 100644
+index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee71345b91bcf 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
 @@ -15,6 +15,7 @@ import {
@@ -338,7 +338,7 @@ index 0a9730fa215d41fad6db5bfead88b632ed4260bf..80fe1e1e55c8212df3c18f8838724948
  import { DetailedDeploymentCredentials } from "./api.js";
  import { FinishPushDiff } from "./deployApi/finishPush.js";
  import { Reporter, Span } from "./tracing.js";
-@@ -120,6 +125,7 @@ export async function runCodegen(
+@@ -128,6 +133,7 @@ export async function runCodegen(
        configPath,
        {
          ...options,
@@ -346,7 +346,7 @@ index 0a9730fa215d41fad6db5bfead88b632ed4260bf..80fe1e1e55c8212df3c18f8838724948
          deploymentName: credentials.deploymentFields?.deploymentName ?? null,
          ...(credentials.deploymentFields?.deploymentType !== undefined
            ? { deploymentType: credentials.deploymentFields.deploymentType }
-@@ -247,6 +253,7 @@ async function startComponentsPushAndCodegen(
+@@ -261,6 +267,7 @@ async function startComponentsPushAndCodegen(
      warnOnSlowSchemaValidation: boolean;
      codegenOnlyThisComponent?: string | undefined;
      forceNodeCutover?: boolean | undefined;
@@ -354,7 +354,7 @@ index 0a9730fa215d41fad6db5bfead88b632ed4260bf..80fe1e1e55c8212df3c18f8838724948
    },
  ): Promise<StartPushResponse | null> {
    const convexDir = await getFunctionsDirectoryPath(ctx);
-@@ -457,6 +464,7 @@ async function startComponentsPushAndCodegen(
+@@ -471,6 +478,7 @@ async function startComponentsPushAndCodegen(
      nodeDependencies: appImplementation.externalNodeDependencies,
      nodeVersion: projectConfig.node.nodeVersion,
      forCodegen: !!options.codegenOnlyThisComponent,
@@ -362,7 +362,7 @@ index 0a9730fa215d41fad6db5bfead88b632ed4260bf..80fe1e1e55c8212df3c18f8838724948
    };
    if (options.writePushRequest) {
      const pushRequestPath = path.resolve(options.writePushRequest);
-@@ -487,49 +495,75 @@ async function startComponentsPushAndCodegen(
+@@ -501,80 +509,105 @@ async function startComponentsPushAndCodegen(
      );
    }
  
@@ -380,9 +380,21 @@ index 0a9730fa215d41fad6db5bfead88b632ed4260bf..80fe1e1e55c8212df3c18f8838724948
 -    );
 -  }
 -
--  if (options.dryRun && options.warnOnSlowSchemaValidation) {
--    await parentSpan.enterAsync("checkForSlowSchemaValidation", (span) =>
--      checkForSlowSchemaValidation({ span, schemaEvaluation }),
+-  const stagedValidatorDeletionCheck = options.stagedValidatorDeletionCheck;
+-  if (stagedValidatorDeletionCheck !== "no verification") {
+-    await parentSpan.enterAsync(
+-      "checkForStagedValidatorDeletion",
+-      async (span) => {
+-        const response = await schemaEvaluation(span);
+-        await checkForStagedValidatorDeletion({
+-          ctx,
+-          response,
+-          askForConfirmation:
+-            stagedValidatorDeletionCheck === "ask for confirmation",
+-          // A dry run previews the confirmation required by a real push.
+-          dryRun: options.dryRun,
+-        });
+-      },
 +  let pushAnalysis: PushAnalysis;
 +  let startPushResponse: StartPushResponse | null = null;
 +  if (options.pushMode === "codegen") {
@@ -391,6 +403,25 @@ index 0a9730fa215d41fad6db5bfead88b632ed4260bf..80fe1e1e55c8212df3c18f8838724948
 +      "evaluatePush",
 +      (span) => evaluatePush(ctx, span, startPushRequest, options),
      );
+-  }
+-
+-  // A real push evaluates the schema only when the evaluation is already
+-  // paid for by the unstaging check or the pushed schema stages a validator,
+-  // so `dev` pushes of ordinary schemas skip the isolate evaluation and round
+-  // trip that the status report would otherwise add on every save.
+-  if (
+-    options.warnOnSlowSchemaValidation &&
+-    (options.dryRun ||
+-      stagedValidatorDeletionCheck !== "no verification" ||
+-      pushStagesValidators(startPushRequest))
+-  ) {
+-    await parentSpan.enterAsync("checkForSlowSchemaValidation", (span) =>
+-      checkForSlowSchemaValidation({
+-        span,
+-        schemaEvaluation,
+-        dryRun: options.dryRun,
+-      }),
+-    );
 -  }
 -
 -  changeSpinner("Uploading functions to Convex...");
@@ -435,10 +466,40 @@ index 0a9730fa215d41fad6db5bfead88b632ed4260bf..80fe1e1e55c8212df3c18f8838724948
 +      );
 +    }
 +
-+    // Schema-walk warnings apply to deployment dry runs, not codegen preflight.
-+    if (options.dryRun && options.warnOnSlowSchemaValidation) {
++    const stagedValidatorDeletionCheck = options.stagedValidatorDeletionCheck;
++    if (stagedValidatorDeletionCheck !== "no verification") {
++      await parentSpan.enterAsync(
++        "checkForStagedValidatorDeletion",
++        async (span) => {
++          const response = await schemaEvaluation(span);
++          await checkForStagedValidatorDeletion({
++            ctx,
++            response,
++            askForConfirmation:
++              stagedValidatorDeletionCheck === "ask for confirmation",
++            // A dry run previews the confirmation required by a real push.
++            dryRun: options.dryRun,
++          });
++        },
++      );
++    }
++
++    // A real push evaluates the schema only when the evaluation is already
++    // paid for by the unstaging check or the pushed schema stages a validator,
++    // so `dev` pushes of ordinary schemas skip the isolate evaluation and round
++    // trip that the status report would otherwise add on every save.
++    if (
++      options.warnOnSlowSchemaValidation &&
++      (options.dryRun ||
++        stagedValidatorDeletionCheck !== "no verification" ||
++        pushStagesValidators(startPushRequest))
++    ) {
 +      await parentSpan.enterAsync("checkForSlowSchemaValidation", (span) =>
-+        checkForSlowSchemaValidation({ span, schemaEvaluation }),
++        checkForSlowSchemaValidation({
++          span,
++          schemaEvaluation,
++          dryRun: options.dryRun,
++        }),
 +      );
 +    }
 +
@@ -473,7 +534,7 @@ index 0a9730fa215d41fad6db5bfead88b632ed4260bf..80fe1e1e55c8212df3c18f8838724948
    }
  
    if (options.codegen) {
-@@ -545,7 +579,7 @@ async function startComponentsPushAndCodegen(
+@@ -590,7 +623,7 @@ async function startComponentsPushAndCodegen(
              tmpDir,
              rootComponent,
              rootComponent,
@@ -482,7 +543,7 @@ index 0a9730fa215d41fad6db5bfead88b632ed4260bf..80fe1e1e55c8212df3c18f8838724948
              components,
              options,
            );
-@@ -566,7 +600,7 @@ async function startComponentsPushAndCodegen(
+@@ -611,7 +644,7 @@ async function startComponentsPushAndCodegen(
              tmpDir,
              rootComponent,
              directory,
@@ -491,7 +552,7 @@ index 0a9730fa215d41fad6db5bfead88b632ed4260bf..80fe1e1e55c8212df3c18f8838724948
              components,
              options,
            );
-@@ -654,13 +688,10 @@ export async function runComponentsPush(
+@@ -699,13 +732,10 @@ export async function runComponentsPush(
    const startPushResponse = await pushSpan.enterAsync(
      "startComponentsPushAndCodegen",
      (span) =>
@@ -510,7 +571,7 @@ index 0a9730fa215d41fad6db5bfead88b632ed4260bf..80fe1e1e55c8212df3c18f8838724948
    if (!startPushResponse) {
      return;
 diff --git a/src/cli/lib/deploy2.ts b/src/cli/lib/deploy2.ts
-index 9dccc15fa8c48dd93b5dc3e1b8c5520a5546596a..fe90ec7ecf3b5b99d59a36385189fd3728e0f9c3 100644
+index 4cf238ee5cba15e62f83ce319b06fe7e1ae7c2c3..16855c0a204bbb9377cdc481c46969ff3d10a4b1 100644
 --- a/src/cli/lib/deploy2.ts
 +++ b/src/cli/lib/deploy2.ts
 @@ -163,6 +163,8 @@ async function pushCode(

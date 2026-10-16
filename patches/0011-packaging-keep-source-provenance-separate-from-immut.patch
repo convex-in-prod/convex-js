@@ -7,6 +7,11 @@ Subject: [PATCH 11/11] packaging: keep source provenance separate from
 Record the reviewed upstream source and retain the peer-compatible SHA-derived package build workflow. Pin the published dependency set needed by the source build. Publish verified archives directly in the distribution repository, preserving existing URLs and manifest bytes while keeping package data out of the semantic source train. Document the maintained adoption contracts and source/history reconstruction workflow.
 
 Provision uv in the package workflow for the upstream Python prepack builder.
+
+Refresh the source train to upstream 1.47.0. Retain staged-validator warnings
+and removal confirmation for actual deployments while code generation uses
+non-committing analysis. Preserve explicit native resident selection and add
+the upstream mutation file-read adapter beside typed runtime value syscalls.
 ---
  .convex-in-prod-upstream                   |   1 +
  .github/workflows/build-convex-in-prod.yml | 159 ++++++++++++++++++
@@ -22,11 +27,11 @@ Provision uv in the package workflow for the upstream Python prepack builder.
 
 diff --git a/.convex-in-prod-upstream b/.convex-in-prod-upstream
 new file mode 100644
-index 0000000000000000000000000000000000000000..76254a7aed4a60db15e62b22eba54d05a03b6035
+index 0000000000000000000000000000000000000000..f68676f22e7ca1ac8c6c4da7651cee33ce3edc97
 --- /dev/null
 +++ b/.convex-in-prod-upstream
 @@ -0,0 +1 @@
-+0fca732f8e62f0549e3b669dd560e32d6b0108c0
++11b0a4a47ab40f966e6fd61b8b7880633bac3570
 diff --git a/.github/workflows/build-convex-in-prod.yml b/.github/workflows/build-convex-in-prod.yml
 new file mode 100644
 index 0000000000000000000000000000000000000000..161560bc579dca1c281c4f3c059640697efd7fd0
@@ -193,10 +198,10 @@ index 0000000000000000000000000000000000000000..161560bc579dca1c281c4f3c05964069
 +          process.stdout.write(`Integrity: \`${integrity}\`\n`);
 +          NODE
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index cc26fd5e85f038ae7991898fc0cf37054a4112c6..9b7f5719d31b65b6836e29327ea7bb9d9112dd48 100644
+index f845a401ecaf096db7acdfbd0cbcd8b7e0af98a8..9f7ff9731118f0b504959caa6a894c6e705fa268 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -59,6 +59,17 @@
+@@ -107,6 +107,17 @@
    gateway.
  - Improved the error message when `npx convex export` fails because a snapshot
    export is already in progress.
@@ -215,10 +220,10 @@ index cc26fd5e85f038ae7991898fc0cf37054a4112c6..9b7f5719d31b65b6836e29327ea7bb9d
  ## 1.44.0
  
 diff --git a/package.json b/package.json
-index 6b173282543894adb963c3a176c87190484d433b..c8fab1cdbd31ef4677a7ab250f237c164f43e06a 100644
+index cfb086cf10d0b10e9e8d4a2423483f2087733fce..2fc25ec0b3bb7036e2c1eba2431113527d0e8e7d 100644
 --- a/package.json
 +++ b/package.json
-@@ -333,7 +333,7 @@
+@@ -336,7 +336,7 @@
      "semver": "^7.6.0",
      "serve-handler": "~6.1.6",
      "shx": "~0.4.0",

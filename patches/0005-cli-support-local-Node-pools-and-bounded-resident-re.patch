@@ -400,10 +400,10 @@ index 367da034994d5a72544bb1cc00a7e4009e4fc10c..b20c4d52efe0413346dc4aa6d3cbbf20
 +  return { isolate, node, nodePools };
  }
 diff --git a/src/cli/deploy.ts b/src/cli/deploy.ts
-index c4a72af5a0c7ce94926e9cc001471acd2b72c53f..a290ba4bd527082a6de22ee109575a8b032455aa 100644
+index 3c13bd528ff0ade2ffc79aad5da757633902949e..3fa4d89459f376376a7a99537beddb642b4ad57d 100644
 --- a/src/cli/deploy.ts
 +++ b/src/cli/deploy.ts
-@@ -248,6 +248,7 @@ async function deployToNewPreviewDeployment(
+@@ -255,6 +255,7 @@ async function deployToNewPreviewDeployment(
      skipWorkosCheck?: boolean | undefined;
      skipLargeIndexesCheck: boolean;
      message: string | null;
@@ -411,24 +411,24 @@ index c4a72af5a0c7ce94926e9cc001471acd2b72c53f..a290ba4bd527082a6de22ee109575a8b
    },
  ) {
    const previewName = options.previewName ?? null;
-@@ -353,6 +354,7 @@ async function deployToNewPreviewDeployment(
-         : "ask for confirmation",
+@@ -364,6 +365,7 @@ async function deployToNewPreviewDeployment(
+     stagedValidatorDeletionCheck: "no verification",
      warnOnSlowSchemaValidation: true,
      message: options.message,
 +    forceNodeCutover: !!options.forceNodeCutover,
    };
    showSpinner(`Deploying to ${previewUrl}...`);
    await runPush(ctx, pushOptions);
-@@ -399,6 +401,7 @@ async function deployToExistingDeployment(
-     skipLargeIndexesCheck: boolean;
+@@ -411,6 +413,7 @@ async function deployToExistingDeployment(
      allowDeletingLargeIndexes: boolean;
+     allowUnstagingSchema: boolean;
      message: string | null;
 +    forceNodeCutover?: boolean | undefined;
    },
  ) {
    const deploymentToActOn = await loadSelectedDeploymentCredentials(
 diff --git a/src/cli/lib/command.ts b/src/cli/lib/command.ts
-index 8da9f8ee16b46e58d25bce70e39cd1212e7e51bb..8d3a248837e3fe2bc7e941dda6d469456bf151fa 100644
+index 56ab2e5812767341a839da3fe32ccaf8000de2b1..3f8b8a727f101c47ad6247ecb70d5f46fd58e98d 100644
 --- a/src/cli/lib/command.ts
 +++ b/src/cli/lib/command.ts
 @@ -55,6 +55,7 @@ declare module "@commander-js/extra-typings" {
@@ -439,7 +439,7 @@ index 8da9f8ee16b46e58d25bce70e39cd1212e7e51bb..8d3a248837e3fe2bc7e941dda6d46945
          yes?: boolean;
          typecheck: "enable" | "try" | "disable";
          typecheckComponents: boolean;
-@@ -341,6 +342,10 @@ Command.prototype.addDeployOptions = function () {
+@@ -344,6 +345,10 @@ Command.prototype.addDeployOptions = function () {
        "--dry-run",
        "Print out the generated configuration without deploying to your Convex deployment",
      )
@@ -451,10 +451,10 @@ index 8da9f8ee16b46e58d25bce70e39cd1212e7e51bb..8d3a248837e3fe2bc7e941dda6d46945
        new Option(
          "-y, --yes",
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index 60a4b66fabf143a087b72213cce4221f211fdf11..0a9730fa215d41fad6db5bfead88b632ed4260bf 100644
+index e8546915f10960e7a0881814502d60eaf428a9e4..72a189707d210f7986d1ed3666d7b67daa48398b 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
-@@ -87,6 +87,7 @@ export type PushOptions = {
+@@ -95,6 +95,7 @@ export type PushOptions = {
    // runs never deploy (e.g. codegen).
    warnOnSlowSchemaValidation: boolean;
    message: string | null;
@@ -462,7 +462,7 @@ index 60a4b66fabf143a087b72213cce4221f211fdf11..0a9730fa215d41fad6db5bfead88b632
  };
  
  export async function runCodegen(
-@@ -161,6 +162,7 @@ export function hash(bundle: Bundle) {
+@@ -174,6 +175,7 @@ export function hash(bundle: Bundle) {
  function isModuleTheSame(newBundle: Bundle, oldBundleHash: BundleHash) {
    return (
      newBundle.environment === oldBundleHash.environment &&
@@ -470,7 +470,7 @@ index 60a4b66fabf143a087b72213cce4221f211fdf11..0a9730fa215d41fad6db5bfead88b632
      hash(newBundle) === oldBundleHash.hash
    );
  }
-@@ -181,6 +183,7 @@ export function partitionModulesByChanges(
+@@ -194,6 +196,7 @@ export function partitionModulesByChanges(
      .map((func) => ({
        path: func.path,
        environment: func.environment,
@@ -478,15 +478,15 @@ index 60a4b66fabf143a087b72213cce4221f211fdf11..0a9730fa215d41fad6db5bfead88b632
        sha256: hash(func),
      }));
    const changedModules = functions.filter((newBundle) => {
-@@ -243,6 +246,7 @@ async function startComponentsPushAndCodegen(
-     largeIndexBackfillCheck: LargeIndexBackfillCheck;
+@@ -257,6 +260,7 @@ async function startComponentsPushAndCodegen(
+     stagedValidatorDeletionCheck: StagedValidatorDeletionCheck;
      warnOnSlowSchemaValidation: boolean;
      codegenOnlyThisComponent?: string | undefined;
 +    forceNodeCutover?: boolean | undefined;
    },
  ): Promise<StartPushResponse | null> {
    const convexDir = await getFunctionsDirectoryPath(ctx);
-@@ -508,6 +512,22 @@ async function startComponentsPushAndCodegen(
+@@ -553,6 +557,22 @@ async function startComponentsPushAndCodegen(
      startPush(ctx, span, startPushRequest, options),
    );
  
@@ -509,7 +509,7 @@ index 60a4b66fabf143a087b72213cce4221f211fdf11..0a9730fa215d41fad6db5bfead88b632
    if (options.verbose) {
      logMessage("startPush: " + JSON.stringify(startPushResponse, null, 2));
    }
-@@ -603,7 +623,10 @@ function logStartPushSizes(span: Span, startPushRequest: StartPushRequest) {
+@@ -648,7 +668,10 @@ function logStartPushSizes(span: Span, startPushRequest: StartPushRequest) {
        if (module.environment === "isolate") {
          v8Size += module.source.length + (module.sourceMap ?? "").length;
          v8Count += 1;
@@ -522,7 +522,7 @@ index 60a4b66fabf143a087b72213cce4221f211fdf11..0a9730fa215d41fad6db5bfead88b632
          nodeCount += 1;
        }
 diff --git a/src/cli/lib/components/definition/bundle.ts b/src/cli/lib/components/definition/bundle.ts
-index 7fadaaf4c46d2ba6796b2513d4942327c6b31869..973f141f6b7567533e8e0e59277cb35c41862690 100644
+index 1631eef806f394e0acdfdb2d8e0b1715faaf658a..dff307559a607cc5cf779d404f660a3781e74d19 100644
 --- a/src/cli/lib/components/definition/bundle.ts
 +++ b/src/cli/lib/components/definition/bundle.ts
 @@ -740,6 +740,7 @@ export async function bundleImplementations({
@@ -542,10 +542,10 @@ index 7fadaaf4c46d2ba6796b2513d4942327c6b31869..973f141f6b7567533e8e0e59277cb35c
            platform: "node",
            chunksFolder: path.join("_deps", "node"),
 diff --git a/src/cli/lib/config.ts b/src/cli/lib/config.ts
-index 0a4672e361cc2b7d1ef4b52fa4148338ced49ca6..4bd8b609cda308647c595ce69762b91bbeea5cdc 100644
+index 99ced1dd2dbf71de27ef57bbfdd5cf26e05206f0..73614b16ed7c25266d8488b8eb1cdbc0b83fa6d0 100644
 --- a/src/cli/lib/config.ts
 +++ b/src/cli/lib/config.ts
-@@ -702,6 +702,7 @@ export async function configFromProjectConfig(
+@@ -703,6 +703,7 @@ export async function configFromProjectConfig(
      ctx,
      dir: baseDir,
      entryPoints: entryPoints.node,
@@ -554,7 +554,7 @@ index 0a4672e361cc2b7d1ef4b52fa4148338ced49ca6..4bd8b609cda308647c595ce69762b91b
      platform: "node",
      chunksFolder: path.join("_deps", "node"),
 diff --git a/src/cli/lib/deploy2.ts b/src/cli/lib/deploy2.ts
-index 6a77081b1a1d327bc8fda92ba65c2d44a2697661..9dccc15fa8c48dd93b5dc3e1b8c5520a5546596a 100644
+index 4f165a065d2657a12a5ab95be1a757eb237f9beb..4cf238ee5cba15e62f83ce319b06fe7e1ae7c2c3 100644
 --- a/src/cli/lib/deploy2.ts
 +++ b/src/cli/lib/deploy2.ts
 @@ -11,6 +11,7 @@ import { spawnSync } from "child_process";
@@ -600,15 +600,15 @@ index 6a77081b1a1d327bc8fda92ba65c2d44a2697661..9dccc15fa8c48dd93b5dc3e1b8c5520a
      return await handlePushConfigError(
        ctx,
        error,
-@@ -460,6 +475,7 @@ export async function deployToDeployment(
-     skipLargeIndexesCheck: boolean;
+@@ -461,6 +476,7 @@ export async function deployToDeployment(
      allowDeletingLargeIndexes: boolean;
+     allowUnstagingSchema: boolean;
      message: string | null;
 +    forceNodeCutover?: boolean | undefined;
    },
  ) {
    const { url, adminKey } = credentials;
-@@ -514,6 +530,7 @@ export async function deployToDeployment(
+@@ -518,6 +534,7 @@ export async function deployToDeployment(
        : "ask for confirmation",
      warnOnSlowSchemaValidation: true,
      message: options.message,
@@ -722,10 +722,10 @@ index 0d4d050161165366badcdf343bb2556ae78435fc..7e9a9e4c7b69eca4a581e57b5bf294c4
  export type StartPushResponse = z.infer<typeof startPushResponse>;
  
 diff --git a/src/cli/lib/dev.ts b/src/cli/lib/dev.ts
-index a049abe7f409c8e60eaf890673232b7f35b68f3e..1b796c7ce570dcfac5ff0f3a4449ca374c441f32 100644
+index b23df8370043329d58aef7f696a34ea12ec1717b..6f2a8a3f1bc76d284c57d8012a1ff34800a166fa 100644
 --- a/src/cli/lib/dev.ts
 +++ b/src/cli/lib/dev.ts
-@@ -138,6 +138,7 @@ export async function devAgainstDeployment(
+@@ -139,6 +139,7 @@ export async function devAgainstDeployment(
          ...credentials,
          verbose: devOptions.verbose,
          dryRun: false,
@@ -734,7 +734,7 @@ index a049abe7f409c8e60eaf890673232b7f35b68f3e..1b796c7ce570dcfac5ff0f3a4449ca37
          typecheckComponents: devOptions.typecheckComponents,
          debug: false,
 diff --git a/src/cli/lib/run.ts b/src/cli/lib/run.ts
-index 9fd16b3db87682155ebc924a826346303b6a30bf..1e6abf9edd26de003881a971950bdcd85bb7407d 100644
+index 13dbf6520ebf952dbe8b557aab50e0cccb4f24eb..598cddb186c140f3db6b322c5d3d4c9989f69898 100644
 --- a/src/cli/lib/run.ts
 +++ b/src/cli/lib/run.ts
 @@ -527,6 +527,7 @@ export async function pushToDeployment(

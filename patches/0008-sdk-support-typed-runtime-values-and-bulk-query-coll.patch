@@ -1599,13 +1599,13 @@ index e9a58c8abc000302ce6d85198d85c029d131dfc4..46246426b6bcd7e48a13c2f96b076103
      return this.filters;
    }
 diff --git a/src/server/impl/storage_impl.ts b/src/server/impl/storage_impl.ts
-index 85a1253111d207aeaa417a4368d520cbb07b7ec5..7859af9f555825a17ea2c221f5f9aed3aa88dd37 100644
+index 28fa6b724ba92a70fd0bed8aec0753d9ef421387..82381f4a1e1a515d28cb9621a3afe2ad1218c2ef 100644
 --- a/src/server/impl/storage_impl.ts
 +++ b/src/server/impl/storage_impl.ts
 @@ -7,25 +7,32 @@ import {
  } from "../storage.js";
  import { version } from "../../index.js";
- import { fromByteArray } from "../../values/base64.js";
+ import { fromByteArray, toByteArray } from "../../values/base64.js";
 -import { performAsyncSyscall, performJsSyscall } from "./syscall.js";
 +import {
 +  ValueSyscall,
