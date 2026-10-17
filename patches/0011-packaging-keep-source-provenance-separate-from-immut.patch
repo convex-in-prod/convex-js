@@ -18,8 +18,8 @@ the upstream mutation file-read adapter beside typed runtime value syscalls.
  CHANGELOG.md                               |  11 ++
  package.json                               |   2 +-
  packages/README.md                         |  18 ++
- patches/README.md                          | 181 +++++++++++++++++++++
- 6 files changed, 371 insertions(+), 1 deletion(-)
+ patches/README.md                          | 185 +++++++++++++++++++++
+ 6 files changed, 375 insertions(+), 1 deletion(-)
  create mode 100644 .convex-in-prod-upstream
  create mode 100644 .github/workflows/build-convex-in-prod.yml
  create mode 100644 packages/README.md
@@ -258,10 +258,10 @@ index 0000000000000000000000000000000000000000..e9b0902b93eda3a4fc907dcab6dbf197
 +[the release procedure](../patches/README.md#rebase-and-release).
 diff --git a/patches/README.md b/patches/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..1108b9dc8b97213a9e802429b0fef6be9950458c
+index 0000000000000000000000000000000000000000..c8d1475ff6106a2851a62450ab6f4474c804174e
 --- /dev/null
 +++ b/patches/README.md
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,185 @@
 +# Convex-In-Prod Patch Stack
 +
 +The fork's `main` branch carries a short generic patch stack over the exact
@@ -413,6 +413,10 @@ index 0000000000000000000000000000000000000000..1108b9dc8b97213a9e802429b0fef6be
 +boundary when those capabilities are absent. This is one runtime integration
 +patch, including value ownership tests and query, database, metadata, storage
 +and registration adapters.
++
++Validator type-inference fields use non-emitting declarations. Their TypeScript
++types remain available without allocating `type` and `fieldPaths` own properties
++on every runtime validator; validator serialization is unchanged.
 +
 +## Rebase and release
 +

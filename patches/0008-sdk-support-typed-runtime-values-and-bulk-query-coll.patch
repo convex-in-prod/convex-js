@@ -31,9 +31,10 @@ Keep action scheduling and ordinary V8 execution on their existing adapters.
  src/server/impl/syscall.ts                    | 218 +++++++++++++++++-
  src/server/impl/value_syscall.test.ts         | 112 +++++++++
  src/server/registration.ts                    |   6 +
+ src/values/validators.ts                      |   7 +-
  src/values/value.ts                           |  51 +++-
  src/values/value_owned.test.ts                |  47 ++++
- 19 files changed, 1136 insertions(+), 274 deletions(-)
+ 20 files changed, 1140 insertions(+), 277 deletions(-)
  create mode 100644 src/server/impl/query_builder.test.ts
  create mode 100644 src/server/impl/query_value.ts
  create mode 100644 src/server/impl/value_syscall.test.ts
@@ -2071,6 +2072,29 @@ index 1ede4cb3ad5ec96f559f2b67987c0ac9f955bdef..a4bb7106e2ab37e5d302b7ee12261c83
    /** @internal */
    exportArgs(): string;
  
+diff --git a/src/values/validators.ts b/src/values/validators.ts
+index 947fb90263ef28a5cedf76ab1fe1dbc438f9f24a..ac79530198e136934944aa6ea523b660dc36ea0a 100644
+--- a/src/values/validators.ts
++++ b/src/values/validators.ts
+@@ -32,14 +32,15 @@ abstract class BaseValidator<
+ > {
+   /**
+    * Only for TypeScript, the TS type of the JS values validated
+-   * by this validator.
++   * by this validator. Keep this declaration non-emitting: validators do not
++   * need an own runtime property for type inference.
+    */
+-  readonly type!: Type;
++  declare readonly type: Type;
+   /**
+    * Only for TypeScript, if this an Object validator, then
+    * this is the TS type of its property names.
+    */
+-  readonly fieldPaths!: FieldPaths;
++  declare readonly fieldPaths: FieldPaths;
+ 
+   /**
+    * Whether this is an optional Object property value validator.
 diff --git a/src/values/value.ts b/src/values/value.ts
 index 6713b344ca9415e324ffd8e06917f216a417c4fc..f460425648c14430767627faa7a9c79be001f616 100644
 --- a/src/values/value.ts
