@@ -258,7 +258,7 @@ index 0000000000000000000000000000000000000000..e9b0902b93eda3a4fc907dcab6dbf197
 +[the release procedure](../patches/README.md#rebase-and-release).
 diff --git a/patches/README.md b/patches/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..c8d1475ff6106a2851a62450ab6f4474c804174e
+index 0000000000000000000000000000000000000000..d026fa327d5de46d007ec2fe579361dca976acc4
 --- /dev/null
 +++ b/patches/README.md
 @@ -0,0 +1,185 @@
@@ -390,13 +390,13 @@ index 0000000000000000000000000000000000000000..c8d1475ff6106a2851a62450ab6f4474
 +
 +### Native resident publication and ownership metadata
 +
-+`convex deploy --native-resident <file>` validates and freezes a protocol-1
-+publication envelope before build commands. It requires explicit nullable
-+`expectedPrior`, `target` and `applicationContract` fields and matching backend
-+capability. Deployment metadata exposes the committed `nativeResident`
-+descriptor or null; an older backend's omission becomes null and grants no
-+native ownership. The backend owns process preparation, transactional selection
-+and lifecycle cleanup. See the
++`convex deploy --native-resident <file>` validates and freezes a publication
++envelope for lifecycle protocol 1 or 2 before build commands. It requires
++explicit nullable `expectedPrior`, `target` and `applicationContract` fields and
++matching backend capability. Deployment metadata exposes the committed
++`nativeResident` descriptor or null; an older backend's omission becomes null
++and grants no native ownership. The backend owns process preparation,
++transactional selection and lifecycle cleanup. See the
 +[backend native resident contract](https://github.com/convex-in-prod/convex-backend/blob/main/crates/node_executor/NATIVE_RESIDENTS.md).
 +
 +### Bounded Node resident retirement
