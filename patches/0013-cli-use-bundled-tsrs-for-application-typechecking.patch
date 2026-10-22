@@ -1,0 +1,759 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Fri, 23 Oct 2026 04:29:22 +0800
+Subject: [PATCH 13/13] cli: use bundled tsrs for application typechecking
+
+Ship a pinned tsrs runtime dependency and use it for every configured
+application check. Resolve its launcher relative to the installed SDK,
+including bundled CommonJS and nested package-manager layouts. Remove the
+compiler selector and obsolete project-local TypeScript version probe.
+
+Always disable emission, preserve watched-file registration and concurrent
+edit retries, and wait for diagnostic pipes to close before reporting a
+failed check. Accept an empty project only when its no-inputs diagnostic
+is the sole reported error.
+
+Retain the existing enable, try and disable modes and the SDK declaration
+baseline. Older tsc-based clients remain backend-compatible because the
+checker does not change deployment requests or emitted JavaScript.
+---
+ package.json                  |   1 +
+ patches/README.md             |  18 ++++
+ schemas/convex.schema.json    |   6 --
+ scripts/build.cjs             |   2 +
+ scripts/checkdeps.mjs         |   3 +-
+ src/cli/codegen.ts            |   2 +-
+ src/cli/dev.ts                |   4 +-
+ src/cli/lib/command.ts        |   8 +-
+ src/cli/lib/config.ts         |  10 ---
+ src/cli/lib/typecheck.test.ts | 162 ++++++++++++++++++++++++++++++++++
+ src/cli/lib/typecheck.ts      | 149 ++++++++-----------------------
+ src/cli/lib/utils/utils.ts    |   9 +-
+ src/cli/typecheck.ts          |  31 ++-----
+ 13 files changed, 241 insertions(+), 164 deletions(-)
+ create mode 100644 src/cli/lib/typecheck.test.ts
+
+diff --git a/package.json b/package.json
+index 2fc25ec0b3bb7036e2c1eba2431113527d0e8e7d..a92dc83d40c93fa6dfbee190c9de8bb713e7af02 100644
+--- a/package.json
++++ b/package.json
+@@ -244,6 +244,7 @@
+   "dependencies": {
+     "esbuild": "0.27.0",
+     "prettier": "^3.0.0",
++    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
+     "ws": "8.21.0"
+   },
+   "peerDependencies": {
+diff --git a/patches/README.md b/patches/README.md
+index b1ffada55198aca54fb8a4befb51991edc272d9d..c0028e987d6e5bf194e263cb4823f8cef37a53ce 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -18,6 +18,24 @@ in the
+ 
+ ## Maintained changes
+ 
++### Native application typechecking with tsrs
++
++The CLI uses its pinned `tsrs` dependency for application typechecks during
++`dev`, `deploy`, `codegen`, and `typecheck`. There is no compiler selector or
++fallback to tsc/tsgo. Remove the old `typescriptCompiler` setting from
++`convex.json`; the `--typescript-compiler` flag is no longer accepted. File
++observations and diagnostic retries remain intact. The existing typecheck
++`enable` mode requires a tsconfig; `try` skips projects without one; `disable`
++skips checking. A missing or unusable installed compiler fails a configured
++check in both `enable` and `try` modes. No separate application installation of
++tsrs is needed. Checks always pass `--noEmit`; esbuild remains the emitter.
++
++tsrs 0.18 uses TypeScript 7.1 development semantics and supports Linux x64/arm64
++and macOS arm64. Unsupported hosts cannot run these application typechecks. The
++SDK's declaration build retains its existing tsc baseline. Older SDK releases
++using tsc remain compatible with the backend: typechecking does not change the
++deployment protocol or emitted application JavaScript.
++
+ ### Live runtime selection
+ 
+ `convex runtime-mode` reads the backend's durable runtime policy. On a
+diff --git a/schemas/convex.schema.json b/schemas/convex.schema.json
+index e698611f8b9d54fd8c0d9ebbb65da3ac9082d6bb..cddd89a5dda94143c3ddf719d297a91c635da944 100644
+--- a/schemas/convex.schema.json
++++ b/schemas/convex.schema.json
+@@ -205,12 +205,6 @@
+         }
+       }
+     },
+-    "typescriptCompiler": {
+-      "type": "string",
+-      "enum": ["tsc", "tsgo"],
+-      "description": "Deprecated. Set to `tsgo` to use the TypeScript Native Preview compiler (`@typescript/native-preview`). TypeScript 7 uses the native compiler without needing this setting to be set.",
+-      "deprecated": true
+-    },
+     "authKit": {
+       "$ref": "#/definitions/authKitConfig"
+     },
+diff --git a/scripts/build.cjs b/scripts/build.cjs
+index a19d4ccf5c8c80a3f6343dfbb29c204056874625..2072734798186870f59e70bec62b2069ad7362c4 100755
+--- a/scripts/build.cjs
++++ b/scripts/build.cjs
+@@ -147,6 +147,8 @@ if (process.argv.includes("standalone-cli")) {
+       external: [
+         // contains a binary
+         "esbuild",
++        // contains a native compiler and its platform packages
++        "tsrs",
+         // contains a binary
+         "fsevents",
+         // prettier 3 is more difficult to bundle into a CJS bundle.
+diff --git a/scripts/checkdeps.mjs b/scripts/checkdeps.mjs
+index 20503a1bb260c3bb50fff971a0db23d40dd9dd7a..7cf4f05ff0a97684f72f0418bd7728457e92504a 100755
+--- a/scripts/checkdeps.mjs
++++ b/scripts/checkdeps.mjs
+@@ -18,7 +18,8 @@ const options = {
+     "src/bundler", // Bundler is only used by the CLI
+   ],
+   ignoreMatches: [
+-    "esbuild", // the only unbundled dependency of the CLI
++    "esbuild", // native CLI dependency
++    "tsrs", // native compiler resolved by the bundled CLI at runtime
+   ],
+ };
+ 
+diff --git a/src/cli/codegen.ts b/src/cli/codegen.ts
+index 1f21a77689142fb505219664cd91e2c760251e6a..69ad17bd0cfc1376e06d2b9f0622dc5623010356 100644
+--- a/src/cli/codegen.ts
++++ b/src/cli/codegen.ts
+@@ -27,7 +27,7 @@ export const codegen = new Command("codegen")
+   .addOption(
+     new Option(
+       "--typecheck <mode>",
+-      `Whether to check TypeScript files with \`tsc --noEmit\`.`,
++      `Whether to check TypeScript files with \`tsrs --noEmit\`.`,
+     )
+       .choices(["enable", "try", "disable"] as const)
+       .default("try" as const),
+diff --git a/src/cli/dev.ts b/src/cli/dev.ts
+index 090c10ceb396c8bb501904aad7e9821c510cea0e..6bd8524f40e75fb428784722453759b37ec52f35 100644
+--- a/src/cli/dev.ts
++++ b/src/cli/dev.ts
+@@ -31,14 +31,14 @@ export const dev = new Command("dev")
+   .addOption(
+     new Option(
+       "--typecheck <mode>",
+-      `Check TypeScript files with \`tsc --noEmit\`.`,
++      `Check TypeScript files with \`tsrs --noEmit\`.`,
+     )
+       .choices(["enable", "try", "disable"] as const)
+       .default("try" as const),
+   )
+   .option(
+     "--typecheck-components",
+-    "Check TypeScript files within component implementations with `tsc --noEmit`.",
++    "Check TypeScript files within component implementations with `tsrs --noEmit`.",
+     false,
+   )
+   .addOption(
+diff --git a/src/cli/lib/command.ts b/src/cli/lib/command.ts
+index 18cf2da83e52cf19a90a2af091ce3a64f8a36d09..76635264d97f0aafbc8fe36894f5d4409adaefde 100644
+--- a/src/cli/lib/command.ts
++++ b/src/cli/lib/command.ts
+@@ -349,14 +349,14 @@ Command.prototype.addDeployOptions = function () {
+     .addOption(
+       new Option(
+         "--typecheck <mode>",
+-        `Whether to check TypeScript files with \`tsc --noEmit\` before deploying.`,
++        `Whether to check TypeScript files with \`tsrs --noEmit\` before deploying.`,
+       )
+         .choices(["enable", "try", "disable"] as const)
+         .default("try" as const),
+     )
+     .option(
+       "--typecheck-components",
+-      "Check TypeScript files within component implementations with `tsc --noEmit`.",
++      "Check TypeScript files within component implementations with `tsrs --noEmit`.",
+       false,
+     )
+     .addOption(
+@@ -441,14 +441,14 @@ Command.prototype.addRunOptions = function () {
+       .addOption(
+         new Option(
+           "--typecheck <mode>",
+-          `Whether to check TypeScript files with \`tsc --noEmit\`.`,
++          `Whether to check TypeScript files with \`tsrs --noEmit\`.`,
+         )
+           .choices(["enable", "try", "disable"] as const)
+           .default("try" as const),
+       )
+       .option(
+         "--typecheck-components",
+-        "Check TypeScript files within component implementations with `tsc --noEmit`.",
++        "Check TypeScript files within component implementations with `tsrs --noEmit`.",
+         false,
+       )
+       .addOption(
+diff --git a/src/cli/lib/config.ts b/src/cli/lib/config.ts
+index 73614b16ed7c25266d8488b8eb1cdbc0b83fa6d0..e9f36a548701031de74e3307038f65f7efb0b3e1 100644
+--- a/src/cli/lib/config.ts
++++ b/src/cli/lib/config.ts
+@@ -4,7 +4,6 @@ import path from "path";
+ import { promises as nodeFs } from "fs";
+ import { z } from "zod";
+ import { Context } from "../../bundler/context.js";
+-import { TypescriptCompiler } from "./typecheck.js";
+ import {
+   changeSpinner,
+   logError,
+@@ -103,8 +102,6 @@ export interface ProjectConfig {
+     };
+   };
+ 
+-  typescriptCompiler?: TypescriptCompiler;
+-
+   // WorkOS AuthKit integration configuration
+   authKit?: AuthKitConfig | undefined;
+ 
+@@ -376,13 +373,6 @@ const createProjectConfigSchema = (strict: boolean) => {
+     }),
+     bundler: bundlerSchema.default({ includeSourcesContent: false }).optional(),
+     generateCommonJSApi: z.boolean().default(false),
+-    typescriptCompiler: z
+-      .enum(["tsc", "tsgo"])
+-      .optional()
+-      .describe(
+-        "TypeScript compiler to use for typechecking (`@typescript/native-preview` must be installed to use `tsgo`)",
+-      ),
+-
+     // Optional $schema field for JSON schema validation in editors
+     $schema: z.string().optional(),
+     // WorkOS AuthKit integration configuration
+diff --git a/src/cli/lib/typecheck.test.ts b/src/cli/lib/typecheck.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0dc21708c80cbb2de41e4920607e292048425dd7
+--- /dev/null
++++ b/src/cli/lib/typecheck.test.ts
+@@ -0,0 +1,162 @@
++import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
++import path from "node:path";
++import { expect, test, vi } from "vitest";
++import type { Context } from "../../bundler/context.js";
++import { nodeFs, RecordingFs, withTmpDir } from "../../bundler/fs.js";
++import {
++  typeCheckFunctions,
++  typeCheckFunctionsInMode,
++  type TypecheckResult,
++} from "./typecheck.js";
++import { spawnAsync } from "./utils/utils.js";
++
++function testContext(): Context {
++  return {
++    fs: nodeFs,
++    deprecationMessagePrinted: false,
++    crash: async ({ printedMessage }) => {
++      throw new Error(printedMessage ?? "CLI crashed without a message");
++    },
++    registerCleanup: () => "test-cleanup",
++    removeCleanup: () => async () => {},
++    bigBrainAuth: () => null,
++    _updateBigBrainAuth: () => {},
++  };
++}
++
++test("tsrs launcher retains file observation and diagnostic retry behavior", async () => {
++  await withTmpDir(async (tmpDir) => {
++    const originalDirectory = process.cwd();
++    const recordingFs = new RecordingFs(false);
++    const registerPath = vi.spyOn(recordingFs, "registerPath");
++    // The child resolves cwd to its real path, including macOS's symlinked temp directory.
++    const sourcePath = path.join(
++      realpathSync(tmpDir.path),
++      "convex",
++      "check.ts",
++    );
++    mkdirSync(path.join(tmpDir.path, "convex"));
++    writeFileSync(
++      path.join(tmpDir.path, "convex", "tsconfig.json"),
++      JSON.stringify({
++        compilerOptions: { noEmit: false, types: [], lib: ["es2020"] },
++      }),
++    );
++    writeFileSync(sourcePath, "const value: number = 1;");
++    try {
++      process.chdir(tmpDir.path);
++      const ctx = testContext();
++      ctx.fs = recordingFs;
++      await typeCheckFunctionsInMode(ctx, "enable", "convex");
++      expect(existsSync(sourcePath.replace(/\.ts$/, ".js"))).toBe(false);
++      expect(registerPath.mock.calls.some(([p]) => p === sourcePath)).toBe(
++        true,
++      );
++      expect(recordingFs.finalize()).not.toBe("invalidated");
++
++      writeFileSync(sourcePath, 'const value: number = "invalid";');
++      const retryFs = new RecordingFs(false);
++      ctx.fs = retryFs;
++      let failed = false;
++      await typeCheckFunctions(ctx, "convex", async (result, _log, retry) => {
++        expect(result).toBe("typecheckFailed");
++        expect(retry).toBeDefined();
++        await expect(retry!()).rejects.toMatchObject({ status: 2 });
++        expect(retryFs.finalize()).not.toBe("invalidated");
++        // A corrected source between passes retains the existing concurrent-change recovery.
++        writeFileSync(sourcePath, "const value: number = 1;");
++        await expect(retry!()).resolves.toBe("success");
++        failed = true;
++      });
++      expect(failed).toBe(true);
++      expect(retryFs.finalize()).toBe("invalidated");
++    } finally {
++      process.chdir(originalDirectory);
++      registerPath.mockRestore();
++    }
++  });
++});
++
++test("typecheck modes skip only missing configuration or an explicitly disabled check", async () => {
++  await withTmpDir(async (tmpDir) => {
++    const ctx = testContext();
++    await expect(
++      typeCheckFunctionsInMode(ctx, "try", tmpDir.path),
++    ).resolves.toBeUndefined();
++    await expect(
++      typeCheckFunctionsInMode(ctx, "enable", tmpDir.path),
++    ).rejects.toThrow();
++
++    writeFileSync(path.join(tmpDir.path, "tsconfig.json"), "{}");
++    await expect(
++      typeCheckFunctionsInMode(ctx, "try", tmpDir.path),
++    ).resolves.toBeUndefined();
++
++    writeFileSync(
++      path.join(tmpDir.path, "check.ts"),
++      'const value: number = "invalid";',
++    );
++    await expect(
++      typeCheckFunctionsInMode(ctx, "disable", tmpDir.path),
++    ).resolves.toBeUndefined();
++    await expect(
++      typeCheckFunctionsInMode(ctx, "try", tmpDir.path),
++    ).rejects.toThrow();
++  });
++});
++
++test("diagnostic subprocess failure waits for its output pipes to close", async () => {
++  await withTmpDir(async (tmpDir) => {
++    const marker = path.join(tmpDir.path, "diagnostics-complete");
++    // A descendant keeps the diagnostic pipes open after the launcher exits.
++    const lateWriter = `
++      setTimeout(() => {
++        process.stderr.write("final diagnostic\\n");
++        require("node:fs").writeFileSync(process.argv[1], "done");
++      }, 200);
++    `;
++    const launcher = `
++      const { spawn } = require("node:child_process");
++      spawn(process.execPath, ["-e", process.argv[1], process.argv[2]], {
++        stdio: ["ignore", 1, 2],
++      }).unref();
++      process.exit(2);
++    `;
++    await expect(
++      spawnAsync(
++        testContext(),
++        process.execPath,
++        ["-e", launcher, lateWriter, marker],
++        { stdio: "inherit" },
++      ),
++    ).rejects.toMatchObject({ status: 2 });
++    expect(existsSync(marker)).toBe(true);
++  });
++});
++
++test("a no-inputs diagnostic does not suppress other compiler errors", async () => {
++  await withTmpDir(async (tmpDir) => {
++    const compiler = path.join(tmpDir.path, "diagnostic-compiler");
++    writeFileSync(path.join(tmpDir.path, "tsconfig.json"), "{}");
++    // Exercise the pinned package's launcher with a deterministic diagnostic stream.
++    writeFileSync(
++      compiler,
++      `#!/usr/bin/env node
++console.log("error TS18003: No inputs were found.");
++console.log("error TS5023: Unknown compiler option 'invalid'.");
++process.exitCode = 2;
++`,
++      { mode: 0o755 },
++    );
++    vi.stubEnv("TSRS_BINARY", compiler);
++    try {
++      let result: TypecheckResult | undefined;
++      await typeCheckFunctions(testContext(), tmpDir.path, async (value) => {
++        result = value;
++      });
++      expect(result).toBe("typecheckFailed");
++    } finally {
++      vi.unstubAllEnvs();
++    }
++  });
++});
+diff --git a/src/cli/lib/typecheck.ts b/src/cli/lib/typecheck.ts
+index 06ed6f369f9ef879d76a4c098637ae73a3d7bc95..2689a56335992b10d44a96d29aae1b2ab8dea696 100644
+--- a/src/cli/lib/typecheck.ts
++++ b/src/cli/lib/typecheck.ts
+@@ -10,34 +10,18 @@ import {
+   showSpinner,
+ } from "../../bundler/log.js";
+ import * as Sentry from "@sentry/node";
+-import * as semver from "semver";
+ import { formatDuration, spawnAsync } from "./utils/utils.js";
+-import { readProjectConfig } from "./config.js";
+ import { WatchContext } from "./watch.js";
+-import { Filesystem } from "../../bundler/fs.js";
++import { createRequire } from "node:module";
+ 
+ export type TypecheckResult = "cantTypeCheck" | "success" | "typecheckFailed";
+ 
+ export type TypeCheckMode = "enable" | "try" | "disable";
+ 
+-export type TypescriptCompiler = "tsc" | "tsgo";
+-
+ const SLOW_TYPECHECK_THRESHOLD_MS = 10_000;
+ const SLOW_TYPECHECK_DOCS_URL =
+   "https://docs.convex.dev/cli/troubleshooting/typecheck-performance";
+ 
+-/**
+- * Resolves the TypeScript compiler to use based on CLI flag, config file, and default.
+- * Precedence: CLI flag → config file → default "tsc"
+- */
+-export async function resolveTypescriptCompiler(
+-  ctx: Context,
+-  cliOption?: TypescriptCompiler,
+-): Promise<TypescriptCompiler> {
+-  const { projectConfig } = await readProjectConfig(ctx);
+-  return cliOption ?? projectConfig?.typescriptCompiler ?? "tsc";
+-}
+-
+ type TypecheckResultHandler = (
+   result: TypecheckResult,
+   logSpecificError?: () => void,
+@@ -52,9 +36,9 @@ type TypecheckResultHandler = (
+  *
+  * If typeCheckMode === "disable", never run the typecheck function.
+  * If typeCheckMode === "enable", run the typecheck and crash if typechecking
+- * fails or we can't find tsc.
++ * fails or the project has no tsconfig.
+  * If typeCheckMode === "try", try and run the typecheck. crash if typechecking
+- * fails but don't worry if tsc is missing and we can't run it.
++ * fails but skip projects without a tsconfig.
+  */
+ export async function typeCheckFunctionsInMode(
+   ctx: Context,
+@@ -64,7 +48,6 @@ export async function typeCheckFunctionsInMode(
+   if (typeCheckMode === "disable") {
+     return;
+   }
+-  const typescriptCompiler = await resolveTypescriptCompiler(ctx);
+   const typecheckStart = performance.now();
+   const slowTypecheckTimeout = setTimeout(() => {
+     changeSpinner(
+@@ -74,7 +57,6 @@ export async function typeCheckFunctionsInMode(
+   try {
+     await typeCheckFunctions(
+       ctx,
+-      typescriptCompiler,
+       functionsDir,
+       async (result, logSpecificError, runOnError) => {
+         if (
+@@ -113,7 +95,6 @@ export async function typeCheckFunctionsInMode(
+ // Runs TypeScript compiler to typecheck Convex query and mutation functions.
+ export async function typeCheckFunctions(
+   ctx: Context,
+-  typescriptCompiler: TypescriptCompiler,
+   functionsDir: string,
+   handleResult: TypecheckResultHandler,
+ ): Promise<void> {
+@@ -126,107 +107,49 @@ export async function typeCheckFunctions(
+       logError("Run `npx convex codegen --init` to create one.");
+     });
+   }
+-  await runTsc(
++  // Resolve the compiler shipped with this CLI, including pnpm's nested layout. The
++  // published CLI is CommonJS; source and ESM consumers use import.meta.url instead.
++  const require = createRequire(
++    typeof __filename === "string" ? __filename : import.meta.url,
++  );
++  const compilerPath = path.join(
++    path.dirname(require.resolve("tsrs/package.json")),
++    "bin",
++    "tsrs",
++  );
++  await runTypecheck(
+     ctx,
+-    typescriptCompiler,
+-    ["--project", functionsDir],
++    compilerPath,
++    // Typechecking must not emit files even when a project enables TypeScript emit.
++    ["--project", functionsDir, "--noEmit"],
+     handleResult,
+   );
+ }
+ 
+-async function runTsc(
+-  ctx: Context,
+-  typescriptCompiler: TypescriptCompiler,
+-  tscArgs: string[],
+-  handleResult: TypecheckResultHandler,
+-): Promise<void> {
+-  const compilerPath = findTypeScriptCompilerPath(ctx.fs, typescriptCompiler);
+-  if (!compilerPath) {
+-    return handleResult("cantTypeCheck", () => {
+-      logError(
+-        chalkStderr.gray(
+-          `No \`${typescriptCompiler}\` binary found, so skipping typecheck.`,
+-        ),
+-      );
+-    });
+-  }
+-
+-  // Check the TypeScript version matches the recommendation from Convex
+-  const versionResult = await spawnAsync(ctx, process.execPath, [
+-    compilerPath,
+-    "--version",
+-  ]);
+-
+-  const version = versionResult.stdout.match(/Version (.*)/)?.[1] ?? null;
+-  const hasOlderTypeScriptVersion = version && semver.lt(version, "4.8.4");
+-
+-  await runTscInner(ctx, compilerPath, tscArgs, handleResult);
+-
+-  // Print this warning after any logs from running `tsc`
+-  if (hasOlderTypeScriptVersion) {
+-    logError(
+-      chalkStderr.yellow(
+-        "Convex works best with TypeScript version 4.8.4 or newer -- npm i --save-dev typescript@latest to update.",
+-      ),
+-    );
+-  }
+-}
+-
+-export function findTypeScriptCompilerPath(
+-  fs: Pick<Filesystem, "exists">,
+-  typescriptCompiler: TypescriptCompiler,
+-): string | undefined {
+-  switch (typescriptCompiler) {
+-    case "tsgo": {
+-      // @typescript/native-preview@7.0.0-dev.20260626.1 switched to using `bin/tsgo` instead of `bin/tsgo.js`.
+-      const tsgoPaths = ["tsgo", "tsgo.js"].map((filename) =>
+-        path.join(
+-          "node_modules",
+-          "@typescript",
+-          "native-preview",
+-          "bin",
+-          filename,
+-        ),
+-      );
+-      return tsgoPaths.find((path) => fs.exists(path));
+-    }
+-    case "tsc": {
+-      const tscPaths = [
+-        // TypeScript 7's recommended alias when the TypeScript 6 API is also installed.
+-        path.join("node_modules", "@typescript", "native", "bin", "tsc"),
+-        path.join("node_modules", "typescript", "bin", "tsc"),
+-      ];
+-      return tscPaths.find((path) => fs.exists(path));
+-    }
+-    default:
+-      typescriptCompiler satisfies never;
+-  }
+-}
+-
+-async function runTscInner(
++async function runTypecheck(
+   ctx: Context,
+-  tscPath: string,
+-  tscArgs: string[],
++  compilerPath: string,
++  compilerArgs: string[],
+   handleResult: TypecheckResultHandler,
+ ) {
+-  // Run `tsc` once and have it print out the files it touched. This output won't
++  // Run `tsrs` once and have it print out the files it touched. This output won't
+   // be very useful if there's an error, but we'll run it again to get a nice
+   // user-facing error in this exceptional case.
+   // The `--listFiles` command prints out files touched on success or error.
+   const result = await spawnAsync(ctx, process.execPath, [
+-    tscPath,
+-    ...tscArgs,
++    compilerPath,
++    ...compilerArgs,
+     "--listFiles",
+   ]);
+   if (result.status === null) {
+     return handleResult("typecheckFailed", () => {
+-      logFailure(`TypeScript typecheck timed out.`);
++      logFailure(`TypeScript typecheck could not complete.`);
+       if (result.error) {
+         logError(chalkStderr.red(`${result.error.toString()}`));
+       }
+     });
+   }
+-  // Okay, we may have failed `tsc` but at least it returned. Try to parse its
++  // Okay, we may have failed `tsrs` but at least it returned. Try to parse its
+   // output to discover which files it touched.
+   const filesTouched = result.stdout
+     .split("\n")
+@@ -240,8 +163,8 @@ async function runTscInner(
+       st = ctx.fs.stat(absPath);
+       anyPathsFound = true;
+     } catch {
+-      // Just move on if we have a bogus path from `tsc`. We'll log below if
+-      // we fail to stat *any* of the paths emitted by `tsc`.
++      // Just move on if we have a bogus path from `tsrs`. We'll log below if
++      // we fail to stat *any* of the paths emitted by `tsrs`.
+       // TODO: Switch to using their JS API so we can get machine readable output.
+       continue;
+     }
+@@ -249,7 +172,7 @@ async function runTscInner(
+   }
+   if (filesTouched.length > 0 && !anyPathsFound) {
+     const err = new Error(
+-      `Failed to stat any files emitted by tsc (received ${filesTouched.length})`,
++      `Failed to stat any files emitted by tsrs (received ${filesTouched.length})`,
+     );
+     Sentry.captureException(err);
+   }
+@@ -258,25 +181,29 @@ async function runTscInner(
+     return handleResult("success");
+   }
+ 
+-  // This is the "No inputs were found", which is fine and we shouldn't
+-  // report it to the user.
+-  if (result.stdout.startsWith("error TS18003")) {
++  // An empty project is valid, but TS18003 must not hide later configuration
++  // diagnostics or a launcher failure on stderr.
++  if (
++    filesTouched.length === 1 &&
++    filesTouched[0].startsWith("error TS18003:") &&
++    result.stderr.trim() === ""
++  ) {
+     return handleResult("success");
+   }
+ 
+-  // At this point we know that `tsc` failed. Rerun it without `--listFiles`
++  // At this point we know that `tsrs` failed. Rerun it without `--listFiles`
+   // and with stderr redirected to have it print out a nice error.
+   return handleResult(
+     "typecheckFailed",
+     () => {
+-      logFailure("TypeScript typecheck via `tsc` failed.");
++      logFailure(`TypeScript typecheck via \`tsrs\` failed.`);
+     },
+     async () => {
+       showSpinner("Collecting TypeScript errors");
+       await spawnAsync(
+         ctx,
+         process.execPath,
+-        [tscPath, ...tscArgs, "--pretty", "true"],
++        [compilerPath, ...compilerArgs, "--pretty", "true"],
+         {
+           stdio: "inherit",
+         },
+diff --git a/src/cli/lib/utils/utils.ts b/src/cli/lib/utils/utils.ts
+index 5355377460ef4a92382e912f5b878c6f0e5e5052..829187c4f34d7b89c09bf7e41af99a8dcdf4a30e 100644
+--- a/src/cli/lib/utils/utils.ts
++++ b/src/cli/lib/utils/utils.ts
+@@ -1206,7 +1206,6 @@ export function spawnAsync(
+     };
+ 
+     const errorListener = (error: Error) => {
+-      child.removeListener("exit", completionListener);
+       child.removeListener("close", completionListener);
+       if (pipeOutput) {
+         reject({ error, status: null });
+@@ -1215,11 +1214,9 @@ export function spawnAsync(
+       }
+     };
+ 
+-    if (pipeOutput) {
+-      child.once("exit", completionListener);
+-    } else {
+-      child.once("close", completionListener);
+-    }
++    // `exit` can precede the last diagnostics on the pipes, even when we forward
++    // output. Wait for them to close before the caller can exit the CLI.
++    child.once("close", completionListener);
+     child.once("error", errorListener);
+   });
+ }
+diff --git a/src/cli/typecheck.ts b/src/cli/typecheck.ts
+index 935759d29c63f3294163cc9488796a67051af0f8..cfa104aa36d79c8ac4b3828ede93898bf9b74b89 100644
+--- a/src/cli/typecheck.ts
++++ b/src/cli/typecheck.ts
+@@ -1,46 +1,29 @@
+ import { chalkStderr } from "chalk";
+ import { functionsDir, ensureHasConvexDependency } from "./lib/utils/utils.js";
+-import { Command, Option } from "@commander-js/extra-typings";
++import { Command } from "@commander-js/extra-typings";
+ import { readConfig } from "./lib/config.js";
+-import {
+-  typeCheckFunctions,
+-  resolveTypescriptCompiler,
+-} from "./lib/typecheck.js";
++import { typeCheckFunctions } from "./lib/typecheck.js";
+ import { oneoffContext } from "../bundler/context.js";
+ import { logFinishedStep, logMessage } from "../bundler/log.js";
+ 
+ // Experimental (it's going to fail sometimes) TypeScript type checking.
+ // Includes a separate command to help users debug their TypeScript configs.
+ 
+-export type TypecheckResult = "cantTypeCheck" | "success" | "typecheckFailed";
+-
+-/** Run the TypeScript compiler, as configured during  */
+ export const typecheck = new Command("typecheck")
+   .description(
+-    "Run TypeScript typechecking on your Convex functions with `tsc --noEmit`.",
++    "Run TypeScript typechecking on your Convex functions with tsrs.",
+   )
+   .allowExcessArguments(false)
+-  .addOption(
+-    new Option(
+-      "--typescript-compiler <compiler>",
+-      "TypeScript compiler to use for typechecking (`@typescript/native-preview` must be installed to use `tsgo`)",
+-    ).choices(["tsc", "tsgo"] as const),
+-  )
+-  .action(async (cmdOptions) => {
++  .action(async () => {
+     const ctx = await oneoffContext({
+       url: undefined,
+       adminKey: undefined,
+       envFile: undefined,
+     });
+-    const typescriptCompiler = await resolveTypescriptCompiler(
+-      ctx,
+-      cmdOptions.typescriptCompiler,
+-    );
+     const { configPath, config: localConfig } = await readConfig(ctx, false);
+     await ensureHasConvexDependency(ctx, "typecheck");
+     await typeCheckFunctions(
+       ctx,
+-      typescriptCompiler,
+       functionsDir(configPath, localConfig.projectConfig),
+       async (typecheckResult, logSpecificError, runOnError) => {
+         logSpecificError?.();
+@@ -60,7 +43,9 @@ export const typecheck = new Command("typecheck")
+           });
+         } else if (typecheckResult === "cantTypeCheck") {
+           logMessage(
+-            chalkStderr.gray("Unable to typecheck; is TypeScript installed?"),
++            chalkStderr.gray(
++              "Unable to typecheck; is convex/tsconfig.json present?",
++            ),
+           );
+           return await ctx.crash({
+             exitCode: 1,
+@@ -69,7 +54,7 @@ export const typecheck = new Command("typecheck")
+           });
+         } else {
+           logFinishedStep(
+-            `Typecheck passed: \`${typescriptCompiler} --noEmit\` completed with exit code 0.`,
++            `Typecheck passed: \`tsrs --noEmit\` completed with exit code 0.`,
+           );
+           return await ctx.flushAndExit(0);
+         }
