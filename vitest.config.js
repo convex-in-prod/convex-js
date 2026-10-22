@@ -1,7 +1,13 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    // Cache scripts use the Node test runner through npm run test:build-cache.
+    exclude: [
+      ...configDefaults.exclude,
+      "scripts/run-tsrs.test.mjs",
+      "scripts/tsrs-cache.test.mjs",
+    ],
     alias: {
       "@jest/globals": "vitest",
     },

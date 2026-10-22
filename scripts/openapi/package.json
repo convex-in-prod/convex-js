@@ -1,0 +1,8 @@
+{
+  "name": "@convex-in-prod/openapi-codegen",
+  "private": true,
+  "dependencies": {
+    "openapi-typescript": "~7.8.0",
+    "typescript": "~5.9.3"
+  }
+}
