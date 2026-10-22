@@ -3,6 +3,7 @@
     "temp",
     ".git/",
     "dist/",
+    "package-lock.json",
     "api-extractor-configs/reports",
     "api-extractor-configs/temp",
     "tmpDist*",

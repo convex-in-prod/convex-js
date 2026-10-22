@@ -35,13 +35,15 @@ jobs:
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
 
       - name: Install
-        run: npm install
+        run: npm ci
 
       - name: Test
-        run: npm test -- --run
+        run: |
+          npm run test:build-cache
+          npm test -- --run
 
-      - name: Typecheck
-        run: npm run typecheck
+      - name: Lint and typecheck
+        run: npm run lint
 
       - name: Reject validation side effects
         # Package the exact reviewed commit rather than silently restoring
@@ -62,18 +64,7 @@ jobs:
               '*.tsx' '*.yaml' '*.yml' ':(exclude)packages/convex/**'
           )
           if (( ${#format_files[@]} > 0 )); then
-            # Upstream has no lockfile, so keep formatter upgrades from changing
-            # the publication gate after the reviewed source commit is fixed.
-            npx --yes prettier@3.8.1 --check "${format_files[@]}"
-          fi
-
-          mapfile -t lint_files < <(
-            git diff --name-only --diff-filter=ACMR "$upstream_base_sha" HEAD -- \
-              '*.cjs' '*.js' '*.jsx' '*.mjs' '*.ts' '*.tsx' \
-              ':(exclude)packages/convex/**'
-          )
-          if (( ${#lint_files[@]} > 0 )); then
-            npx eslint --no-warn-ignored "${lint_files[@]}"
+            npm exec --no -- prettier --check "${format_files[@]}"
           fi
 
       - name: Set package provenance

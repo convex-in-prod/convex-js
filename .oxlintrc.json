@@ -1,0 +1,15 @@
+{
+  "categories": { "correctness": "off" },
+  "plugins": ["typescript"],
+  "rules": {
+    "typescript/no-floating-promises": "error",
+    "typescript/restrict-template-expressions": "error"
+  },
+  "ignorePatterns": [
+    "**/custom-vitest-environment.ts",
+    "src/cli/generatedApi.ts",
+    "src/cli/lib/generatedFunctionLogsApi.ts",
+    "src/vendor/progress",
+    "**/*.js"
+  ]
+}

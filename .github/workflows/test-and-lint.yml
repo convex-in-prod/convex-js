@@ -23,8 +23,8 @@ jobs:
         with:
           node-version: "22"
 
-      - name: NPM v10
-        run: npm install -g npm@10 --registry=https://registry.npmjs.org
+      - name: NPM v11
+        run: npm install -g npm@11.19.1 --registry=https://registry.npmjs.org
 
       - name: Format check (dprint)
         uses: dprint/check@9cb3a2b17a8e606d37aae341e49df3654933fc23 # v2.3
@@ -32,7 +32,14 @@ jobs:
           config-path: dprint.json
           dprint-version: "0.51.1"
 
-      - run: npm i
+      - run: npm ci
+
+      - name: Python build tooling
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+
+      - run: npm run build
+
+      - run: npm run test:build-cache
 
       - run: npm run test-esm
 

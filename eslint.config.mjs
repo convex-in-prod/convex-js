@@ -63,11 +63,6 @@ export default [
       parser: tseslint.parser,
       ecmaVersion: 2022,
       sourceType: "module",
-
-      parserOptions: {
-        project: ["./tsconfig.json"],
-        tsconfigRootDir: __dirname,
-      },
     },
 
     rules: {
@@ -77,8 +72,6 @@ export default [
       "@typescript-eslint/no-explicit-any": "off",
       // asserting that values aren't null is risky but useful.
       "@typescript-eslint/no-non-null-assertion": "off",
-      // Warn against interpolating objects
-      "@typescript-eslint/restrict-template-expressions": "error",
 
       "no-redeclare": "off", // breaks for overloads
       "@typescript-eslint/no-redeclare": "error",
@@ -108,9 +101,6 @@ export default [
           message: "Use `private` instead",
         },
       ],
-
-      // Makes it harder to accidentally fire off a promise without waiting for it.
-      "@typescript-eslint/no-floating-promises": "error",
 
       // Since `const x = <number>foo;` syntax is ambiguous with JSX syntax some tools don't support it.
       // In particular we need this for depcheck https://github.com/depcheck/depcheck/issues/585

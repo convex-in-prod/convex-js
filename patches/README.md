@@ -20,6 +20,37 @@ The SDK and CLI require Node.js 22 or newer, following upstream 1.49.0.
 
 ## Maintained changes
 
+### Native TypeScript checking and declarations with tsrs
+
+The CLI uses its pinned `tsrs` dependency for application typechecks during
+`dev`, `deploy`, `codegen`, and `typecheck`. There is no compiler selector or
+fallback to tsc/tsgo. Remove the old `typescriptCompiler` setting from
+`convex.json`; the `--typescript-compiler` flag is no longer accepted. File
+observations and diagnostic retries remain intact. The existing typecheck
+`enable` mode requires a tsconfig; `try` skips projects without one; `disable`
+skips checking. A missing or unusable installed compiler fails a configured
+check in both `enable` and `try` modes. No separate application installation of
+tsrs is needed. Checks always pass `--noEmit`; esbuild remains the emitter.
+
+The pinned tsrs 0.23.0 release uses TypeScript 7.1 beta semantics and supports
+Linux x64/arm64, macOS arm64/x64, and Windows x64. Unsupported hosts cannot run
+these application typechecks. The SDK also uses tsrs for source checks and
+declaration emission. It emits public and internal declarations once each, then
+copies them into the ESM/CommonJS package layouts; their package markers differ,
+their declaration contents do not. esbuild still emits runtime JavaScript. The
+public declarations avoid requiring generic typed arrays solely because the
+build compiler is newer. Older SDK releases using tsc remain compatible with the
+backend: typechecking does not change the deployment protocol or emitted
+application JavaScript.
+
+SDK typechecks and declaration builds reuse incremental state under the shared
+`TSRS_CACHE_DIR` root, separated by package namespace, compiler, configuration,
+and build scope. Declaration archives include their emitted files; public and
+internal declarations remain separate. The SDK owns completed-entry cleanup
+through `npm run cache:tsrs:prune`. See the
+[build notes](../CONTRIBUTING.md#build-notes) for cache controls, retention, and
+verification commands.
+
 ### Live runtime selection
 
 `convex runtime-mode` reads the backend's durable runtime policy. On a

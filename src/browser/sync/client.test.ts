@@ -358,7 +358,7 @@ describe("degradable BaseConvexClient", () => {
     let retryDuringReconnect: boolean | undefined;
     class ReentrantConnectWebSocket extends nodeWebSocket {
       override send(
-        data: string | ArrayBufferLike | Blob | ArrayBufferView,
+        data: Parameters<InstanceType<typeof nodeWebSocket>["send"]>[0],
       ): void {
         super.send(data);
         if (
@@ -483,7 +483,7 @@ describe("degradable BaseConvexClient", () => {
     let failRetrySend = true;
     class RetryFailingWebSocket extends nodeWebSocket {
       override send(
-        data: string | ArrayBufferLike | Blob | ArrayBufferView,
+        data: Parameters<InstanceType<typeof nodeWebSocket>["send"]>[0],
       ): void {
         if (
           failRetrySend &&
