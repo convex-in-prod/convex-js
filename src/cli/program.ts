@@ -25,6 +25,7 @@ import { plugins } from "./plugins.js";
 import { project } from "./project.js";
 import { reinit } from "./reinit.js";
 import { run } from "./run.js";
+import { runtimeMode } from "./runtimeMode.js";
 import { typecheck } from "./typecheck.js";
 import { update } from "./update.js";
 import { version } from "./version.js";
@@ -43,6 +44,7 @@ export function buildProgram() {
       .addCommand(deploy)
       .addCommand(deployments, { hidden: true })
       .addCommand(run)
+      .addCommand(runtimeMode)
       .addCommand(convexImport)
       .addCommand(dashboard)
       .addCommand(docs)
