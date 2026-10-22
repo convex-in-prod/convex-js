@@ -1,42 +1,69 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Fri, 23 Oct 2026 04:29:22 +0800
-Subject: [PATCH 13/13] cli: use bundled tsrs for application typechecking
+Subject: [PATCH 13/13] build: use tsrs for application checks and SDK
+ declarations
 
-Ship a pinned tsrs runtime dependency and use it for every configured
-application check. Resolve its launcher relative to the installed SDK,
-including bundled CommonJS and nested package-manager layouts. Remove the
-compiler selector and obsolete project-local TypeScript version probe.
+Ship pinned tsrs with the CLI and use it for every configured application
+check. Resolve its launcher relative to the installed SDK, including bundled
+CommonJS and nested package-manager layouts. Remove compiler selection and
+the obsolete project-local TypeScript version probe.
 
-Always disable emission, preserve watched-file registration and concurrent
-edit retries, and wait for diagnostic pipes to close before reporting a
-failed check. Accept an empty project only when its no-inputs diagnostic
-is the sole reported error.
+Force no emission for application checks, preserve watched-file observation
+and concurrent-edit retries, and await diagnostic pipe closure. Accept an
+empty project only when its no-inputs diagnostic is the sole reported error.
+The existing enable, try and disable modes remain.
 
-Retain the existing enable, try and disable modes and the SDK declaration
-baseline. Older tsc-based clients remain backend-compatible because the
-checker does not change deployment requests or emitted JavaScript.
+Use tsrs for SDK source checking and declaration emission. Generate public
+and internal declarations once each, then copy the identical declarations
+to their ESM and CommonJS package layouts. Keep package markers, declaration
+maps and internal-API removal intact; esbuild still emits runtime JavaScript.
+Describe ordinary buffer ownership without adding upload copies or requiring
+generic typed-array syntax in public declarations.
+
+Older tsc-based clients remain backend-compatible because checking does not
+change deployment requests or emitted application JavaScript.
+
+Keep machine-readable diagnostics unformatted, decode subprocess UTF-8 across
+pipe chunks, and check explicit projects without bundling their application.
 ---
- package.json                  |   1 +
- patches/README.md             |  18 ++++
- schemas/convex.schema.json    |   6 --
- scripts/build.cjs             |   2 +
- scripts/checkdeps.mjs         |   3 +-
- src/cli/codegen.ts            |   2 +-
- src/cli/dev.ts                |   4 +-
- src/cli/lib/command.ts        |   8 +-
- src/cli/lib/config.ts         |  10 ---
- src/cli/lib/typecheck.test.ts | 162 ++++++++++++++++++++++++++++++++++
- src/cli/lib/typecheck.ts      | 149 ++++++++-----------------------
- src/cli/lib/utils/utils.ts    |   9 +-
- src/cli/typecheck.ts          |  31 ++-----
- 13 files changed, 241 insertions(+), 164 deletions(-)
+ package.json                    |   3 +-
+ patches/README.md               |  22 ++++
+ schemas/convex.schema.json      |   6 --
+ scripts/build.cjs               |   2 +
+ scripts/build.py                |  53 +++------
+ scripts/checkdeps.mjs           |   3 +-
+ scripts/compare-codegen.mjs     |  14 +--
+ scripts/postpack.mjs            |  15 +--
+ src/browser/sync/client.test.ts |   4 +-
+ src/cli/codegen.ts              |   2 +-
+ src/cli/dev.ts                  |   4 +-
+ src/cli/lib/command.ts          |   8 +-
+ src/cli/lib/config.ts           |  10 --
+ src/cli/lib/convexImport.ts     |   4 +-
+ src/cli/lib/deploy2.ts          |   9 +-
+ src/cli/lib/networkTest.ts      |   3 +-
+ src/cli/lib/typecheck.test.ts   | 185 ++++++++++++++++++++++++++++++++
+ src/cli/lib/typecheck.ts        | 156 ++++++++-------------------
+ src/cli/lib/utils/utils.ts      |  29 +++--
+ src/cli/typecheck.ts            |  40 +++----
+ src/values/base64.ts            |   4 +-
+ 21 files changed, 329 insertions(+), 247 deletions(-)
  create mode 100644 src/cli/lib/typecheck.test.ts
 
 diff --git a/package.json b/package.json
-index 2fc25ec0b3bb7036e2c1eba2431113527d0e8e7d..a92dc83d40c93fa6dfbee190c9de8bb713e7af02 100644
+index 2fc25ec0b3bb7036e2c1eba2431113527d0e8e7d..fe7b36bb09d3cf2cb2b5c72bbaa62c52c33d7fe1 100644
 --- a/package.json
 +++ b/package.json
+@@ -197,7 +197,7 @@
+     "postpack": "node scripts/postpack.mjs",
+     "test": "vitest --silent",
+     "test-not-silent": "vitest",
+-    "typecheck": "tsc --noEmit --emitDeclarationOnly false",
++    "typecheck": "tsrs --noEmit --emitDeclarationOnly false",
+     "test-esm": "node ./scripts/test-esm.mjs && ./scripts/checkdeps.mjs && ./scripts/checkimports.mjs",
+     "compare-codegen": "node scripts/compare-codegen.mjs",
+     "generateApiSpec": "npm run generateManagementApiSpec && npm run generateFunctionLogsApiSpec",
 @@ -244,6 +244,7 @@
    "dependencies": {
      "esbuild": "0.27.0",
@@ -46,14 +73,14 @@ index 2fc25ec0b3bb7036e2c1eba2431113527d0e8e7d..a92dc83d40c93fa6dfbee190c9de8bb7
    },
    "peerDependencies": {
 diff --git a/patches/README.md b/patches/README.md
-index b1ffada55198aca54fb8a4befb51991edc272d9d..c0028e987d6e5bf194e263cb4823f8cef37a53ce 100644
+index b1ffada55198aca54fb8a4befb51991edc272d9d..06cdf43316d658d0a513e414d4e2872f11e8d200 100644
 --- a/patches/README.md
 +++ b/patches/README.md
-@@ -18,6 +18,24 @@ in the
+@@ -18,6 +18,28 @@ in the
  
  ## Maintained changes
  
-+### Native application typechecking with tsrs
++### Native TypeScript checking and declarations with tsrs
 +
 +The CLI uses its pinned `tsrs` dependency for application typechecks during
 +`dev`, `deploy`, `codegen`, and `typecheck`. There is no compiler selector or
@@ -67,9 +94,13 @@ index b1ffada55198aca54fb8a4befb51991edc272d9d..c0028e987d6e5bf194e263cb4823f8ce
 +
 +tsrs 0.18 uses TypeScript 7.1 development semantics and supports Linux x64/arm64
 +and macOS arm64. Unsupported hosts cannot run these application typechecks. The
-+SDK's declaration build retains its existing tsc baseline. Older SDK releases
-+using tsc remain compatible with the backend: typechecking does not change the
-+deployment protocol or emitted application JavaScript.
++SDK also uses tsrs for source checks and declaration emission. It emits public
++and internal declarations once each, then copies them into the ESM/CommonJS
++package layouts; their package markers differ, their declaration contents do
++not. esbuild still emits runtime JavaScript. The public declarations avoid
++requiring generic typed arrays solely because the build compiler is newer. Older
++SDK releases using tsc remain compatible with the backend: typechecking does not
++change the deployment protocol or emitted application JavaScript.
 +
  ### Live runtime selection
  
@@ -104,6 +135,97 @@ index a19d4ccf5c8c80a3f6343dfbb29c204056874625..2072734798186870f59e70bec62b2069
          // contains a binary
          "fsevents",
          // prettier 3 is more difficult to bundle into a CJS bundle.
+diff --git a/scripts/build.py b/scripts/build.py
+index da00a87004bde2e82facd11008081c4071d243a3..b3690e870ddafc605e261085a798c75a690fb018 100755
+--- a/scripts/build.py
++++ b/scripts/build.py
+@@ -1,12 +1,9 @@
+ #!/usr/bin/env python3
+ # /// script
+ # requires-python = "~=3.13.0"
+-# dependencies = [
+-#     "toml",
+-# ]
++# dependencies = []
+ # ///
+ 
+-import os
+ import random
+ import shutil
+ import subprocess
+@@ -17,8 +14,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
+ from functools import wraps
+ from pathlib import Path
+ 
+-NPM = "npm.CMD" if os.name == "nt" else "npm"
+-
+ times: dict[str, float] = {}
+ 
+ 
+@@ -63,38 +58,22 @@ def provide_temp_dir(func: Callable[[Path], None]) -> Callable[[], None]:
+ 
+ @log_duration
+ @provide_temp_dir
+-def build_esm_types(temp_dir: Path) -> None:
+-    (temp_dir / Path("esm-types")).mkdir(parents=True, exist_ok=True)
+-    (temp_dir / Path("esm-types/package.json")).write_text('{"type": "module"}')
+-    run(f"tsc --outDir {temp_dir / 'esm-types'}")
+-
+-
+-@log_duration
+-@provide_temp_dir
+-def build_internal_esm_types(temp_dir: Path) -> None:
+-    (temp_dir / Path("internal-esm-types")).mkdir(parents=True, exist_ok=True)
+-    (temp_dir / Path("internal-esm-types/package.json")).write_text(
+-        '{"type": "module"}'
+-    )
+-    run(f"tsc --stripInternal false --outDir {temp_dir / 'internal-esm-types'}")
+-
+-
+-@log_duration
+-@provide_temp_dir
+-def build_cjs_types(temp_dir: Path) -> None:
+-    (temp_dir / Path("cjs-types")).mkdir(parents=True, exist_ok=True)
+-    (temp_dir / Path("cjs-types/package.json")).write_text('{"type": "commonjs"}')
+-    run(f"tsc --outDir {temp_dir / 'cjs-types'}")
++def build_public_types(temp_dir: Path) -> None:
++    run(f"tsrs --outDir {temp_dir / 'esm-types'}")
++    # Both declaration builds use the same module settings. Only the package
++    # markers differ; equal directory depths also preserve declaration-map paths.
++    shutil.copytree(temp_dir / "esm-types", temp_dir / "cjs-types")
++    (temp_dir / "esm-types/package.json").write_text('{"type": "module"}')
++    (temp_dir / "cjs-types/package.json").write_text('{"type": "commonjs"}')
+ 
+ 
+ @log_duration
+ @provide_temp_dir
+-def build_internal_cjs_types(temp_dir: Path) -> None:
+-    (temp_dir / Path("internal-cjs-types")).mkdir(parents=True, exist_ok=True)
+-    (temp_dir / Path("internal-cjs-types/package.json")).write_text(
+-        '{"type": "commonjs"}'
+-    )
+-    run(f"tsc --stripInternal false --outDir {temp_dir / 'internal-cjs-types'}")
++def build_internal_types(temp_dir: Path) -> None:
++    run(f"tsrs --stripInternal false --outDir {temp_dir / 'internal-esm-types'}")
++    shutil.copytree(temp_dir / "internal-esm-types", temp_dir / "internal-cjs-types")
++    (temp_dir / "internal-esm-types/package.json").write_text('{"type": "module"}')
++    (temp_dir / "internal-cjs-types/package.json").write_text('{"type": "commonjs"}')
+ 
+ 
+ @log_duration
+@@ -138,10 +117,8 @@ def main() -> None:
+ 
+     children = []
+     # Types are slower, run them first
+-    children.append(pool.submit(build_esm_types))
+-    children.append(pool.submit(build_internal_esm_types))
+-    children.append(pool.submit(build_cjs_types))
+-    children.append(pool.submit(build_internal_cjs_types))
++    children.append(pool.submit(build_public_types))
++    children.append(pool.submit(build_internal_types))
+     children.append(pool.submit(build_cjs_and_esm))
+     children.append(pool.submit(build_browser_script_tag))
+     children.append(pool.submit(build_react_script_tag))
 diff --git a/scripts/checkdeps.mjs b/scripts/checkdeps.mjs
 index 20503a1bb260c3bb50fff971a0db23d40dd9dd7a..7cf4f05ff0a97684f72f0418bd7728457e92504a 100755
 --- a/scripts/checkdeps.mjs
@@ -118,6 +240,114 @@ index 20503a1bb260c3bb50fff971a0db23d40dd9dd7a..7cf4f05ff0a97684f72f0418bd772845
    ],
  };
  
+diff --git a/scripts/compare-codegen.mjs b/scripts/compare-codegen.mjs
+index e41bff9c6e58f5b5ab5d34206804ae7365020224..faf56c18650fd16045514ed07c762836fcdc10b0 100755
+--- a/scripts/compare-codegen.mjs
++++ b/scripts/compare-codegen.mjs
+@@ -12,7 +12,7 @@ import { noSchemaDataModelDTS } from "../dist/esm/cli/codegen_templates/dataMode
+ import * as fs from "fs";
+ import * as path from "path";
+ import * as os from "os";
+-import { execSync } from "child_process";
++import { execFileSync } from "child_process";
+ import prettier from "prettier";
+ 
+ const modulePaths = ["foo.ts", "bar/baz.ts"];
+@@ -20,16 +20,16 @@ const modulePaths = ["foo.ts", "bar/baz.ts"];
+ console.log("Generating codegen outputs for comparison...\n");
+ 
+ // Generate all versions of our files
+-const apiJsDts = apiCodegen(modulePaths, { generateJavaScriptApi: true });
++const apiJsDts = apiCodegen(modulePaths, { useTypeScript: false });
+ const apiJs = apiJsDts.JS;
+ const apiDts = apiJsDts.DTS;
+-const apiTsResult = apiCodegen(modulePaths, { generateJavaScriptApi: false });
++const apiTsResult = apiCodegen(modulePaths, { useTypeScript: true });
+ const apiTs = apiTsResult.TS;
+ 
+-const serverJsDts = serverCodegen({ generateJavaScriptApi: true });
++const serverJsDts = serverCodegen({ useTypeScript: false });
+ const serverJs = serverJsDts.JS;
+ const serverDts = serverJsDts.DTS;
+-const serverTsResult = serverCodegen({ generateJavaScriptApi: false });
++const serverTsResult = serverCodegen({ useTypeScript: true });
+ const serverTs = serverTsResult.TS;
+ 
+ const dataModelDts = noSchemaDataModelDTS();
+@@ -169,9 +169,9 @@ try {
+   }
+ 
+   // Compile the TS files
+-  const tscPath = path.join(projectRoot, "node_modules", ".bin", "tsc");
++  const tsrsPath = path.join(projectRoot, "node_modules", ".bin", "tsrs");
+   try {
+-    execSync(`${tscPath} --project ${path.join(tmpDir, "tsconfig.json")}`, {
++    execFileSync(tsrsPath, ["--project", path.join(tmpDir, "tsconfig.json")], {
+       cwd: tmpDir,
+       stdio: "pipe",
+     });
+diff --git a/scripts/postpack.mjs b/scripts/postpack.mjs
+index 9a0299ef66100158f6169a7a7a425cd83948e33d..e020762cf830af0a55ac45dba712067944af2228 100644
+--- a/scripts/postpack.mjs
++++ b/scripts/postpack.mjs
+@@ -2,7 +2,6 @@
+ 
+ import url from "url";
+ import path from "path";
+-import { spawnSync } from "child_process";
+ import fs from "fs";
+ import * as tar from "tar";
+ 
+@@ -144,16 +143,8 @@ function getStubDirectories(dirname) {
+   );
+ }
+ 
+-function run(...args) {
+-  console.log(args.join(" "));
+-  spawnSync(args[0], args.slice(1), { stdio: "inherit" });
+-}
+-
+-// `tsc --removeInternal` works on methods of classes but not properties of
+-// objects or function parameters so until we move back to api-extractor we
+-// manually remove a list of @internal properties.
+-//
+-// To maintain declaration maps it's helpful to avoid changing line numbers.
++// `--stripInternal` does not cover every nested property or parameter. Reject
++// remaining internal declarations instead of publishing them with the public API.
+ function auditInternal(dirname) {
+   auditForInternal(path.join(dirname, "dist", "cjs-types"));
+   auditForInternal(path.join(dirname, "dist", "esm-types"));
+@@ -177,7 +168,7 @@ function auditForInternal(dir) {
+           `\n\`\`\`\n${match}\`\`\``,
+         );
+         throw new Error(
+-          "Found @internal type in published types! Until we switch to api-extractor you need to add a pattern for this in scripts/postpack.mjs in rewriteDtsToRemoveInternal().",
++          "Found @internal type in published declarations. Remove it from the public declaration output before publishing.",
+         );
+       }
+     }
+diff --git a/src/browser/sync/client.test.ts b/src/browser/sync/client.test.ts
+index 99cda75e004cd62e4c27edde37a0951b23996b67..3bec5f8cee6750533681890188f27b1706e792d1 100644
+--- a/src/browser/sync/client.test.ts
++++ b/src/browser/sync/client.test.ts
+@@ -358,7 +358,7 @@ describe("degradable BaseConvexClient", () => {
+     let retryDuringReconnect: boolean | undefined;
+     class ReentrantConnectWebSocket extends nodeWebSocket {
+       override send(
+-        data: string | ArrayBufferLike | Blob | ArrayBufferView,
++        data: Parameters<InstanceType<typeof nodeWebSocket>["send"]>[0],
+       ): void {
+         super.send(data);
+         if (
+@@ -483,7 +483,7 @@ describe("degradable BaseConvexClient", () => {
+     let failRetrySend = true;
+     class RetryFailingWebSocket extends nodeWebSocket {
+       override send(
+-        data: string | ArrayBufferLike | Blob | ArrayBufferView,
++        data: Parameters<InstanceType<typeof nodeWebSocket>["send"]>[0],
+       ): void {
+         if (
+           failRetrySend &&
 diff --git a/src/cli/codegen.ts b/src/cli/codegen.ts
 index 1f21a77689142fb505219664cd91e2c760251e6a..69ad17bd0cfc1376e06d2b9f0622dc5623010356 100644
 --- a/src/cli/codegen.ts
@@ -225,12 +455,68 @@ index 73614b16ed7c25266d8488b8eb1cdbc0b83fa6d0..e9f36a548701031de74e3307038f65f7
      // Optional $schema field for JSON schema validation in editors
      $schema: z.string().optional(),
      // WorkOS AuthKit integration configuration
+diff --git a/src/cli/lib/convexImport.ts b/src/cli/lib/convexImport.ts
+index 8adf828ae79f46de899a0a30e71230ce9d063bad..87b7493a1c076f32d5497572f20aa08cc52c310f 100644
+--- a/src/cli/lib/convexImport.ts
++++ b/src/cli/lib/convexImport.ts
+@@ -461,7 +461,9 @@ export async function uploadForImport(
+         headers: {
+           "Content-Type": "application/octet-stream",
+         },
+-        body: chunkWithoutBom,
++        // ReadStream allocates ordinary, non-shared buffers. Preserve the
++        // subarray offset without copying each upload chunk for DOM typings.
++        body: chunkWithoutBom as Buffer & { buffer: ArrayBuffer },
+         method: "POST",
+       });
+       partTokens.push(await partResp.json());
+diff --git a/src/cli/lib/deploy2.ts b/src/cli/lib/deploy2.ts
+index 6081848b1543af656d4f246b97698e009d14cf43..b55dae1c504654a88b42696947d44f59b5cd1258 100644
+--- a/src/cli/lib/deploy2.ts
++++ b/src/cli/lib/deploy2.ts
+@@ -52,7 +52,10 @@ import { ensureAuthKitProvisionedBeforeBuild } from "./workos/workos.js";
+ 
+ const brotli = promisify(zlib.brotliCompress);
+ 
+-async function brotliCompress(ctx: Context, data: string): Promise<Buffer> {
++async function brotliCompress(
++  ctx: Context,
++  data: string,
++): Promise<Buffer & { buffer: ArrayBuffer }> {
+   const start = performance.now();
+   const result = await brotli(data, {
+     params: {
+@@ -65,7 +68,9 @@ async function brotliCompress(ctx: Context, data: string): Promise<Buffer> {
+   logVerbose(
+     `Compressed ${(data.length / 1024).toFixed(2)}KiB to ${(result.length / 1024).toFixed(2)}KiB (${((result.length / data.length) * 100).toFixed(2)}%) in ${duration.toFixed(2)}ms`,
+   );
+-  return result;
++  // zlib allocates ordinary ArrayBuffer storage; older Node typings also
++  // allow shared backing here. Narrow the result without copying uploads.
++  return result as Buffer & { buffer: ArrayBuffer };
+ }
+ 
+ /** Push configuration2 to the given remote origin. */
+diff --git a/src/cli/lib/networkTest.ts b/src/cli/lib/networkTest.ts
+index 6d826fa29c4d713980c990509bb7795696f8c25c..264e329cf56b674cadbd323048cfb362c017a42f 100644
+--- a/src/cli/lib/networkTest.ts
++++ b/src/cli/lib/networkTest.ts
+@@ -283,7 +283,8 @@ async function checkEcho(ctx: Context, url: string, size: number) {
+       },
+     });
+     const echoUrl = new URL(`/echo`, url);
+-    const data = crypto.randomBytes(size);
++    // randomBytes allocates ordinary backing, despite older Node typings.
++    const data = crypto.randomBytes(size) as Buffer & { buffer: ArrayBuffer };
+     const resp = await fetch(echoUrl.toString(), {
+       body: data,
+       method: "POST",
 diff --git a/src/cli/lib/typecheck.test.ts b/src/cli/lib/typecheck.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0dc21708c80cbb2de41e4920607e292048425dd7
+index 0000000000000000000000000000000000000000..f1e638f1ccc306c24a297b89eb858c545b4605f0
 --- /dev/null
 +++ b/src/cli/lib/typecheck.test.ts
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,185 @@
 +import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 +import path from "node:path";
 +import { expect, test, vi } from "vitest";
@@ -320,7 +606,10 @@ index 0000000000000000000000000000000000000000..0dc21708c80cbb2de41e4920607e2920
 +      typeCheckFunctionsInMode(ctx, "enable", tmpDir.path),
 +    ).rejects.toThrow();
 +
-+    writeFileSync(path.join(tmpDir.path, "tsconfig.json"), "{}");
++    writeFileSync(
++      path.join(tmpDir.path, "tsconfig.json"),
++      JSON.stringify({ compilerOptions: { pretty: true } }),
++    );
 +    await expect(
 +      typeCheckFunctionsInMode(ctx, "try", tmpDir.path),
 +    ).resolves.toBeUndefined();
@@ -367,6 +656,26 @@ index 0000000000000000000000000000000000000000..0dc21708c80cbb2de41e4920607e2920
 +  });
 +});
 +
++test("subprocess output preserves UTF-8 across pipe chunks", async () => {
++  const writer = `
++    const bytes = Buffer.from("check-\u{1f600}.ts\\n");
++    const split = Buffer.byteLength("check-") + 1;
++    process.stdout.write(bytes.subarray(0, split));
++    process.stderr.write(bytes.subarray(0, split));
++    setTimeout(() => {
++      process.stdout.write(bytes.subarray(split));
++      process.stderr.write(bytes.subarray(split));
++    }, 100);
++  `;
++  const result = await spawnAsync(testContext(), process.execPath, [
++    "-e",
++    writer,
++  ]);
++  expect(result.status).toBe(0);
++  expect(result.stdout).toBe("check-\u{1f600}.ts\n");
++  expect(result.stderr).toBe("check-\u{1f600}.ts\n");
++});
++
 +test("a no-inputs diagnostic does not suppress other compiler errors", async () => {
 +  await withTmpDir(async (tmpDir) => {
 +    const compiler = path.join(tmpDir.path, "diagnostic-compiler");
@@ -394,7 +703,7 @@ index 0000000000000000000000000000000000000000..0dc21708c80cbb2de41e4920607e2920
 +  });
 +});
 diff --git a/src/cli/lib/typecheck.ts b/src/cli/lib/typecheck.ts
-index 06ed6f369f9ef879d76a4c098637ae73a3d7bc95..2689a56335992b10d44a96d29aae1b2ab8dea696 100644
+index 06ed6f369f9ef879d76a4c098637ae73a3d7bc95..f7f6642b8dc462741845003d4be27d63c87b7b1e 100644
 --- a/src/cli/lib/typecheck.ts
 +++ b/src/cli/lib/typecheck.ts
 @@ -10,34 +10,18 @@ import {
@@ -461,7 +770,7 @@ index 06ed6f369f9ef879d76a4c098637ae73a3d7bc95..2689a56335992b10d44a96d29aae1b2a
        functionsDir,
        async (result, logSpecificError, runOnError) => {
          if (
-@@ -113,7 +95,6 @@ export async function typeCheckFunctionsInMode(
+@@ -113,120 +95,62 @@ export async function typeCheckFunctionsInMode(
  // Runs TypeScript compiler to typecheck Convex query and mutation functions.
  export async function typeCheckFunctions(
    ctx: Context,
@@ -469,7 +778,13 @@ index 06ed6f369f9ef879d76a4c098637ae73a3d7bc95..2689a56335992b10d44a96d29aae1b2a
    functionsDir: string,
    handleResult: TypecheckResultHandler,
  ): Promise<void> {
-@@ -126,107 +107,49 @@ export async function typeCheckFunctions(
+   const tsconfig = path.join(functionsDir, "tsconfig.json");
+   if (!ctx.fs.exists(tsconfig)) {
+     return handleResult("cantTypeCheck", () => {
+-      logError(
+-        "Found no convex/tsconfig.json to use to typecheck Convex functions, so skipping typecheck.",
+-      );
++      logError(`No TypeScript configuration found at ${tsconfig}.`);
        logError("Run `npx convex codegen --init` to create one.");
      });
    }
@@ -583,6 +898,9 @@ index 06ed6f369f9ef879d76a4c098637ae73a3d7bc95..2689a56335992b10d44a96d29aae1b2a
 -    ...tscArgs,
 +    compilerPath,
 +    ...compilerArgs,
++    // Keep the diagnostic/file-list protocol independent of project formatting.
++    "--pretty",
++    "false",
      "--listFiles",
    ]);
    if (result.status === null) {
@@ -599,7 +917,7 @@ index 06ed6f369f9ef879d76a4c098637ae73a3d7bc95..2689a56335992b10d44a96d29aae1b2a
    // output to discover which files it touched.
    const filesTouched = result.stdout
      .split("\n")
-@@ -240,8 +163,8 @@ async function runTscInner(
+@@ -240,8 +164,8 @@ async function runTscInner(
        st = ctx.fs.stat(absPath);
        anyPathsFound = true;
      } catch {
@@ -610,7 +928,7 @@ index 06ed6f369f9ef879d76a4c098637ae73a3d7bc95..2689a56335992b10d44a96d29aae1b2a
        // TODO: Switch to using their JS API so we can get machine readable output.
        continue;
      }
-@@ -249,7 +172,7 @@ async function runTscInner(
+@@ -249,7 +173,7 @@ async function runTscInner(
    }
    if (filesTouched.length > 0 && !anyPathsFound) {
      const err = new Error(
@@ -619,7 +937,7 @@ index 06ed6f369f9ef879d76a4c098637ae73a3d7bc95..2689a56335992b10d44a96d29aae1b2a
      );
      Sentry.captureException(err);
    }
-@@ -258,25 +181,29 @@ async function runTscInner(
+@@ -258,25 +182,29 @@ async function runTscInner(
      return handleResult("success");
    }
  
@@ -656,9 +974,42 @@ index 06ed6f369f9ef879d76a4c098637ae73a3d7bc95..2689a56335992b10d44a96d29aae1b2a
            stdio: "inherit",
          },
 diff --git a/src/cli/lib/utils/utils.ts b/src/cli/lib/utils/utils.ts
-index 5355377460ef4a92382e912f5b878c6f0e5e5052..829187c4f34d7b89c09bf7e41af99a8dcdf4a30e 100644
+index 5355377460ef4a92382e912f5b878c6f0e5e5052..267cda0ec54f28bf23164f252d16fe0e2c58d89f 100644
 --- a/src/cli/lib/utils/utils.ts
 +++ b/src/cli/lib/utils/utils.ts
+@@ -1165,22 +1165,22 @@ export function spawnAsync(
+     let stdout = "";
+     let stderr = "";
+ 
++    // A UTF-8 filename or diagnostic can span pipe chunks. Decode the streams,
++    // rather than each Buffer, so watched paths retain their original spelling.
++    child.stdout.setEncoding("utf8");
++    child.stderr.setEncoding("utf8");
+     const pipeOutput = options?.stdio === "inherit";
+ 
+     if (pipeOutput) {
+-      child.stdout.on("data", (text) =>
+-        logMessage(text.toString("utf-8").trimEnd()),
+-      );
+-      child.stderr.on("data", (text) =>
+-        logError(text.toString("utf-8").trimEnd()),
+-      );
++      child.stdout.on("data", (text: string) => logMessage(text.trimEnd()));
++      child.stderr.on("data", (text: string) => logError(text.trimEnd()));
+     } else {
+-      child.stdout.on("data", (data) => {
+-        stdout += data.toString("utf-8");
++      child.stdout.on("data", (data: string) => {
++        stdout += data;
+       });
+ 
+-      child.stderr.on("data", (data) => {
+-        stderr += data.toString("utf-8");
++      child.stderr.on("data", (data: string) => {
++        stderr += data;
+       });
+     }
+ 
 @@ -1206,7 +1206,6 @@ export function spawnAsync(
      };
  
@@ -683,19 +1034,20 @@ index 5355377460ef4a92382e912f5b878c6f0e5e5052..829187c4f34d7b89c09bf7e41af99a8d
    });
  }
 diff --git a/src/cli/typecheck.ts b/src/cli/typecheck.ts
-index 935759d29c63f3294163cc9488796a67051af0f8..cfa104aa36d79c8ac4b3828ede93898bf9b74b89 100644
+index 935759d29c63f3294163cc9488796a67051af0f8..4313ac1dca0977ad80c4f9acc1eab572bd1e95a4 100644
 --- a/src/cli/typecheck.ts
 +++ b/src/cli/typecheck.ts
-@@ -1,46 +1,29 @@
+@@ -1,47 +1,31 @@
  import { chalkStderr } from "chalk";
  import { functionsDir, ensureHasConvexDependency } from "./lib/utils/utils.js";
 -import { Command, Option } from "@commander-js/extra-typings";
-+import { Command } from "@commander-js/extra-typings";
- import { readConfig } from "./lib/config.js";
+-import { readConfig } from "./lib/config.js";
 -import {
 -  typeCheckFunctions,
 -  resolveTypescriptCompiler,
 -} from "./lib/typecheck.js";
++import { Command } from "@commander-js/extra-typings";
++import { readProjectConfig } from "./lib/config.js";
 +import { typeCheckFunctions } from "./lib/typecheck.js";
  import { oneoffContext } from "../bundler/context.js";
  import { logFinishedStep, logMessage } from "../bundler/log.js";
@@ -729,15 +1081,19 @@ index 935759d29c63f3294163cc9488796a67051af0f8..cfa104aa36d79c8ac4b3828ede93898b
 -      ctx,
 -      cmdOptions.typescriptCompiler,
 -    );
-     const { configPath, config: localConfig } = await readConfig(ctx, false);
+-    const { configPath, config: localConfig } = await readConfig(ctx, false);
++    // Read configuration without bundling so compiler diagnostics remain reachable.
++    const { configPath, projectConfig } = await readProjectConfig(ctx);
      await ensureHasConvexDependency(ctx, "typecheck");
      await typeCheckFunctions(
        ctx,
 -      typescriptCompiler,
-       functionsDir(configPath, localConfig.projectConfig),
+-      functionsDir(configPath, localConfig.projectConfig),
++      functionsDir(configPath, projectConfig),
        async (typecheckResult, logSpecificError, runOnError) => {
          logSpecificError?.();
-@@ -60,7 +43,9 @@ export const typecheck = new Command("typecheck")
+         if (typecheckResult === "typecheckFailed") {
+@@ -60,7 +44,9 @@ export const typecheck = new Command("typecheck")
            });
          } else if (typecheckResult === "cantTypeCheck") {
            logMessage(
@@ -748,12 +1104,29 @@ index 935759d29c63f3294163cc9488796a67051af0f8..cfa104aa36d79c8ac4b3828ede93898b
            );
            return await ctx.crash({
              exitCode: 1,
-@@ -69,7 +54,7 @@ export const typecheck = new Command("typecheck")
+@@ -68,9 +54,7 @@ export const typecheck = new Command("typecheck")
+             printedMessage: null,
            });
          } else {
-           logFinishedStep(
+-          logFinishedStep(
 -            `Typecheck passed: \`${typescriptCompiler} --noEmit\` completed with exit code 0.`,
-+            `Typecheck passed: \`tsrs --noEmit\` completed with exit code 0.`,
-           );
+-          );
++          logFinishedStep("Typecheck passed.");
            return await ctx.flushAndExit(0);
          }
+       },
+diff --git a/src/values/base64.ts b/src/values/base64.ts
+index 7675ee36a40d152cc30b08c3bce7ebd8adcd8143..220a155561342d9ed8b6f10ba07985fc3e03b934 100644
+--- a/src/values/base64.ts
++++ b/src/values/base64.ts
+@@ -53,7 +53,9 @@ function _byteLength(_b64: string, validLen: number, placeHoldersLen: number) {
+ }
+ 
+ /** @public */
+-export function toByteArray(b64: string): Uint8Array {
++// This decoder allocates ordinary ArrayBuffer storage. Keep this spelling
++// compatible with consumers predating generic typed arrays.
++export function toByteArray(b64: string): Uint8Array & { buffer: ArrayBuffer } {
+   var tmp;
+   var lens = getLens(b64);
+   var validLen = lens[0];
