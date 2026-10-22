@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 30 Sep 2026 01:02:07 +0800
-Subject: [PATCH 10/11] deployment: publish native resident selection and
+Subject: [PATCH 10/13] deployment: publish native resident selection and
  metadata
 
 Validate and freeze an explicit nullable native-resident activation envelope before build commands, require protocol support, and transmit it through finish-push. Expose committed native selection through deployment metadata with null semantics for ordinary execution and older backends. Keep process lifecycle and transactional publication authority with the backend.

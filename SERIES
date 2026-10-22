@@ -10,3 +10,5 @@
 0009-http-client-preserve-per-call-mutation-priority-thro.patch bd958cbdc8ad3ca876dd736431b0c1974fe6331b
 0010-deployment-publish-native-resident-selection-and-met.patch 3fe90cae8f812884f0319886ddc09d6300346804
 0011-packaging-keep-source-provenance-separate-from-immut.patch 694f7dd00e4fb9b097750c9a2de28eea260d44b0
+0012-cli-change-live-primary-runtime-and-shadow-sampling.patch dcb953f818323287bee5ccb77dd555b7bd3562d8
+0013-cli-support-explicitly-selected-tsrs-typechecking.patch cb6849d8dce18954ffffd3e162d3af734d6c6a8d

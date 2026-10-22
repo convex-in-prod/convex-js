@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 30 Sep 2026 01:02:07 +0800
-Subject: [PATCH 01/11] client: retry definitive mutation conflicts with
+Subject: [PATCH 01/13] client: retry definitive mutation conflicts with
  bounded policy
 
 Retain completed HTTP failures as typed evidence and classify explicit pre-execution rejections. Retry public HTTP mutations only after a complete structured HTTP 503 OptimisticConcurrencyControlFailure response with a string message. Transport loss, incomplete bodies and UDF or arbitrary error text do not prove a write failed to commit.

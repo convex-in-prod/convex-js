@@ -1,0 +1,546 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Fri, 23 Oct 2026 04:29:22 +0800
+Subject: [PATCH 12/13] cli: change live primary runtime and shadow sampling
+
+Add an authenticated runtime-mode command for durable query and mutation policy updates on supporting self-hosted backends. Preserve omitted settings with revision-checked updates, retain independent route quarantines, and report fixed preparation failure reasons without exposing loader diagnostics.
+
+Register the command in the release entry point and cover command selection and rejected preparation responses.
+---
+ patches/README.md           |  39 ++++++
+ src/cli/lib/command.test.ts |  31 +++++
+ src/cli/lib/command.ts      |  21 +--
+ src/cli/program.ts          |   2 +
+ src/cli/runtimeMode.test.ts |  77 +++++++++++
+ src/cli/runtimeMode.ts      | 266 ++++++++++++++++++++++++++++++++++++
+ 6 files changed, 421 insertions(+), 15 deletions(-)
+ create mode 100644 src/cli/lib/command.test.ts
+ create mode 100644 src/cli/runtimeMode.test.ts
+ create mode 100644 src/cli/runtimeMode.ts
+
+diff --git a/patches/README.md b/patches/README.md
+index d026fa327d5de46d007ec2fe579361dca976acc4..b1ffada55198aca54fb8a4befb51991edc272d9d 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -18,6 +18,45 @@ in the
+ 
+ ## Maintained changes
+ 
++### Live runtime selection
++
++`convex runtime-mode` reads the backend's durable runtime policy. On a
++supporting self-hosted backend, `--primary v8|wasm` changes the authoritative
++runtime and `--shadow-percent 0..100` changes sampling in the opposite runtime.
++Zero selects primary-only. Omitted settings retain their current values;
++`--udf-type query`, `mutation`, or `both` selects which policy to change, with
++`both` as the default.
++
++The command uses ordinary deployment selection and authentication. Direct URL
++overrides require both `--url` and `--admin-key`; incomplete overrides are
++rejected before any policy request. Conflicting explicit deployment selectors
++are rejected, as are selectors that ordinary deploy-key or anonymous-local
++selection would ignore. Local deployment selection checks the running backend's
++identity. The command performs a revision-conditional update without automatic
++replay after an ambiguous response. It does not publish application code or
++restart the backend. Existing invocations retain their captured mode, and
++artifact eligibility and route quarantines remain independent. The backend API
++is `/api/wasm_runtime_policy`; older backends report that live selection is
++unavailable. Status reports `quarantineInitialized` as well as the selector
++count: an uninitialized store blocks Wasm even with zero selectors. Each OCC
++retry or reactive reexecution captures a fresh policy; nested transactional UDFs
++keep the existing V8 recursion path.
++
++Enabling Wasm primary prepares initialized capacity for the retained eligible
++pair before publishing the policy. Preparation uses recent primary concurrency,
++with one instance per applicable group and bounded best-effort extras. The
++backend rechecks the source, policy revision and initialized inventory before
++publication. Status, V8 rollback and sampling-only changes skip warmup. A policy
++POST has a 75-second client timeout; status has a ten-second timeout. Final
++source/dependency validation is bounded, but waiting for another publication or
++its durable write can exceed the client deadline. An uncertain response still
++requires reading status, because disconnecting does not cancel a write already
++submitted. Rejections distinguish baseline shortage, unavailable staging,
++changed initialization and stale source or policy intent without printing raw
++loader or transport diagnostics. Successful population counts include reserved
++idle Stores and observed compatible active Stores; active work is not frozen or
++guaranteed to succeed.
++
+ ### Typed completed HTTP failures
+ 
+ `ConvexHttpClient` throws `ConvexHttpError` for a completed non-UDF HTTP
+diff --git a/src/cli/lib/command.test.ts b/src/cli/lib/command.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c08fb13192bb2e9f989d50d89d9e34b71677f5a5
+--- /dev/null
++++ b/src/cli/lib/command.test.ts
+@@ -0,0 +1,31 @@
++import { Command, CommanderError } from "@commander-js/extra-typings";
++import { expect, test } from "vitest";
++import { actionDescription } from "./command.js";
++
++test("deployment selectors reject conflicting targets before the action", () => {
++  const selectors = [
++    ["--prod"],
++    ["--preview-name", "preview"],
++    ["--deployment-name", "example-deployment"],
++    ["--deployment", "staging"],
++    ["--url", "http://127.0.0.1:3210"],
++  ];
++  for (let first = 0; first < selectors.length; first++) {
++    for (let second = first + 1; second < selectors.length; second++) {
++      let invoked = false;
++      const command = new Command("selection-test")
++        .addDeploymentSelectionOptions(actionDescription("Inspect"))
++        .exitOverride()
++        .configureOutput({ writeErr: () => {} })
++        .action(() => {
++          invoked = true;
++        });
++      expect(() =>
++        command.parse([...selectors[first], ...selectors[second]], {
++          from: "user",
++        }),
++      ).toThrow(CommanderError);
++      expect(invoked).toBe(false);
++    }
++  }
++});
+diff --git a/src/cli/lib/command.ts b/src/cli/lib/command.ts
+index 3f8b8a727f101c47ad6247ecb70d5f46fd58e98d..18cf2da83e52cf19a90a2af091ce3a64f8a36d09 100644
+--- a/src/cli/lib/command.ts
++++ b/src/cli/lib/command.ts
+@@ -170,17 +170,13 @@ Command.prototype.addDeploymentSelectionOptions = function (
+   action: ActionDescription,
+   options?: { showUrlHelp?: boolean },
+ ) {
++  // Commander conflict lists use camelCase option attributes.
+   const urlOption = new Option(
+     "--url <url>",
+     options?.showUrlHelp
+       ? action + " the deployment at the given URL."
+       : undefined,
+-  ).conflicts([
+-    "--prod",
+-    "--preview-name",
+-    "--deployment-name",
+-    "--deployment",
+-  ]);
++  ).conflicts(["prod", "previewName", "deploymentName", "deployment"]);
+   if (!options?.showUrlHelp) {
+     urlOption.hideHelp();
+   }
+@@ -190,19 +186,14 @@ Command.prototype.addDeploymentSelectionOptions = function (
+       new Option(
+         "--prod",
+         action + " this project's default production deployment.",
+-      ).conflicts([
+-        "--preview-name",
+-        "--deployment-name",
+-        "--url",
+-        "--deployment",
+-      ]),
++      ).conflicts(["previewName", "deploymentName", "url", "deployment"]),
+     )
+     .addOption(
+       new Option(
+         "--preview-name <previewName>",
+         action + " the preview deployment with the given name.",
+       )
+-        .conflicts(["--prod", "--deployment-name", "--url", "--deployment"])
++        .conflicts(["prod", "deploymentName", "url", "deployment"])
+         .hideHelp(),
+     )
+     .addOption(
+@@ -210,7 +201,7 @@ Command.prototype.addDeploymentSelectionOptions = function (
+         "--deployment-name <deploymentName>",
+         action + " the specified deployment.",
+       )
+-        .conflicts(["--prod", "--preview-name", "--url", "--deployment"])
++        .conflicts(["prod", "previewName", "url", "deployment"])
+         .hideHelp(),
+     )
+     .addOption(
+@@ -224,7 +215,7 @@ Command.prototype.addDeploymentSelectionOptions = function (
+           "• `prod` (for your project’s default production deployment)\n" +
+           "• `local` (for your local dev deployment)." +
+           "\nYou can also select deployments in other projects with `project-slug:reference` or `team-slug:project-slug:reference`.",
+-      ).conflicts(["--prod", "--preview-name", "--deployment-name", "--url"]),
++      ).conflicts(["prod", "previewName", "deploymentName", "url"]),
+     )
+     .addOption(
+       new Option(
+diff --git a/src/cli/program.ts b/src/cli/program.ts
+index 065862e19c0fd00f7040d536dcbd92ffc6c075fe..4064ac5663df95abbef58baa59d16b7bcba855d8 100644
+--- a/src/cli/program.ts
++++ b/src/cli/program.ts
+@@ -24,6 +24,7 @@ import { networkTest } from "./network_test.js";
+ import { project } from "./project.js";
+ import { reinit } from "./reinit.js";
+ import { run } from "./run.js";
++import { runtimeMode } from "./runtimeMode.js";
+ import { typecheck } from "./typecheck.js";
+ import { update } from "./update.js";
+ import { version } from "./version.js";
+@@ -42,6 +43,7 @@ export function buildProgram() {
+       .addCommand(deploy)
+       .addCommand(deployments, { hidden: true })
+       .addCommand(run)
++      .addCommand(runtimeMode)
+       .addCommand(convexImport)
+       .addCommand(dashboard)
+       .addCommand(docs)
+diff --git a/src/cli/runtimeMode.test.ts b/src/cli/runtimeMode.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c10018794c1a338b05e3b73d35a240e3780bc1ff
+--- /dev/null
++++ b/src/cli/runtimeMode.test.ts
+@@ -0,0 +1,77 @@
++import { expect, test, vi } from "vitest";
++import { buildProgram } from "./program.js";
++
++const { fetchRequest } = vi.hoisted(() => {
++  const fetchRequest = vi.fn<typeof fetch>();
++  vi.stubGlobal("fetch", fetchRequest);
++  return { fetchRequest };
++});
++
++vi.mock("../bundler/context.js", async (original) => ({
++  ...(await original<typeof import("../bundler/context.js")>()),
++  oneoffContext: async () => ({
++    crash: async ({ printedMessage }: { printedMessage: string }) => {
++      throw new Error(printedMessage);
++    },
++  }),
++}));
++vi.mock("./lib/deploymentSelection.js", async (original) => ({
++  ...(await original<typeof import("./lib/deploymentSelection.js")>()),
++  getDeploymentSelection: async () => ({ kind: "anonymous" }),
++}));
++vi.mock("./lib/api.js", async (original) => ({
++  ...(await original<typeof import("./lib/api.js")>()),
++  loadSelectedDeploymentCredentials: async () => ({
++    url: "http://127.0.0.1:3210",
++    adminKey: "test-key",
++  }),
++}));
++
++test("a rejected promotion reports baseline shortage without replay or raw diagnostics", async () => {
++  fetchRequest.mockResolvedValueOnce(
++    new Response(
++      JSON.stringify({
++        snapshot: {
++          revision: 7,
++          policy: {
++            query: { primary: "v8", shadowBps: 125 },
++            mutation: { primary: "v8", shadowBps: 0 },
++          },
++        },
++        durable: true,
++        quarantinedSelectors: 0,
++        quarantineInitialized: true,
++      }),
++    ),
++  );
++  fetchRequest.mockResolvedValueOnce(
++    new Response(
++      JSON.stringify({
++        code: "StaticHermesWasmBaselineCapacityUnavailable",
++        message: "private loader detail /private/artifacts",
++      }),
++      { status: 409 },
++    ),
++  );
++
++  await expect(
++    buildProgram()
++      .exitOverride()
++      .parseAsync(["runtime-mode", "--primary", "wasm"], { from: "user" }),
++  ).rejects.toThrow(
++    "Wasm preparation could not establish baseline capacity for every applicable group. Read runtime-mode status before retrying an update.",
++  );
++  expect(fetchRequest).toHaveBeenCalledTimes(2);
++  const [url, options] = fetchRequest.mock.calls[1];
++  expect(String(url)).toBe("http://127.0.0.1:3210/api/wasm_runtime_policy");
++  expect(options?.method).toBe("POST");
++  expect(options?.redirect).toBe("error");
++  expect(options?.signal).toBeInstanceOf(AbortSignal);
++  expect(JSON.parse(String(options?.body))).toEqual({
++    expectedRevision: 7,
++    policy: {
++      query: { primary: "wasm", shadowBps: 125 },
++      mutation: { primary: "wasm", shadowBps: 0 },
++    },
++  });
++});
+diff --git a/src/cli/runtimeMode.ts b/src/cli/runtimeMode.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e49aafec1d5cdce785f6d4783ff635ee731bddb3
+--- /dev/null
++++ b/src/cli/runtimeMode.ts
+@@ -0,0 +1,266 @@
++import { Command, Option } from "@commander-js/extra-typings";
++import { z } from "zod";
++import { oneoffContext } from "../bundler/context.js";
++import { logOutput } from "../bundler/log.js";
++import {
++  deploymentSelectionWithinProjectFromOptions,
++  loadSelectedDeploymentCredentials,
++} from "./lib/api.js";
++import { actionDescription } from "./lib/command.js";
++import { getDeploymentSelection } from "./lib/deploymentSelection.js";
++import { deploymentFetch, ThrowingFetchError } from "./lib/utils/utils.js";
++
++const modeSchema = z.object({
++  primary: z.enum(["v8", "wasm"]),
++  shadowBps: z.number().int().min(0).max(10_000),
++});
++const policySchema = z.object({ query: modeSchema, mutation: modeSchema });
++const responseSchema = z.object({
++  snapshot: z.object({
++    revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
++    policy: policySchema,
++  }),
++  durable: z.boolean(),
++  quarantinedSelectors: z.number().int().nonnegative(),
++  quarantineInitialized: z.boolean(),
++  preparationElapsedMs: z.number().nonnegative().optional(),
++  population: z
++    .array(
++      z.object({
++        group: z.string(),
++        target: z.number().int().nonnegative(),
++        prepared: z.number().int().nonnegative(),
++        active: z.number().int().nonnegative(),
++        inProgress: z.number().int().nonnegative(),
++        shortfall: z.string().nullable(),
++      }),
++    )
++    .optional(),
++});
++
++export const runtimeMode = new Command("runtime-mode")
++  .summary("Read or change primary runtime and shadow sampling")
++  .description(
++    "Select V8 or Wasm primary and opposite-runtime shadow sampling on a supporting self-hosted backend.\n" +
++      "With no change options, print the current policy as JSON. Zero shadow percent selects primary only.\n" +
++      "Changes persist without deployment or restart. Existing invocations retain their runtime.\n" +
++      "Wasm artifacts must already be eligible; this command never clears route quarantines.\n\n" +
++      "Examples:\n" +
++      "  convex runtime-mode --primary wasm --shadow-percent 5\n" +
++      "  convex runtime-mode --primary v8 --shadow-percent 0\n" +
++      "  convex runtime-mode --shadow-percent 10 --udf-type query",
++  )
++  .argument(
++    "[operation]",
++    'Use "status" to explicitly request the current policy.',
++  )
++  .addOption(
++    new Option(
++      "--primary <runtime>",
++      "Primary runtime; omit to retain the current selection.",
++    ).choices(["v8", "wasm"]),
++  )
++  .option(
++    "--shadow-percent <percent>",
++    "Opposite-runtime sampling from 0 to 100, with at most two decimal places; omit to retain it.",
++  )
++  .addOption(
++    new Option(
++      "--udf-type <kind>",
++      "Apply changes to queries, mutations, or both.",
++    )
++      .choices(["query", "mutation", "both"])
++      .default("both"),
++  )
++  .addDeploymentSelectionOptions(
++    actionDescription("Read or change the runtime policy of"),
++  )
++  .allowExcessArguments(false)
++  .action(async (operation, options) => {
++    const ctx = await oneoffContext(options);
++    // Ordinary selection consumes direct credentials only as a complete pair.
++    // A partial explicit target must not fall back to the configured deployment.
++    if ((options.url === undefined) !== (options.adminKey === undefined)) {
++      return await ctx.crash({
++        exitCode: 1,
++        errorType: "fatal",
++        printedMessage: "--url and --admin-key must be supplied together.",
++      });
++    }
++    const changing =
++      options.primary !== undefined || options.shadowPercent !== undefined;
++    if (
++      (operation !== undefined && operation !== "status") ||
++      (operation === "status" && changing)
++    ) {
++      return await ctx.crash({
++        exitCode: 1,
++        errorType: "fatal",
++        printedMessage:
++          'Use "runtime-mode status" to inspect, or specify --primary and/or --shadow-percent to change the policy.',
++      });
++    }
++    let shadowBps: number | undefined;
++    if (options.shadowPercent !== undefined) {
++      if (
++        !/^\d+(?:\.\d{1,2})?$/.test(options.shadowPercent) ||
++        Number(options.shadowPercent) > 100
++      ) {
++        return await ctx.crash({
++          exitCode: 1,
++          errorType: "fatal",
++          printedMessage:
++            "--shadow-percent must be between 0 and 100 with at most two decimal places.",
++        });
++      }
++      shadowBps = Math.round(Number(options.shadowPercent) * 100);
++    }
++    const selection = await getDeploymentSelection(ctx, options);
++    const selectedWithinProject =
++      deploymentSelectionWithinProjectFromOptions(options);
++    // Ordinary CLI commands may ignore a selector for a deploy key or an
++    // anonymous local deployment. A policy update must never address that
++    // fallback target when the operator explicitly requested another one.
++    if (
++      selectedWithinProject.kind !== "unspecified" &&
++      (selection.kind === "anonymous" ||
++        (selection.kind === "existingDeployment" &&
++          selection.deploymentToActOn.source === "deployKey"))
++    ) {
++      return await ctx.crash({
++        exitCode: 1,
++        errorType: "fatal",
++        printedMessage:
++          "The configured deployment cannot resolve this explicit deployment selector. Remove the selector to use the configured deployment, or configure credentials for the intended target.",
++      });
++    }
++    const { url: deploymentUrl, adminKey } =
++      await loadSelectedDeploymentCredentials(ctx, selection);
++    // A lost POST response may already have committed. Never replay a mode
++    // update automatically; the revision prevents overwriting another operator.
++    const backendFetch = deploymentFetch(ctx, {
++      deploymentUrl,
++      adminKey,
++      maxRetries: 0,
++    });
++    const request = async (body?: {
++      expectedRevision: number;
++      policy: z.infer<typeof policySchema>;
++    }) => {
++      let response: Response;
++      try {
++        response = await backendFetch("/api/wasm_runtime_policy", {
++          method: body === undefined ? "GET" : "POST",
++          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
++          redirect: "error",
++          // Primary promotion may use the baseline admission window plus
++          // 30 seconds for extra Stores. A lost POST still must not be retried.
++          signal: AbortSignal.timeout(body === undefined ? 10_000 : 75_000),
++        });
++      } catch (error) {
++        const status =
++          error instanceof ThrowingFetchError
++            ? error.response.status
++            : undefined;
++        // Recognize fixed protocol codes without printing a raw server error
++        // or transport URL, which can contain credentials or loader details.
++        const reasons: Record<string, string> = {
++          WasmRuntimePolicyChanged:
++            "The runtime policy changed during this update.",
++          SourceKeyedRuntimeExpectedPriorMismatch:
++            "The selected source/runtime pair changed during preparation.",
++          SourceKeyedRuntimeContentIdentityMissing:
++            "The selected runtime pair has no source content identity.",
++          StaticHermesWasmGenerationNotStaged:
++            "The selected source/runtime pair is not staged.",
++          StaticHermesWasmBaselineCapacityUnavailable:
++            "Wasm preparation could not establish baseline capacity for every applicable group.",
++          StaticHermesWasmGenerationNotReady:
++            "The initialized Wasm inventory is no longer available.",
++          StaticHermesWasmInitializationChanged:
++            "The prepared Wasm initialization dependencies changed.",
++          StaticHermesWasmPublicationValidationTimeout:
++            "Source or initialization validation timed out before publication.",
++          WasmRuntimePolicyStorageRequired:
++            "The backend has no durable runtime policy storage.",
++        };
++        const code =
++          error instanceof ThrowingFetchError
++            ? error.serverErrorData?.code
++            : undefined;
++        const reason =
++          typeof code === "string" && Object.hasOwn(reasons, code)
++            ? reasons[code]
++            : undefined;
++        return await ctx.crash({
++          exitCode: 1,
++          errorType: "fatal",
++          printedMessage:
++            status === 404
++              ? "This backend does not support live runtime selection."
++              : `${reason ?? `Runtime policy request failed${status === undefined ? "" : ` with HTTP ${status}`}.`} Read runtime-mode status before retrying an update.`,
++        });
++      }
++      let value: unknown;
++      try {
++        value = await response.json();
++      } catch {
++        return await ctx.crash({
++          exitCode: 1,
++          errorType: "fatal",
++          printedMessage:
++            "Backend returned invalid JSON for the runtime policy. Read status before retrying an update.",
++        });
++      }
++      const parsed = responseSchema.safeParse(value);
++      if (!parsed.success) {
++        return await ctx.crash({
++          exitCode: 1,
++          errorType: "fatal",
++          printedMessage:
++            "Backend returned an invalid runtime policy. Read status before retrying an update.",
++        });
++      }
++      return parsed.data;
++    };
++    let response = await request();
++    if (changing) {
++      if (!response.durable) {
++        return await ctx.crash({
++          exitCode: 1,
++          errorType: "fatal",
++          printedMessage: "Backend has no durable runtime policy storage.",
++        });
++      }
++      const policy = response.snapshot.policy;
++      for (const kind of ["query", "mutation"] as const) {
++        if (options.udfType !== "both" && options.udfType !== kind) continue;
++        policy[kind] = modeSchema.parse({
++          primary:
++            options.primary === undefined
++              ? policy[kind].primary
++              : options.primary,
++          shadowBps:
++            shadowBps === undefined ? policy[kind].shadowBps : shadowBps,
++        });
++      }
++      response = await request({
++        expectedRevision: response.snapshot.revision,
++        policy,
++      });
++      for (const kind of ["query", "mutation"] as const) {
++        if (
++          response.snapshot.policy[kind].primary !== policy[kind].primary ||
++          response.snapshot.policy[kind].shadowBps !== policy[kind].shadowBps
++        ) {
++          return await ctx.crash({
++            exitCode: 1,
++            errorType: "fatal",
++            printedMessage:
++              "Backend did not confirm the requested runtime policy. Read status before making another change.",
++          });
++        }
++      }
++    }
++    logOutput(JSON.stringify(response, null, 2));
++  });
