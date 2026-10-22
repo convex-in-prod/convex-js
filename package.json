@@ -197,7 +197,9 @@
     "postpack": "node scripts/postpack.mjs",
     "test": "vitest --silent",
     "test-not-silent": "vitest",
-    "typecheck": "tsc --noEmit --emitDeclarationOnly false",
+    "test:build-cache": "node --test --test-concurrency=1 scripts/run-tsrs.test.mjs scripts/tsrs-cache.test.mjs",
+    "cache:tsrs:prune": "node scripts/maintain-tsrs-cache.mjs",
+    "typecheck": "node scripts/run-tsrs.mjs typecheck",
     "test-esm": "node ./scripts/test-esm.mjs && ./scripts/checkdeps.mjs && ./scripts/checkimports.mjs",
     "compare-codegen": "node scripts/compare-codegen.mjs",
     "generateApiSpec": "npm run generateManagementApiSpec && npm run generateFunctionLogsApiSpec",
@@ -244,6 +246,7 @@
   "dependencies": {
     "esbuild": "0.27.0",
     "prettier": "^3.0.0",
+    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
     "ws": "8.21.0"
   },
   "peerDependencies": {

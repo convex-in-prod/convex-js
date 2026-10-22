@@ -40,7 +40,9 @@ jobs:
         run: npm install --legacy-peer-deps
 
       - name: Test
-        run: npm test -- --run
+        run: |
+          npm run test:build-cache
+          npm test -- --run
 
       - name: Typecheck
         run: npm run typecheck
