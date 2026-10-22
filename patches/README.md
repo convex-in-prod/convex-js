@@ -18,6 +18,45 @@ in the
 
 ## Maintained changes
 
+### Live runtime selection
+
+`convex runtime-mode` reads the backend's durable runtime policy. On a
+supporting self-hosted backend, `--primary v8|wasm` changes the authoritative
+runtime and `--shadow-percent 0..100` changes sampling in the opposite runtime.
+Zero selects primary-only. Omitted settings retain their current values;
+`--udf-type query`, `mutation`, or `both` selects which policy to change, with
+`both` as the default.
+
+The command uses ordinary deployment selection and authentication. Direct URL
+overrides require both `--url` and `--admin-key`; incomplete overrides are
+rejected before any policy request. Conflicting explicit deployment selectors
+are rejected, as are selectors that ordinary deploy-key or anonymous-local
+selection would ignore. Local deployment selection checks the running backend's
+identity. The command performs a revision-conditional update without automatic
+replay after an ambiguous response. It does not publish application code or
+restart the backend. Existing invocations retain their captured mode, and
+artifact eligibility and route quarantines remain independent. The backend API
+is `/api/wasm_runtime_policy`; older backends report that live selection is
+unavailable. Status reports `quarantineInitialized` as well as the selector
+count: an uninitialized store blocks Wasm even with zero selectors. Each OCC
+retry or reactive reexecution captures a fresh policy; nested transactional UDFs
+keep the existing V8 recursion path.
+
+Enabling Wasm primary prepares initialized capacity for the retained eligible
+pair before publishing the policy. Preparation uses recent primary concurrency,
+with one instance per applicable group and bounded best-effort extras. The
+backend rechecks the source, policy revision and initialized inventory before
+publication. Status, V8 rollback and sampling-only changes skip warmup. A policy
+POST has a 75-second client timeout; status has a ten-second timeout. Final
+source/dependency validation is bounded, but waiting for another publication or
+its durable write can exceed the client deadline. An uncertain response still
+requires reading status, because disconnecting does not cancel a write already
+submitted. Rejections distinguish baseline shortage, unavailable staging,
+changed initialization and stale source or policy intent without printing raw
+loader or transport diagnostics. Successful population counts include reserved
+idle Stores and observed compatible active Stores; active work is not frozen or
+guaranteed to succeed.
+
 ### Typed completed HTTP failures
 
 `ConvexHttpClient` throws `ConvexHttpError` for a completed non-UDF HTTP
