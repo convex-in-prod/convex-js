@@ -34,6 +34,8 @@ jobs:
 
       - run: npm i
 
+      - run: npm run test:build-cache
+
       - run: npm run test-esm
 
       - run: npm run lint
