@@ -170,17 +170,13 @@ Command.prototype.addDeploymentSelectionOptions = function (
   action: ActionDescription,
   options?: { showUrlHelp?: boolean },
 ) {
+  // Commander conflict lists use camelCase option attributes.
   const urlOption = new Option(
     "--url <url>",
     options?.showUrlHelp
       ? action + " the deployment at the given URL."
       : undefined,
-  ).conflicts([
-    "--prod",
-    "--preview-name",
-    "--deployment-name",
-    "--deployment",
-  ]);
+  ).conflicts(["prod", "previewName", "deploymentName", "deployment"]);
   if (!options?.showUrlHelp) {
     urlOption.hideHelp();
   }
@@ -190,19 +186,14 @@ Command.prototype.addDeploymentSelectionOptions = function (
       new Option(
         "--prod",
         action + " this project's default production deployment.",
-      ).conflicts([
-        "--preview-name",
-        "--deployment-name",
-        "--url",
-        "--deployment",
-      ]),
+      ).conflicts(["previewName", "deploymentName", "url", "deployment"]),
     )
     .addOption(
       new Option(
         "--preview-name <previewName>",
         action + " the preview deployment with the given name.",
       )
-        .conflicts(["--prod", "--deployment-name", "--url", "--deployment"])
+        .conflicts(["prod", "deploymentName", "url", "deployment"])
         .hideHelp(),
     )
     .addOption(
@@ -210,7 +201,7 @@ Command.prototype.addDeploymentSelectionOptions = function (
         "--deployment-name <deploymentName>",
         action + " the specified deployment.",
       )
-        .conflicts(["--prod", "--preview-name", "--url", "--deployment"])
+        .conflicts(["prod", "previewName", "url", "deployment"])
         .hideHelp(),
     )
     .addOption(
@@ -224,7 +215,7 @@ Command.prototype.addDeploymentSelectionOptions = function (
           "• `prod` (for your project’s default production deployment)\n" +
           "• `local` (for your local dev deployment)." +
           "\nYou can also select deployments in other projects with `project-slug:reference` or `team-slug:project-slug:reference`.",
-      ).conflicts(["--prod", "--preview-name", "--deployment-name", "--url"]),
+      ).conflicts(["prod", "previewName", "deploymentName", "url"]),
     )
     .addOption(
       new Option(
