@@ -73,7 +73,7 @@ index 2fc25ec0b3bb7036e2c1eba2431113527d0e8e7d..fe7b36bb09d3cf2cb2b5c72bbaa62c52
    },
    "peerDependencies": {
 diff --git a/patches/README.md b/patches/README.md
-index b1ffada55198aca54fb8a4befb51991edc272d9d..06cdf43316d658d0a513e414d4e2872f11e8d200 100644
+index f4d7dfbd93649df0326da277c22c76b6846f3fbb..390b1581fc392f5fc9bce2765dd993c122a2bf58 100644
 --- a/patches/README.md
 +++ b/patches/README.md
 @@ -18,6 +18,28 @@ in the
@@ -106,10 +106,10 @@ index b1ffada55198aca54fb8a4befb51991edc272d9d..06cdf43316d658d0a513e414d4e2872f
  
  `convex runtime-mode` reads the backend's durable runtime policy. On a
 diff --git a/schemas/convex.schema.json b/schemas/convex.schema.json
-index e698611f8b9d54fd8c0d9ebbb65da3ac9082d6bb..cddd89a5dda94143c3ddf719d297a91c635da944 100644
+index 41c72ed66489823e9adbe7fb66a3fc0853c19162..ac802b22b7ce606b37f53189d9a2438567239a68 100644
 --- a/schemas/convex.schema.json
 +++ b/schemas/convex.schema.json
-@@ -205,12 +205,6 @@
+@@ -222,12 +222,6 @@
          }
        }
      },
@@ -421,7 +421,7 @@ index 18cf2da83e52cf19a90a2af091ce3a64f8a36d09..76635264d97f0aafbc8fe36894f5d440
        )
        .addOption(
 diff --git a/src/cli/lib/config.ts b/src/cli/lib/config.ts
-index 73614b16ed7c25266d8488b8eb1cdbc0b83fa6d0..e9f36a548701031de74e3307038f65f7efb0b3e1 100644
+index 6efc7f6f6b10ea792077e44d47ee8bbff1341922..4c8310f801a205f8e3c45291d2d7d18a7c038fe7 100644
 --- a/src/cli/lib/config.ts
 +++ b/src/cli/lib/config.ts
 @@ -4,7 +4,6 @@ import path from "path";
@@ -432,7 +432,7 @@ index 73614b16ed7c25266d8488b8eb1cdbc0b83fa6d0..e9f36a548701031de74e3307038f65f7
  import {
    changeSpinner,
    logError,
-@@ -103,8 +102,6 @@ export interface ProjectConfig {
+@@ -104,8 +103,6 @@ export interface ProjectConfig {
      };
    };
  
@@ -441,7 +441,7 @@ index 73614b16ed7c25266d8488b8eb1cdbc0b83fa6d0..e9f36a548701031de74e3307038f65f7
    // WorkOS AuthKit integration configuration
    authKit?: AuthKitConfig | undefined;
  
-@@ -376,13 +373,6 @@ const createProjectConfigSchema = (strict: boolean) => {
+@@ -405,13 +402,6 @@ const createProjectConfigSchema = (strict: boolean) => {
      }),
      bundler: bundlerSchema.default({ includeSourcesContent: false }).optional(),
      generateCommonJSApi: z.boolean().default(false),

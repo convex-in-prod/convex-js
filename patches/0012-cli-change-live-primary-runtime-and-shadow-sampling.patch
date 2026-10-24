@@ -19,7 +19,7 @@ Register the command in the release entry point and cover command selection and 
  create mode 100644 src/cli/runtimeMode.ts
 
 diff --git a/patches/README.md b/patches/README.md
-index d026fa327d5de46d007ec2fe579361dca976acc4..b1ffada55198aca54fb8a4befb51991edc272d9d 100644
+index 9b7ff86de63a57744f4e66e739a43777b64c4c14..f4d7dfbd93649df0326da277c22c76b6846f3fbb 100644
 --- a/patches/README.md
 +++ b/patches/README.md
 @@ -18,6 +18,45 @@ in the
