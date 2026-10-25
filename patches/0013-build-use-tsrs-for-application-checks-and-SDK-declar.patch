@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Fri, 23 Oct 2026 04:29:22 +0800
-Subject: [PATCH 13/13] build: use tsrs for application checks and SDK
+Subject: [PATCH 13/14] build: use tsrs for application checks and SDK
  declarations
 
 Ship pinned tsrs with the CLI and use it for every configured application

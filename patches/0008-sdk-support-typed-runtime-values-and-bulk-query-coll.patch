@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 30 Sep 2026 01:02:07 +0800
-Subject: [PATCH 08/13] sdk: support typed runtime values and bulk query
+Subject: [PATCH 08/14] sdk: support typed runtime values and bulk query
  collection
 
 Use the runtime capability boundary for bulk collection, owned JSON values and typed syscall arguments and results. Keep ordinary serialized syscalls when capabilities are absent and preserve value ownership across query, database, storage, metadata, scheduler and registration adapters. Include focused owned-value regressions.

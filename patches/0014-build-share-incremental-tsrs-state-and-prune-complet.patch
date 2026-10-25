@@ -1,0 +1,1219 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Mon, 26 Oct 2026 02:52:25 +0800
+Subject: [PATCH 14/14] build: share incremental tsrs state and prune completed
+ caches
+
+Route typechecks and declaration builds through one tsrs runner. Cache
+build info with declarations in atomic archives keyed by compiler, platform,
+configuration, dependency locks, and build variant. Restore into independent
+staging directories so builds can share state across compatible checkouts
+without mixing public and internal outputs.
+
+Keep failed and custom compiler runs out of shared publication, remove
+declarations for deleted sources, and treat concurrent eviction as a miss.
+Add project-scoped cache maintenance with configurable publication-age
+retention while preserving temporary files, directories, and unknown data.
+
+Document cache configuration and ownership, add focused real-compiler tests,
+and run those Node suites separately from Vitest in CI.
+---
+ .github/workflows/build-convex-in-prod.yml |   4 +-
+ .github/workflows/test-and-lint.yml        |   2 +
+ CONTRIBUTING.md                            |  43 ++
+ api-extractor-configs/README.md            |   8 +-
+ package.json                               |   4 +-
+ patches/README.md                          |   8 +
+ scripts/build.py                           |   4 +-
+ scripts/maintain-tsrs-cache.mjs            |  29 ++
+ scripts/run-tsrs.mjs                       | 195 +++++++++
+ scripts/run-tsrs.test.mjs                  | 451 +++++++++++++++++++++
+ scripts/tsrs-cache.mjs                     | 165 ++++++++
+ scripts/tsrs-cache.test.mjs                | 139 +++++++
+ vitest.config.js                           |   8 +-
+ 13 files changed, 1052 insertions(+), 8 deletions(-)
+ create mode 100644 scripts/maintain-tsrs-cache.mjs
+ create mode 100644 scripts/run-tsrs.mjs
+ create mode 100644 scripts/run-tsrs.test.mjs
+ create mode 100644 scripts/tsrs-cache.mjs
+ create mode 100644 scripts/tsrs-cache.test.mjs
+
+diff --git a/.github/workflows/build-convex-in-prod.yml b/.github/workflows/build-convex-in-prod.yml
+index 161560bc579dca1c281c4f3c059640697efd7fd0..a4af2d6be76e157b0043a4afa3802449dad04143 100644
+--- a/.github/workflows/build-convex-in-prod.yml
++++ b/.github/workflows/build-convex-in-prod.yml
+@@ -40,7 +40,9 @@ jobs:
+         run: npm install --legacy-peer-deps
+ 
+       - name: Test
+-        run: npm test -- --run
++        run: |
++          npm run test:build-cache
++          npm test -- --run
+ 
+       - name: Typecheck
+         run: npm run typecheck
+diff --git a/.github/workflows/test-and-lint.yml b/.github/workflows/test-and-lint.yml
+index 92d3da140f6c8d70c37285b3abc73aef05b5f573..b6d2b31fed733e574c7fe0e343deb22c3d9d2df9 100644
+--- a/.github/workflows/test-and-lint.yml
++++ b/.github/workflows/test-and-lint.yml
+@@ -34,6 +34,8 @@ jobs:
+ 
+       - run: npm i
+ 
++      - run: npm run test:build-cache
++
+       - run: npm run test-esm
+ 
+       - run: npm run lint
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 962fff4d682426a671adbccf9c5eddecc00a7ba8..8c98ceda597fd110f07a8f85d09764599f8cdfb1 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -48,3 +48,46 @@ published package mirror the filesystem of this repository.
+ management-api.json is a programmatically updated file that generates
+ src/cli/generatedApi.ts, but generating this file is a manual process. Run
+ `npm run generateManagementApiSpec` to update it.
++
++`npm run typecheck` and the declaration stages of `npm run build` use
++incremental tsrs builds through `scripts/run-tsrs.mjs`. Their shared cache root
++is `TSRS_CACHE_DIR`, defaulting to `tsrs` under `XDG_CACHE_HOME` or the platform
++user cache directory. The package name supplies the project namespace;
++`TSRS_CACHE_NAMESPACE` overrides it. Compiler release, platform, dependency
++locks, TypeScript configuration, and public/internal/typecheck options separate
++entries. Ordinary source edits keep the same entry and use the compiler's
++invalidation.
++
++Declaration entries are atomic archives containing both build info and emitted
++declarations. Each build restores into its own `tmpDist*` directory at the same
++depth as `dist`, preserving build-info and declaration-map relative paths across
++checkouts. Removed source declarations are pruned before publication. Public and
++internal output stay separate, and a successful build replaces one archive per
++variant; concurrent writers never publish mixed build info and outputs. Deleting
++`dist` does not discard reusable declarations. Failed builds do not publish.
++
++`TSRS_BUILD_DIAGNOSTICS=1` reports compiler reuse diagnostics.
++`TSRS_DISABLE_BUILD_CACHE=1`, `TSRS_BINARY`, or extra typecheck arguments
++disable shared-cache reads and publication. `npm run test:build-cache` checks
++real warm reuse, invalidation, relocation, output availability, and concurrent
++writers. These CLI caches do not provide persisted semantic snapshots to the
++tsrs API.
++
++The runner removes its temporary archive and typecheck directories on
++completion; `npm run clean` removes package build staging directories.
++`npm run cache:tsrs:prune -- --dry-run` reports completed declaration archives
++older than 30 days in the selected project namespace. `--apply` removes those
++archives. `--retention-days N` or `TSRS_CACHE_RETENTION_DAYS` changes the
++retention interval; `--project-root PATH` selects another package manifest. The
++command uses modification time at publication, with no access-time writes or
++per-pass limit. All directories, writer temporary files, unknown formats,
++source/output trees, and other project namespaces remain untouched. Readers
++retain archive bytes from one open; eviction before that open is a cache miss.
++Malformed archives, missing build info, invalid build-info JSON, and unusable
++`fileNames` fail explicitly. The runner uses `fileNames` to prune declarations;
++tsrs owns the remaining incremental-state validation and may rebuild when that
++state is unusable. Maintenance is owned by this SDK and requires only Node,
++independently of consumer application checkouts.
++
++CI runners reuse entries across jobs only when their cache mechanism restores
++this directory; otherwise reuse lasts for the job.
+diff --git a/api-extractor-configs/README.md b/api-extractor-configs/README.md
+index 712beefd061b649982b53026c3eca0fa3e2f9e0e..92344118c5a1c169a60e8619149240122af69a14 100644
+--- a/api-extractor-configs/README.md
++++ b/api-extractor-configs/README.md
+@@ -5,6 +5,8 @@ public API.
+ Since api-extractor .d.ts rollups don't support declaration map, using these as
+ published types break jump-to-definition in VS Code. Until
+ [declaration map rollups](https://github.com/microsoft/rushstack/issues/1886)
+-are implemented we compile public types with `tsc --stripInternal`, which
+-requires marking exports as internal at the index.ts barrel file level if they
+-need to be used in multiple files.
++are implemented we compile public types with tsrs and `stripInternal` through
++the declaration stage in `scripts/build.py`. This requires marking exports as
++internal at the index.ts barrel file level if they need to be used in multiple
++files. The [build notes](../CONTRIBUTING.md#build-notes) describe incremental
++declaration caching and how staging preserves declaration-map paths.
+diff --git a/package.json b/package.json
+index fe7b36bb09d3cf2cb2b5c72bbaa62c52c33d7fe1..59bde21eabfeec1fd8791a4c8bc46563388a4689 100644
+--- a/package.json
++++ b/package.json
+@@ -197,7 +197,9 @@
+     "postpack": "node scripts/postpack.mjs",
+     "test": "vitest --silent",
+     "test-not-silent": "vitest",
+-    "typecheck": "tsrs --noEmit --emitDeclarationOnly false",
++    "test:build-cache": "node --test --test-concurrency=1 scripts/run-tsrs.test.mjs scripts/tsrs-cache.test.mjs",
++    "cache:tsrs:prune": "node scripts/maintain-tsrs-cache.mjs",
++    "typecheck": "node scripts/run-tsrs.mjs typecheck",
+     "test-esm": "node ./scripts/test-esm.mjs && ./scripts/checkdeps.mjs && ./scripts/checkimports.mjs",
+     "compare-codegen": "node scripts/compare-codegen.mjs",
+     "generateApiSpec": "npm run generateManagementApiSpec && npm run generateFunctionLogsApiSpec",
+diff --git a/patches/README.md b/patches/README.md
+index 390b1581fc392f5fc9bce2765dd993c122a2bf58..cad37217a5188d1d4a6ccd287bc0dfb918be8b1a 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -40,6 +40,14 @@ requiring generic typed arrays solely because the build compiler is newer. Older
+ SDK releases using tsc remain compatible with the backend: typechecking does not
+ change the deployment protocol or emitted application JavaScript.
+ 
++SDK typechecks and declaration builds reuse incremental state under the shared
++`TSRS_CACHE_DIR` root, separated by package namespace, compiler, configuration,
++and build scope. Declaration archives include their emitted files; public and
++internal declarations remain separate. The SDK owns completed-entry cleanup
++through `npm run cache:tsrs:prune`. See the
++[build notes](../CONTRIBUTING.md#build-notes) for cache controls, retention, and
++verification commands.
++
+ ### Live runtime selection
+ 
+ `convex runtime-mode` reads the backend's durable runtime policy. On a
+diff --git a/scripts/build.py b/scripts/build.py
+index b3690e870ddafc605e261085a798c75a690fb018..bf45e96b4a268a5a55cb2977eb3577bd8a06cd06 100755
+--- a/scripts/build.py
++++ b/scripts/build.py
+@@ -59,7 +59,7 @@ def provide_temp_dir(func: Callable[[Path], None]) -> Callable[[], None]:
+ @log_duration
+ @provide_temp_dir
+ def build_public_types(temp_dir: Path) -> None:
+-    run(f"tsrs --outDir {temp_dir / 'esm-types'}")
++    run(f"node scripts/run-tsrs.mjs public-types {temp_dir}")
+     # Both declaration builds use the same module settings. Only the package
+     # markers differ; equal directory depths also preserve declaration-map paths.
+     shutil.copytree(temp_dir / "esm-types", temp_dir / "cjs-types")
+@@ -70,7 +70,7 @@ def build_public_types(temp_dir: Path) -> None:
+ @log_duration
+ @provide_temp_dir
+ def build_internal_types(temp_dir: Path) -> None:
+-    run(f"tsrs --stripInternal false --outDir {temp_dir / 'internal-esm-types'}")
++    run(f"node scripts/run-tsrs.mjs internal-types {temp_dir}")
+     shutil.copytree(temp_dir / "internal-esm-types", temp_dir / "internal-cjs-types")
+     (temp_dir / "internal-esm-types/package.json").write_text('{"type": "module"}')
+     (temp_dir / "internal-cjs-types/package.json").write_text('{"type": "commonjs"}')
+diff --git a/scripts/maintain-tsrs-cache.mjs b/scripts/maintain-tsrs-cache.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e1647798ce9f6506aa27e70b10bb894b4edf4a32
+--- /dev/null
++++ b/scripts/maintain-tsrs-cache.mjs
+@@ -0,0 +1,29 @@
++#!/usr/bin/env node
++import { resolve } from "node:path";
++import { maintainTsrsCache, tsrsCacheRetentionDays } from "./tsrs-cache.mjs";
++
++let apply = false;
++let modeSeen = false;
++let projectRoot = process.cwd();
++let retentionDays = tsrsCacheRetentionDays();
++const args = process.argv.slice(2);
++for (let index = 0; index < args.length; index += 1) {
++  const option = args[index];
++  if (option === "--apply" || option === "--dry-run") {
++    if (modeSeen)
++      throw new Error("Maintenance mode was provided more than once.");
++    modeSeen = true;
++    apply = option === "--apply";
++  } else if (option === "--retention-days" && args[index + 1] !== undefined) {
++    retentionDays = tsrsCacheRetentionDays(args[++index]);
++  } else if (option === "--project-root" && args[index + 1] !== undefined) {
++    projectRoot = resolve(args[++index]);
++  } else {
++    throw new Error(
++      "Usage: maintain-tsrs-cache.mjs [--dry-run|--apply] [--retention-days N] [--project-root PATH]",
++    );
++  }
++}
++process.stdout.write(
++  `${JSON.stringify(maintainTsrsCache({ projectRoot, retentionDays, apply }), null, 2)}\n`,
++);
+diff --git a/scripts/run-tsrs.mjs b/scripts/run-tsrs.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b0361332bee6a51c9432f52d33e8287d11936ea
+--- /dev/null
++++ b/scripts/run-tsrs.mjs
+@@ -0,0 +1,195 @@
++import { spawnSync } from "node:child_process";
++import { createHash, randomUUID } from "node:crypto";
++import {
++  chmodSync,
++  mkdirSync,
++  mkdtempSync,
++  readFileSync,
++  readdirSync,
++  renameSync,
++  rmSync,
++} from "node:fs";
++import { createRequire } from "node:module";
++import { dirname, join, resolve } from "node:path";
++import * as tar from "tar";
++import { projectTsrsCacheRoot } from "./tsrs-cache.mjs";
++
++const root = process.cwd();
++const [scope, ...argumentsList] = process.argv.slice(2);
++const outputName = {
++  "public-types": "esm-types",
++  "internal-types": "internal-esm-types",
++}[scope];
++if (scope !== "typecheck" && outputName === undefined) {
++  throw new Error(
++    "Usage: run-tsrs.mjs typecheck [compiler options] | (public-types|internal-types) <temporary directory>",
++  );
++}
++const ownsTemporaryDirectory = scope === "typecheck";
++if (!ownsTemporaryDirectory && argumentsList.length !== 1) {
++  throw new Error("Declaration staging requires one temporary directory.");
++}
++const require = createRequire(join(root, "package.json"));
++const compilerPackagePath = require.resolve("tsrs/package.json");
++const compilerPackage = JSON.parse(readFileSync(compilerPackagePath, "utf8"));
++const compiler = join(dirname(compilerPackagePath), compilerPackage.bin.tsrs);
++const outputParent = ownsTemporaryDirectory
++  ? mkdtempSync(join(root, "tmpDistTypecheck-"))
++  : resolve(root, argumentsList[0]);
++// Source paths in build info and declaration maps are relative. Every staging directory has
++// the same depth as dist, including after moving the archive to another checkout.
++if (dirname(outputParent) !== root) {
++  throw new Error(
++    "Declaration staging requires one directory directly inside the package root.",
++  );
++}
++mkdirSync(outputParent, { recursive: true });
++const buildInfoName = `${scope}.tsbuildinfo`;
++const buildInfoPath = join(outputParent, buildInfoName);
++const compilerArgs = [
++  "--incremental",
++  "--tsBuildInfoFile",
++  buildInfoPath,
++  ...(ownsTemporaryDirectory
++    ? ["--noEmit", "--emitDeclarationOnly", "false", ...argumentsList]
++    : [
++        "--outDir",
++        join(outputParent, outputName),
++        ...(scope === "internal-types" ? ["--stripInternal", "false"] : []),
++      ]),
++  ...(process.env.TSRS_BUILD_DIAGNOSTICS === "1"
++    ? ["--extendedDiagnostics", "--listEmittedFiles"]
++    : []),
++];
++const useSharedCache =
++  process.env.TSRS_BINARY === undefined &&
++  process.env.TSRS_DISABLE_BUILD_CACHE !== "1" &&
++  (!ownsTemporaryDirectory || argumentsList.length === 0);
++
++function sharedArchivePath() {
++  const hash = createHash("sha256").update("declarations-v1\0");
++  // Source edits stay in the same entry: the compiler owns ordinary incremental invalidation.
++  for (const name of [
++    "package.json",
++    "tsconfig.json",
++    "package-lock.json",
++    "node_modules/.package-lock.json",
++  ]) {
++    hash.update(name).update("\0");
++    try {
++      hash.update(readFileSync(join(root, name)));
++    } catch (error) {
++      if (error.code !== "ENOENT" || !name.endsWith("package-lock.json"))
++        throw error;
++      hash.update("missing");
++    }
++    hash.update("\0");
++  }
++  return join(
++    projectTsrsCacheRoot(root),
++    "declarations-v1",
++    compilerPackage.version,
++    `${process.platform}-${process.arch}-${hash.digest("hex")}`,
++    `${scope}.tgz`,
++  );
++}
++
++function readBuildInfo() {
++  const buildInfo = JSON.parse(readFileSync(buildInfoPath, "utf8"));
++  // Pruning consumes fileNames; tsrs owns validation and recovery of its private state.
++  if (
++    !Array.isArray(buildInfo?.fileNames) ||
++    !buildInfo.fileNames.every(
++      (name) => typeof name === "string" && name.length > 0,
++    )
++  ) {
++    throw new Error("The tsrs cache build info contains unusable fileNames.");
++  }
++  return buildInfo;
++}
++
++function pruneRemovedDeclarations(directory, programPaths) {
++  for (const entry of readdirSync(directory, { withFileTypes: true })) {
++    const path = join(directory, entry.name);
++    if (entry.isDirectory()) {
++      pruneRemovedDeclarations(path, programPaths);
++    } else if (/\.d\.(?:ts|mts|cts)\.map$/u.test(entry.name)) {
++      const map = JSON.parse(readFileSync(path, "utf8"));
++      if (
++        !map.sources.every((source) =>
++          programPaths.has(resolve(dirname(path), map.sourceRoot, source)),
++        )
++      ) {
++        rmSync(path);
++        rmSync(path.slice(0, -4));
++      }
++    }
++  }
++}
++
++let temporaryArchive;
++try {
++  const archive = useSharedCache ? sharedArchivePath() : undefined;
++  if (archive !== undefined) {
++    let archiveBytes;
++    try {
++      // Retain bytes from one open: maintenance can unlink this completed archive at any time.
++      archiveBytes = readFileSync(archive);
++    } catch (error) {
++      if (error.code !== "ENOENT") throw error;
++    }
++    if (archiveBytes !== undefined) {
++      // A single archive publishes build info and all emitted files together. Each invocation
++      // extracts into its own staging directory; competing writers atomically replace the archive.
++      await new Promise((resolve, reject) => {
++        const unpack = tar.x({ cwd: outputParent, strict: true });
++        unpack.on("error", reject);
++        unpack.on("close", resolve);
++        unpack.end(archiveBytes);
++      });
++      // Missing build info, malformed JSON, and unusable pruning paths fail here.
++      // The compiler may rebuild when the remaining incremental state is unusable.
++      readBuildInfo();
++    }
++  }
++
++  const result = spawnSync(process.execPath, [compiler, ...compilerArgs], {
++    cwd: root,
++    stdio: "inherit",
++  });
++  if (result.error !== undefined) throw result.error;
++  if (result.signal !== null) process.kill(process.pid, result.signal);
++  if (result.status !== 0) {
++    process.exitCode = result.status ?? 1;
++  } else if (archive !== undefined || outputName !== undefined) {
++    // Extra typecheck options can request only file listings or help, without build info.
++    // Only cached checks and declaration emission require incremental state after success.
++    const buildInfo = readBuildInfo();
++    if (outputName !== undefined) {
++      pruneRemovedDeclarations(
++        join(outputParent, outputName),
++        new Set(buildInfo.fileNames.map((name) => resolve(outputParent, name))),
++      );
++    }
++    if (archive !== undefined) {
++      mkdirSync(dirname(archive), { recursive: true, mode: 0o700 });
++      temporaryArchive = `${archive}.${randomUUID()}.tmp`;
++      await tar.c(
++        {
++          file: temporaryArchive,
++          cwd: outputParent,
++          gzip: true,
++          portable: true,
++        },
++        [buildInfoName, ...(outputName === undefined ? [] : [outputName])],
++      );
++      chmodSync(temporaryArchive, 0o600);
++      renameSync(temporaryArchive, archive);
++    }
++  }
++} finally {
++  if (temporaryArchive !== undefined) rmSync(temporaryArchive, { force: true });
++  rmSync(buildInfoPath, { force: true });
++  if (ownsTemporaryDirectory)
++    rmSync(outputParent, { recursive: true, force: true });
++}
+diff --git a/scripts/run-tsrs.test.mjs b/scripts/run-tsrs.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a6e6a05dbe43a622e535d1b2637559b6e8698f7
+--- /dev/null
++++ b/scripts/run-tsrs.test.mjs
+@@ -0,0 +1,451 @@
++import assert from "node:assert/strict";
++import { execFile, spawnSync } from "node:child_process";
++import {
++  mkdtemp,
++  mkdir,
++  readFile,
++  readdir,
++  rm,
++  symlink,
++  writeFile,
++} from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { dirname, join, resolve } from "node:path";
++import { promisify } from "node:util";
++import { fileURLToPath } from "node:url";
++import test from "node:test";
++import * as tar from "tar";
++import { maintainTsrsCache } from "./tsrs-cache.mjs";
++
++const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
++const runner = join(repositoryRoot, "scripts/run-tsrs.mjs");
++const execute = promisify(execFile);
++const source = `export type Box<T> = { value: T };
++export const item: Box<string> = { value: "ok" };
++/** @internal */
++export const hidden = 2;
++`;
++
++async function fixture(t) {
++  const root = await mkdtemp(join(tmpdir(), "tsrs-build-cache-"));
++  t.after(() => rm(root, { recursive: true, force: true }));
++  const config = {
++    compilerOptions: {
++      types: [],
++      strict: true,
++      skipLibCheck: true,
++      declaration: true,
++      declarationMap: true,
++      emitDeclarationOnly: true,
++      stripInternal: true,
++      rootDir: "src",
++    },
++    include: ["src"],
++  };
++  const checkouts = [join(root, "one"), join(root, "nested", "two")];
++  for (const checkout of checkouts) {
++    await mkdir(join(checkout, "node_modules"), { recursive: true });
++    await symlink(
++      join(repositoryRoot, "node_modules/tsrs"),
++      join(checkout, "node_modules/tsrs"),
++      "dir",
++    );
++    await mkdir(join(checkout, "src"));
++    await writeFile(join(checkout, "src/index.ts"), source);
++    await writeFile(
++      join(checkout, "src/removed.ts"),
++      "export const removed = 1;\n",
++    );
++    await writeFile(
++      join(checkout, "package.json"),
++      JSON.stringify({ name: "cache-fixture", type: "module" }),
++    );
++    await writeFile(join(checkout, "tsconfig.json"), JSON.stringify(config));
++  }
++  return {
++    checkouts,
++    config,
++    environment: {
++      ...process.env,
++      TSRS_CACHE_DIR: join(root, "cache"),
++      TSRS_CACHE_NAMESPACE: "cache-fixture",
++      TSRS_BUILD_DIAGNOSTICS: "1",
++      TSRS_DISABLE_BUILD_CACHE: "0",
++    },
++  };
++}
++
++function run(checkout, environment, scope, output) {
++  const result = spawnSync(
++    process.execPath,
++    [runner, scope, ...(output === undefined ? [] : [output])],
++    { cwd: checkout, env: environment, encoding: "utf8" },
++  );
++  assert.equal(result.status, 0, result.stderr + result.stdout);
++  return result.stdout;
++}
++
++test("declarations reuse across checkouts, invalidate edits, retain outputs, and separate options", async (t) => {
++  const {
++    checkouts: [one, two],
++    config,
++    environment,
++  } = await fixture(t);
++  assert.match(
++    run(one, environment, "public-types", "tmpDistOne"),
++    /TSFILE: .*index\.d\.ts\n/u,
++  );
++  const original = await readFile(
++    join(one, "tmpDistOne/esm-types/index.d.ts"),
++    "utf8",
++  );
++  assert.doesNotMatch(original, /hidden/u);
++  await rm(join(one, "tmpDistOne"), { recursive: true });
++  assert.doesNotMatch(
++    run(two, environment, "public-types", "tmpDistTwo"),
++    /TSFILE:/u,
++  );
++  assert.equal(
++    await readFile(join(two, "tmpDistTwo/esm-types/index.d.ts"), "utf8"),
++    original,
++  );
++  const mapPath = join(two, "tmpDistTwo/esm-types/index.d.ts.map");
++  const map = JSON.parse(await readFile(mapPath, "utf8"));
++  assert.equal(
++    resolve(dirname(mapPath), map.sourceRoot, map.sources[0]),
++    join(two, "src/index.ts"),
++  );
++
++  // build.py runs both declaration stages concurrently in one staging parent.
++  await Promise.all(
++    ["public-types", "internal-types"].map((scope) =>
++      execute(process.execPath, [runner, scope, "tmpDistInternal"], {
++        cwd: two,
++        env: environment,
++      }),
++    ),
++  );
++  assert.match(
++    await readFile(
++      join(two, "tmpDistInternal/internal-esm-types/index.d.ts"),
++      "utf8",
++    ),
++    /hidden/u,
++  );
++  assert.equal(
++    await readFile(join(two, "tmpDistInternal/esm-types/index.d.ts"), "utf8"),
++    original,
++  );
++  assert.doesNotMatch(
++    run(two, environment, "public-types", "tmpDistPublicAgain"),
++    /TSFILE:/u,
++  );
++  await writeFile(
++    join(two, "src/index.ts"),
++    source.replace("Box<string>", "Box<number>").replace('"ok"', "3"),
++  );
++  await rm(join(two, "src/removed.ts"));
++  assert.match(
++    run(two, environment, "public-types", "tmpDistEdited"),
++    /TSFILE: .*index\.d\.ts\n/u,
++  );
++  assert.match(
++    await readFile(join(two, "tmpDistEdited/esm-types/index.d.ts"), "utf8"),
++    /Box<number>/u,
++  );
++  assert.equal(
++    (await readdir(join(two, "tmpDistEdited/esm-types"))).some((name) =>
++      name.startsWith("removed."),
++    ),
++    false,
++  );
++
++  config.compilerOptions.stripInternal = false;
++  await writeFile(join(two, "tsconfig.json"), JSON.stringify(config));
++  run(two, environment, "public-types", "tmpDistConfig");
++  assert.match(
++    await readFile(join(two, "tmpDistConfig/esm-types/index.d.ts"), "utf8"),
++    /hidden/u,
++  );
++  await writeFile(join(two, "package-lock.json"), '{"lockfileVersion":3}\n');
++  assert.match(
++    run(two, environment, "public-types", "tmpDistDependencies"),
++    /TSFILE: .*index\.d\.ts\n/u,
++  );
++});
++
++test("typechecks reuse successful work and reject edited errors", async (t) => {
++  const {
++    checkouts: [one, two],
++    environment,
++  } = await fixture(t);
++  const cold = run(one, environment, "typecheck");
++  assert.ok(Number(/Instantiations:\s+(\d+)/u.exec(cold)[1]) > 0);
++  const warm = run(two, environment, "typecheck");
++  assert.match(warm, /Instantiations:\s+0\n/u);
++  const report = maintainTsrsCache({
++    projectRoot: one,
++    environment,
++    retentionDays: 0,
++  });
++  const archive = join(report.cacheDirectory, report.candidates[0]);
++  const original = await readFile(archive);
++  // Informational compiler options succeed without creating incremental state.
++  const filesOnly = spawnSync(
++    process.execPath,
++    [runner, "typecheck", "--listFilesOnly"],
++    { cwd: two, env: environment, encoding: "utf8" },
++  );
++  assert.equal(filesOnly.status, 0, filesOnly.stdout + filesOnly.stderr);
++  assert.match(filesOnly.stdout, /src[/\\]index\.ts/u);
++  await writeFile(join(two, "src/index.ts"), source.replace('"ok"', "3"));
++  const failed = spawnSync(process.execPath, [runner, "typecheck"], {
++    cwd: two,
++    env: environment,
++    encoding: "utf8",
++  });
++  assert.notEqual(failed.status, 0);
++  assert.match(failed.stdout, /TS2322/u);
++  assert.deepEqual(await readFile(archive), original);
++  assert.match(run(one, environment, "typecheck"), /Instantiations:\s+0\n/u);
++  assert.equal(
++    (await readdir(two)).some((name) => name.startsWith("tmpDistTypecheck-")),
++    false,
++  );
++});
++
++test("uncached typecheck modes forward compiler options without reading or replacing shared state", async (t) => {
++  const {
++    checkouts: [one],
++    environment,
++  } = await fixture(t);
++  run(one, environment, "typecheck");
++  const report = maintainTsrsCache({
++    projectRoot: one,
++    environment,
++    retentionDays: 0,
++  });
++  const archive = join(report.cacheDirectory, report.candidates[0]);
++  await writeFile(archive, "unused corrupt archive");
++  const { default: getExePath } =
++    await import("../node_modules/tsrs/lib/getExePath.js");
++  const modes = [
++    { args: [], env: { ...environment, TSRS_DISABLE_BUILD_CACHE: "1" } },
++    { args: [], env: { ...environment, TSRS_BINARY: getExePath() } },
++    { args: ["--incremental", "false"], env: environment },
++  ];
++  for (const { args, env } of modes) {
++    const result = spawnSync(process.execPath, [runner, "typecheck", ...args], {
++      cwd: one,
++      env,
++      encoding: "utf8",
++    });
++    assert.equal(result.status, 0, result.stdout + result.stderr);
++    assert.ok(Number(/Instantiations:\s+(\d+)/u.exec(result.stdout)[1]) > 0);
++    assert.equal(await readFile(archive, "utf8"), "unused corrupt archive");
++  }
++  await writeFile(join(one, "src/index.ts"), source.replace('"ok"', "3"));
++  const failed = spawnSync(
++    process.execPath,
++    [runner, "typecheck", "--pretty", "false"],
++    {
++      cwd: one,
++      env: environment,
++      encoding: "utf8",
++    },
++  );
++  assert.notEqual(failed.status, 0);
++  assert.match(failed.stdout, /TS2322/u);
++  assert.equal(await readFile(archive, "utf8"), "unused corrupt archive");
++});
++
++test("concurrent writers publish coherent declaration archives", async (t) => {
++  const {
++    checkouts: [one, two],
++    environment,
++  } = await fixture(t);
++  await writeFile(
++    join(two, "src/index.ts"),
++    source.replace("Box<string>", "Box<number>").replace('"ok"', "3"),
++  );
++  await Promise.all(
++    [one, two].map((cwd) =>
++      execute(process.execPath, [runner, "public-types", "tmpDistConcurrent"], {
++        cwd,
++        env: environment,
++      }),
++    ),
++  );
++  for (const [checkout, type] of [
++    [one, "string"],
++    [two, "number"],
++  ]) {
++    run(checkout, environment, "public-types", "tmpDistAfterConcurrent");
++    assert.match(
++      await readFile(
++        join(checkout, "tmpDistAfterConcurrent/esm-types/index.d.ts"),
++        "utf8",
++      ),
++      new RegExp(`Box<${type}>`, "u"),
++    );
++  }
++});
++
++test("evicted archives rebuild and an opened archive survives unlink while corruption stays strict", async (t) => {
++  const {
++    checkouts: [one, two],
++    environment,
++  } = await fixture(t);
++  run(one, environment, "public-types", "tmpDistCold");
++  const report = maintainTsrsCache({
++    projectRoot: one,
++    environment,
++    retentionDays: 0,
++  });
++  assert.equal(report.candidates.length, 1);
++  const archive = join(report.cacheDirectory, report.candidates[0]);
++  const hook = join(one, "evict-cache.mjs");
++  await writeFile(
++    hook,
++    `
++    import fs from "node:fs";
++    import { syncBuiltinESMExports } from "node:module";
++    const { readFileSync } = fs;
++    fs.readFileSync = function(path, ...args) {
++      const bytes = readFileSync(path, ...args);
++      if (path === process.env.CACHE_EVICT_PATH) {
++        fs.unlinkSync(path);
++        fs.writeFileSync(path + ".observed", "evicted");
++      }
++      return bytes;
++    };
++    syncBuiltinESMExports();
++  `,
++  );
++  assert.doesNotMatch(
++    run(
++      two,
++      {
++        ...environment,
++        NODE_OPTIONS: `--import ${JSON.stringify(hook)}`,
++        CACHE_EVICT_PATH: archive,
++      },
++      "public-types",
++      "tmpDistEvictedAfterRead",
++    ),
++    /TSFILE:/u,
++  );
++  assert.equal(await readFile(archive + ".observed", "utf8"), "evicted");
++  const original = await readFile(
++    join(one, "tmpDistCold/esm-types/index.d.ts"),
++    "utf8",
++  );
++  assert.equal(
++    await readFile(
++      join(two, "tmpDistEvictedAfterRead/esm-types/index.d.ts"),
++      "utf8",
++    ),
++    original,
++  );
++  assert.equal(
++    maintainTsrsCache({
++      projectRoot: one,
++      environment,
++      retentionDays: 0,
++      apply: true,
++    }).removed.files,
++    1,
++  );
++  assert.match(
++    run(two, environment, "public-types", "tmpDistEvictedBeforeRead"),
++    /TSFILE:/u,
++  );
++  assert.equal(
++    await readFile(
++      join(two, "tmpDistEvictedBeforeRead/esm-types/index.d.ts"),
++      "utf8",
++    ),
++    original,
++  );
++  await writeFile(archive, "corrupt archive");
++  const corrupt = spawnSync(
++    process.execPath,
++    [runner, "public-types", "tmpDistCorrupt"],
++    { cwd: one, env: environment, encoding: "utf8" },
++  );
++  assert.notEqual(corrupt.status, 0);
++  assert.match(corrupt.stderr, /TAR_BAD_ARCHIVE/u);
++});
++
++test("archived build info requires pruning paths and leaves incremental recovery to tsrs", async (t) => {
++  const {
++    checkouts: [one, two],
++    environment,
++  } = await fixture(t);
++  run(one, environment, "public-types", "tmpDistCold");
++  const report = maintainTsrsCache({
++    projectRoot: one,
++    environment,
++    retentionDays: 0,
++  });
++  const archive = join(report.cacheDirectory, report.candidates[0]);
++  const original = await readFile(archive);
++  const snapshot = join(one, "snapshot");
++  for (const [index, corruption] of [
++    "invalid-json",
++    "invalid-shape",
++    "invalid-file-name",
++    "missing-build-info",
++  ].entries()) {
++    await mkdir(snapshot);
++    await writeFile(archive, original);
++    await tar.x({ file: archive, cwd: snapshot });
++    const buildInfo = join(snapshot, "public-types.tsbuildinfo");
++    if (corruption === "invalid-json") await writeFile(buildInfo, "invalid");
++    if (corruption === "invalid-shape") await writeFile(buildInfo, "{}");
++    if (corruption === "invalid-file-name") {
++      const info = JSON.parse(await readFile(buildInfo, "utf8"));
++      info.fileNames[0] = null;
++      await writeFile(buildInfo, JSON.stringify(info));
++    }
++    if (corruption === "missing-build-info") await rm(buildInfo);
++    await tar.c(
++      { file: archive, cwd: snapshot, gzip: true },
++      await readdir(snapshot),
++    );
++    const damaged = await readFile(archive);
++    const result = spawnSync(
++      process.execPath,
++      [runner, "public-types", `tmpDistCorrupt${index}`],
++      {
++        cwd: two,
++        env: environment,
++        encoding: "utf8",
++      },
++    );
++    assert.notEqual(result.status, 0, corruption);
++    assert.equal(result.stdout, "", corruption);
++    assert.deepEqual(await readFile(archive), damaged, corruption);
++    await rm(snapshot, { recursive: true });
++  }
++
++  await mkdir(snapshot);
++  await writeFile(archive, original);
++  await tar.x({ file: archive, cwd: snapshot });
++  const buildInfo = join(snapshot, "public-types.tsbuildinfo");
++  const { fileNames } = JSON.parse(await readFile(buildInfo, "utf8"));
++  // Pruning paths remain usable even when tsrs must rebuild its private state.
++  await writeFile(buildInfo, JSON.stringify({ fileNames }));
++  await tar.c(
++    { file: archive, cwd: snapshot, gzip: true },
++    await readdir(snapshot),
++  );
++  assert.match(
++    run(two, environment, "public-types", "tmpDistRecovered"),
++    /TSFILE: .*index\.d\.ts\n/u,
++  );
++  assert.equal(
++    await readFile(join(two, "tmpDistRecovered/esm-types/index.d.ts"), "utf8"),
++    await readFile(join(one, "tmpDistCold/esm-types/index.d.ts"), "utf8"),
++  );
++});
+diff --git a/scripts/tsrs-cache.mjs b/scripts/tsrs-cache.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..597fb00e64ffd7a3e9cd7f23350393d20b9911e9
+--- /dev/null
++++ b/scripts/tsrs-cache.mjs
+@@ -0,0 +1,165 @@
++import { lstatSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
++import { homedir } from "node:os";
++import { dirname, join, relative, resolve, sep } from "node:path";
++
++export function projectTsrsCacheRoot(projectRoot, environment = process.env) {
++  let cacheRoot = environment.TSRS_CACHE_DIR;
++  if (cacheRoot === undefined) {
++    const cacheHome =
++      environment.XDG_CACHE_HOME ??
++      (process.platform === "darwin"
++        ? join(homedir(), "Library", "Caches")
++        : join(homedir(), ".cache"));
++    if (cacheHome === "")
++      throw new Error("Compiler cache paths must not be empty.");
++    cacheRoot = join(cacheHome, "tsrs");
++  }
++  if (cacheRoot === "")
++    throw new Error("Compiler cache paths must not be empty.");
++  const packageJson = JSON.parse(
++    readFileSync(join(projectRoot, "package.json"), "utf8"),
++  );
++  if (
++    packageJson === null ||
++    typeof packageJson !== "object" ||
++    Array.isArray(packageJson)
++  ) {
++    throw new Error("The project package manifest must be an object.");
++  }
++  if (packageJson.name !== undefined && typeof packageJson.name !== "string") {
++    throw new Error("The project package name must be a string when provided.");
++  }
++  const namespace =
++    environment.TSRS_CACHE_NAMESPACE ??
++    (packageJson.name ?? "project")
++      .replace(/^@/u, "")
++      .replace(/[^A-Za-z0-9._-]+/gu, "-")
++      .toLowerCase();
++  if (!/^[a-z0-9][a-z0-9._-]{0,213}$/u.test(namespace)) {
++    throw new Error("TSRS_CACHE_NAMESPACE must be a simple non-empty name.");
++  }
++  return resolve(cacheRoot, namespace);
++}
++
++export function tsrsCacheRetentionDays(
++  value = process.env.TSRS_CACHE_RETENTION_DAYS ?? 30,
++) {
++  const days = Number(value);
++  if (
++    value === "" ||
++    !Number.isFinite(days) ||
++    days < 0 ||
++    !Number.isSafeInteger(days * 86_400_000)
++  ) {
++    throw new Error(
++      "TSRS cache retention days must be a non-negative duration in whole milliseconds.",
++    );
++  }
++  return days;
++}
++
++export function maintainTsrsCache({
++  projectRoot,
++  environment = process.env,
++  retentionDays = tsrsCacheRetentionDays(
++    environment.TSRS_CACHE_RETENTION_DAYS ?? 30,
++  ),
++  apply = false,
++  now = Date.now(),
++}) {
++  const cacheDirectory = projectTsrsCacheRoot(projectRoot, environment);
++  retentionDays = tsrsCacheRetentionDays(retentionDays);
++  if (!Number.isSafeInteger(now))
++    throw new Error(
++      "TSRS cache maintenance requires a whole-millisecond timestamp.",
++    );
++  const cutoff =
++    (BigInt(now) - BigInt(retentionDays * 86_400_000)) * 1_000_000n;
++  const report = {
++    cacheDirectory,
++    apply,
++    retentionDays,
++    completed: { files: 0, bytes: 0 },
++    eligible: { files: 0, bytes: 0 },
++    removed: { files: 0, estimatedBytes: 0 },
++    preserved: { files: 0, bytes: 0, directories: 0 },
++    changedOrMissing: 0,
++    candidates: [],
++  };
++  for (const path of [dirname(cacheDirectory), cacheDirectory]) {
++    const state = lstatSync(path, { throwIfNoEntry: false });
++    if (state === undefined) return report;
++    if (
++      !state.isDirectory() ||
++      (typeof process.getuid === "function" && state.uid !== process.getuid())
++    ) {
++      throw new Error(
++        "The tsrs cache root and project cache must be real owned directories.",
++      );
++    }
++  }
++  const archives = join(cacheDirectory, "declarations-v1");
++  const archiveState = lstatSync(archives, { throwIfNoEntry: false });
++  if (archiveState === undefined || !archiveState.isDirectory()) return report;
++
++  function walk(directory) {
++    for (const entry of readdirSync(directory, { withFileTypes: true })) {
++      const path = join(directory, entry.name);
++      const state = lstatSync(path, { bigint: true, throwIfNoEntry: false });
++      if (state === undefined) {
++        report.changedOrMissing += 1;
++        continue;
++      }
++      if (state.isDirectory()) {
++        report.preserved.directories += 1;
++        if (!entry.name.endsWith(".tmp")) walk(path);
++        continue;
++      }
++      const localPath = relative(cacheDirectory, path).split(sep).join("/");
++      if (
++        !/^declarations-v1\/[^/]+\/[a-z0-9]+-[a-z0-9_]+-[0-9a-f]{64}\/(?:public-types|internal-types|typecheck)\.tgz$/u.test(
++          localPath,
++        ) ||
++        !state.isFile() ||
++        state.nlink !== 1n ||
++        (typeof process.getuid === "function" &&
++          state.uid !== BigInt(process.getuid()))
++      ) {
++        report.preserved.files += 1;
++        report.preserved.bytes += Number(state.size);
++        continue;
++      }
++      report.completed.files += 1;
++      report.completed.bytes += Number(state.size);
++      if (state.mtimeNs > cutoff) continue;
++      report.eligible.files += 1;
++      report.eligible.bytes += Number(state.size);
++      report.candidates.push(localPath);
++      if (!apply) continue;
++      const current = lstatSync(path, { bigint: true, throwIfNoEntry: false });
++      if (
++        current === undefined ||
++        current.dev !== state.dev ||
++        current.ino !== state.ino ||
++        current.size !== state.size ||
++        current.mtimeNs !== state.mtimeNs ||
++        current.ctimeNs !== state.ctimeNs
++      ) {
++        report.changedOrMissing += 1;
++        continue;
++      }
++      try {
++        // Replacement between this check and unlink can also evict a completed entry. Readers
++        // retain archive bytes from one open, and every parent and publication file remains.
++        unlinkSync(path);
++        report.removed.files += 1;
++        report.removed.estimatedBytes += Number(state.size);
++      } catch (error) {
++        if (error.code !== "ENOENT") throw error;
++        report.changedOrMissing += 1;
++      }
++    }
++  }
++  walk(archives);
++  return report;
++}
+diff --git a/scripts/tsrs-cache.test.mjs b/scripts/tsrs-cache.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..aff87ec3830a6e7ff5d639e0e54ce4b1b4129944
+--- /dev/null
++++ b/scripts/tsrs-cache.test.mjs
+@@ -0,0 +1,139 @@
++import assert from "node:assert/strict";
++import { spawnSync } from "node:child_process";
++import {
++  closeSync,
++  existsSync,
++  linkSync,
++  mkdirSync,
++  mkdtempSync,
++  openSync,
++  readFileSync,
++  renameSync,
++  rmSync,
++  statSync,
++  symlinkSync,
++  utimesSync,
++  writeFileSync,
++} from "node:fs";
++import { tmpdir } from "node:os";
++import { dirname, join } from "node:path";
++import { fileURLToPath } from "node:url";
++import test from "node:test";
++import { maintainTsrsCache, projectTsrsCacheRoot } from "./tsrs-cache.mjs";
++
++const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
++
++function fixture(t) {
++  const root = mkdtempSync(join(tmpdir(), "tsrs-maintenance-"));
++  t.after(() => rmSync(root, { recursive: true, force: true }));
++  const projectRoot = join(root, "project");
++  mkdirSync(projectRoot);
++  writeFileSync(join(projectRoot, "package.json"), '{"name":"cache-fixture"}');
++  const environment = { TSRS_CACHE_DIR: join(root, "cache") };
++  return {
++    projectRoot,
++    environment,
++    cache: projectTsrsCacheRoot(projectRoot, environment),
++  };
++}
++
++test("SDK maintenance preserves readers, writer paths, other projects, and unknown entries", (t) => {
++  const { projectRoot, environment, cache } = fixture(t);
++  const key = `declarations-v1/0.18.0/linux-x64-${"a".repeat(64)}`;
++  function publish(path, ageDays) {
++    mkdirSync(dirname(path), { recursive: true });
++    writeFileSync(`${path}.writer.tmp`, "complete");
++    renameSync(`${path}.writer.tmp`, path);
++    const time = new Date(Date.now() - ageDays * 86_400_000);
++    utimesSync(path, time, time);
++    return path;
++  }
++  const old = publish(join(cache, key, "public-types.tgz"), 40);
++  const kept = [
++    publish(join(cache, key, "internal-types.tgz"), 2),
++    publish(join(cache, key, "public-types.tgz.writer.tmp"), 40),
++    publish(join(cache, key, "unknown.tgz"), 40),
++    publish(join(cache, "future-format/entry.tgz"), 40),
++    publish(join(dirname(cache), "other-project", key, "public-types.tgz"), 40),
++    publish(join(projectRoot, "src/index.ts"), 40),
++    publish(join(projectRoot, "dist/index.d.ts"), 40),
++  ];
++  const link = join(
++    cache,
++    `declarations-v1/0.18.0/linux-x64-${"b".repeat(64)}`,
++    "typecheck.tgz",
++  );
++  mkdirSync(dirname(link));
++  symlinkSync(kept[5], link);
++  kept.push(link);
++  const hardlink = join(cache, key, "typecheck.tgz");
++  linkSync(kept[5], hardlink);
++  kept.push(hardlink);
++  // Recently read completed entries still expire by modification time.
++  utimesSync(old, new Date(), statSync(old).mtime);
++  const reader = openSync(old, "r");
++  t.after(() => closeSync(reader));
++  const dry = maintainTsrsCache({ projectRoot, environment });
++  assert.equal(dry.retentionDays, 30);
++  assert.equal(dry.eligible.files, 1);
++  assert.equal(dry.eligible.bytes, Buffer.byteLength("complete"));
++  assert.equal(dry.removed.files, 0);
++  assert.ok(existsSync(old));
++  const applied = spawnSync(
++    process.execPath,
++    [
++      join(repositoryRoot, "scripts/maintain-tsrs-cache.mjs"),
++      "--apply",
++      "--project-root",
++      projectRoot,
++    ],
++    {
++      env: {
++        ...process.env,
++        ...environment,
++        TSRS_CACHE_NAMESPACE: "cache-fixture",
++        TSRS_CACHE_RETENTION_DAYS: "30",
++      },
++      encoding: "utf8",
++    },
++  );
++  assert.equal(applied.status, 0, applied.stderr);
++  assert.equal(JSON.parse(applied.stdout).removed.files, 1);
++  assert.equal(
++    JSON.parse(applied.stdout).removed.estimatedBytes,
++    Buffer.byteLength("complete"),
++  );
++  assert.equal(existsSync(old), false);
++  assert.equal(readFileSync(reader, "utf8"), "complete");
++  for (const path of kept) assert.ok(existsSync(path), path);
++  assert.ok(statSync(dirname(old)).isDirectory());
++  renameSync(kept[1], old);
++  assert.equal(readFileSync(old, "utf8"), "complete");
++  assert.equal(
++    maintainTsrsCache({ projectRoot, environment, retentionDays: 1 }).eligible
++      .files,
++    2,
++  );
++});
++
++test("SDK cache namespaces support npm names, unnamed projects, and explicit roots with empty XDG", (t) => {
++  const { projectRoot, environment } = fixture(t);
++  const manifest = join(projectRoot, "package.json");
++  writeFileSync(manifest, JSON.stringify({ name: "x".repeat(214) }));
++  assert.equal(
++    projectTsrsCacheRoot(projectRoot, { ...environment, XDG_CACHE_HOME: "" }),
++    join(environment.TSRS_CACHE_DIR, "x".repeat(214)),
++  );
++  writeFileSync(manifest, "{}");
++  assert.equal(
++    projectTsrsCacheRoot(projectRoot, environment),
++    join(environment.TSRS_CACHE_DIR, "project"),
++  );
++  for (const value of [null, [], { name: 5 }]) {
++    writeFileSync(manifest, JSON.stringify(value));
++    assert.throws(
++      () => projectTsrsCacheRoot(projectRoot, environment),
++      /manifest|package name/u,
++    );
++  }
++});
+diff --git a/vitest.config.js b/vitest.config.js
+index d00bb09efc00a418690e97a6811dc4a057384e57..5ae54faf735af7a60447d7b8ba100752b917cc32 100644
+--- a/vitest.config.js
++++ b/vitest.config.js
+@@ -1,7 +1,13 @@
+-import { defineConfig } from "vitest/config";
++import { configDefaults, defineConfig } from "vitest/config";
+ 
+ export default defineConfig({
+   test: {
++    // Cache scripts use the Node test runner through npm run test:build-cache.
++    exclude: [
++      ...configDefaults.exclude,
++      "scripts/run-tsrs.test.mjs",
++      "scripts/tsrs-cache.test.mjs",
++    ],
+     alias: {
+       "@jest/globals": "vitest",
+     },
