@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 30 Sep 2026 01:02:07 +0800
-Subject: [PATCH 11/14] packaging: keep source provenance separate from
+Subject: [PATCH 11/13] packaging: keep source provenance separate from
  immutable archives
 
 Record the reviewed upstream source and retain the peer-compatible SHA-derived package build workflow. Pin the published dependency set needed by the source build. Publish verified archives directly in the distribution repository, preserving existing URLs and manifest bytes while keeping package data out of the semantic source train. Document the maintained adoption contracts and source/history reconstruction workflow.

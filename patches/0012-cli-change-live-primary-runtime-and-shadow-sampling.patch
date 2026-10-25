@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Fri, 23 Oct 2026 04:29:22 +0800
-Subject: [PATCH 12/14] cli: change live primary runtime and shadow sampling
+Subject: [PATCH 12/13] cli: change live primary runtime and shadow sampling
 
 Add an authenticated runtime-mode command for durable query and mutation policy updates on supporting self-hosted backends. Preserve omitted settings with revision-checked updates, retain independent route quarantines, and report fixed preparation failure reasons without exposing loader diagnostics.
 

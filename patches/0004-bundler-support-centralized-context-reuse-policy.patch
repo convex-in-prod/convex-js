@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 30 Sep 2026 01:02:07 +0800
-Subject: [PATCH 04/14] bundler: support centralized context reuse policy
+Subject: [PATCH 04/13] bundler: support centralized context reuse policy
 
 Add a disabled-by-default root-application bundling policy that emits
 Convex's existing boolean experimental_reuseContext marker for isolate
@@ -34,7 +34,7 @@ Keep HTTP action keys, exclusions, and source-policy ownership intact.
 Bind group identity to member contents and dependencies, fit generated paths
 within the backend component limit, and exercise the emitted ESM graph.
 ---
- .../default_database_context_reuse/README.md  | 117 +++++
+ .../default_database_context_reuse/README.md  | 134 ++++++
  schemas/convex.schema.json                    |  45 ++
  src/bundler/contextReuse.test.ts              | 451 ++++++++++++++++++
  src/bundler/contextReuseGroups.ts             | 126 +++++
@@ -42,28 +42,40 @@ within the backend component limit, and exercise the emitted ESM graph.
  src/cli/lib/components.ts                     |   6 +
  src/cli/lib/components/definition/bundle.ts   |  19 +
  src/cli/lib/config.ts                         |  87 ++++
- 8 files changed, 1086 insertions(+), 1 deletion(-)
+ 8 files changed, 1103 insertions(+), 1 deletion(-)
  create mode 100644 patches/default_database_context_reuse/README.md
  create mode 100644 src/bundler/contextReuse.test.ts
  create mode 100644 src/bundler/contextReuseGroups.ts
 
 diff --git a/patches/default_database_context_reuse/README.md b/patches/default_database_context_reuse/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..6a2f299ff7406d2212f4dc1b4d83519add9e7af7
+index 0000000000000000000000000000000000000000..4c6464d6341c842b899297365d9a6a00ae2cc43b
 --- /dev/null
 +++ b/patches/default_database_context_reuse/README.md
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,134 @@
 +# Default context reuse during bundling
 +
 +## Purpose
 +
-+Upstream Convex enables reusable database-UDF contexts one entry module at a
-+time through `experimental_reuseContext = true`. A backend with typed
-+context-reuse policy can additionally allow ordinary or HTTP actions. These are
-+useful canary interfaces, but they become repetitive when an application has
-+reviewed its entry graphs and wants reuse to be the normal policy.
++This patch lets an application configure V8 context reuse in `convex.json`
++instead of adding `experimental_reuseContext` exports to individual modules. The
++CLI writes the policy into the deployed JavaScript. The
++[backend context-reuse patch](https://github.com/convex-in-prod/convex-backend/tree/main/patches/context_reuse)
++decides when an initialized context can be retained and used by a later call.
 +
-+This patch adds one disabled-by-default Convex CLI setting:
++Reuse avoids repeating module initialization. Module variables and imported
++package state survive; identity, transactions, and other request state are fresh
++for each call. Enable reuse only after checking that a request cannot leave
++JavaScript state that changes later requests. Retaining a read-only lookup table
++is suitable; retaining the current caller in a module variable is not. Review
++the full import graph, including dynamic imports and third-party packages. The
++compiler's
++[context-reuse analyzer](https://github.com/convex-in-prod/convex-wasm-compiler/tree/main#context-reuse-analysis)
++provides source and dependency checks to help with that review.
++
++The setting is absent by default. This example enables reuse for queries,
++mutations, HTTP actions, and ordinary actions in two explicitly selected
++modules:
 +
 +```json
 +{
@@ -83,39 +95,41 @@ index 0000000000000000000000000000000000000000..6a2f299ff7406d2212f4dc1b4d83519a
 +}
 +```
 +
-+For entries without a shared initialization group or ordinary-action permission,
-+when `httpActions` is absent or false, the isolate bundler adds the ordinary
-+upstream `experimental_reuseContext = true` export to every root-application
-+isolate entry output except the listed paths. When `httpActions` is true, it
-+instead emits one typed policy that enables queries, mutations, and HTTP
-+actions. The optional `actions.entries` list independently enables ordinary
-+isolate actions for those reviewed entry graphs. Omission keeps ordinary actions
-+fresh. Paths must be unique normalized POSIX paths relative to the configured
-+functions directory and name included root isolate entries; excluded, missing,
-+and Node entries are rejected. Paths are relative to the configured functions
-+directory. Imported Convex components retain their own source policy. The
-+backend receives no application module allowlist. Node entry modules, schema
-+bundles, and auth configuration bundles are unchanged.
++| Setting             | Effect                                                                                             |
++| ------------------- | -------------------------------------------------------------------------------------------------- |
++| `default: true`     | Enables query and mutation reuse for root-application V8 entry modules, except exclusions.         |
++| `httpActions: true` | Also enables HTTP-action reuse. Omission or `false` leaves it disabled.                            |
++| `actions.entries`   | Enables ordinary V8-action reuse in these modules. Omission leaves ordinary actions fresh.         |
++| `actions.grouping`  | Defaults to `true`. Set it to `false` to keep selected action modules on per-entry initialization. |
++| `exclusions`        | Disables reuse for the named entries, with a reason recorded beside each path.                     |
 +
-+The reason strings keep exceptional modules and their operator rationale
-+together. Application tooling should verify that exclusions still name
-+database-UDF entries; the CLI additionally rejects an exclusion that does not
-+match a root isolate entry. Applications should review the full runtime import
-+graph before enabling the default. The CLI setting is not a substitute for that
-+source and emitted-bundle review.
++Permissions apply to all exports of the corresponding kind in a module. Paths
++are normalized POSIX paths relative to the configured functions directory.
++Action entries must be unique and name included root V8 entries; excluded,
++missing, and Node.js entries are rejected. Exclusions must also match root V8
++entries. Node.js actions use a separate runtime. Imported Convex components keep
++their own source policy; schema and authentication configuration bundles are
++unchanged. The backend receives each module's emitted policy.
++
++When this setting is enabled, root V8 entries, including excluded entries, must
++not also export `experimental_reuseContext`. The CLI rejects conflicting source
++markers so the configuration determines the deployed policy.
 +
 +## Shared initialization groups
 +
-+Under the same opt-in, the bundler groups enabled entry outputs that contain
-+only imports and re-exports and have exactly the same ordered static imports of
-+emitted non-entry chunks. Entries with local initialization, directives,
-+external or dynamic imports, or different import order keep their existing
-+per-entry policy. Excluded entries never join a group. Entries with
-+ordinary-action permission form separate groups from entries without it, so
-+action initialization never imports entries outside its reviewed permission set.
-+`actions.grouping` defaults to true; false keeps selected action entries on
-+per-entry initialization. This does not introduce manual group lists or
-+approximate dependency matching.
++Two entry modules that re-export functions from the same shared chunk would
++otherwise retain separate copies of that initialized graph. Grouping lets them
++share a context. Concurrent calls can still need separate copies, and the
++backend's cache and memory limits still apply.
++
++With reuse enabled, the bundler groups entry outputs that contain only imports
++and re-exports and have exactly the same ordered static imports of emitted
++non-entry chunks. Entries with local initialization, directives, external or
++dynamic imports, or different import order keep their existing per-entry policy.
++Excluded entries never join a group. Entries with ordinary-action permission
++form separate groups from entries without it, so action initialization never
++imports entries outside its reviewed permission set. `actions.grouping: false`
++keeps selected action entries on per-entry initialization.
 +
 +For each group of at least two entries, the bundler emits a
 +`_deps/context_init_<hash>.js` module that statically imports every member. It
@@ -125,51 +139,54 @@ index 0000000000000000000000000000000000000000..6a2f299ff7406d2212f4dc1b4d83519a
 +`initializationModule` pointing to that path; query/mutation reuse and the
 +configured action and HTTP permissions remain unchanged.
 +
-+A supporting backend uses this root for database and ordinary-action cache
-+identity and cold initialization. It loads all members before the first handler
-+runs and validates the complete initialization read set on reuse, including
-+entries not previously called. It never adds a member on a warm hit. Invocation
-+still uses the requested function and fresh request state. Database and
-+ordinary-action contexts remain separate cache kinds; HTTP actions keep
-+per-entry keys. The shared chunks would already be initialized by each member
-+independently; grouping avoids retaining duplicate copies of that graph merely
-+because the forwarding entry differs.
++A supporting backend loads every group member before running the first handler.
++Before reusing the context, it checks the modules, environment, and other
++dependencies read during initialization, including members not previously
++called. A later call cannot add a member to the saved group. The requested
++function still determines authorization, arguments, and request state. Queries
++and mutations share one cache kind; ordinary actions have a separate kind, and
++HTTP actions keep per-entry contexts. See the backend's
++[grouped initialization contract](https://github.com/convex-in-prod/convex-backend/tree/main/patches/context_reuse#grouped-initialization)
++for cache identity and dependency validation.
 +
 +## Compatibility and safety
 +
-+The setting is absent by default, preserving upstream explicit opt-in behavior.
-+`httpActions` separately defaults to false, and ordinary actions require an
-+explicit `actions.entries` list. Grouped entries always emit a typed policy;
-+other entries still emit the upstream boolean marker unless ordinary-action or
-+HTTP reuse is enabled. Older backends with typed-policy support ignore
-+`initializationModule` and keep per-entry reuse. Ordinary upstream backends do
-+not interpret a typed object as an opt-in and run those entries fresh. Backend
-+grouping support for each UDF kind must precede the new CLI output to obtain
-+shared contexts. When the setting is enabled, entry source files must not also
-+export `experimental_reuseContext`; one authority owns the emitted marker so
-+source and bundle policy cannot silently disagree.
++Without this setting, existing source-level opt-ins keep their normal behavior.
++Ungrouped entries with only query/mutation reuse emit the upstream
++`experimental_reuseContext = true` marker. Grouped entries and entries with
++ordinary-action or HTTP-action reuse emit an object with separate permissions.
++Older backends with typed-policy support ignore `initializationModule` and keep
++per-entry reuse. Ordinary upstream backends do not interpret a typed object as
++an opt-in and run those entries fresh. Backend grouping support for each UDF
++kind must precede the new CLI output to obtain shared contexts. See the
++backend's
++[policy and propagation reference](https://github.com/convex-in-prod/convex-backend/tree/main/patches/context_reuse/design_reference.md#policy-and-propagation)
++for policy encoding and compatibility across backend versions.
 +
 +The patch adds policy exports and, for grouped entries, an executable
 +initializer to the deployed graph. Reuse remains opportunistic and all backend
 +eligibility, UDF-type, cancellation, read-set validation, cache, and
-+memory-pressure rules continue to apply. An exclusion leaves the policy export
-+absent and removes the entry from any generated group, so the entry executes
-+fresh on both patched and ordinary backends.
++memory-pressure rules continue to apply. The backend checks runtime cleanup and
++initialization dependencies; it cannot prove that application globals are safe
++to retain. An exclusion leaves the policy export absent and removes the entry
++from any generated group, so the entry executes fresh on both patched and
++ordinary backends.
 +
 +## Rollback
 +
-+For one entry, add a reviewed exclusion and redeploy the application. To disable
-+only HTTP-action reuse, set `httpActions` to false and redeploy the application.
-+To disable ordinary-action reuse, remove `actions` and redeploy; to retain reuse
++For one entry, add an exclusion and redeploy the application. To disable only
++HTTP-action reuse, set `httpActions` to false and redeploy the application. To
++disable ordinary-action reuse, remove `actions` and redeploy; to retain reuse
 +with per-entry initialization, set `actions.grouping` to false and redeploy. For
-+a global rollback, remove `bundler.experimentalContextReuse` and every explicit
-+source marker, perform one complete root-application deployment, and restart
-+backend workers to clear saved contexts before traffic resumes.
++a global rollback of the root application's policy, remove
++`bundler.experimentalContextReuse` and every explicit source marker, then
++redeploy the complete root application. Imported components keep their own
++policy and must be updated separately if they also need reuse disabled.
 +
-+Current upstream has no backend-wide database-UDF context-reuse switch. An exact
-+previous-image and configuration rollback restores that image's runtime
-+contract, but does not prove a global disable unless the previous image,
-+configuration, and complete application analysis establish that state.
++Once the new policy is deployed, later invocations of the affected modules use
++fresh contexts. A worker restart is needed only to discard already retained
++contexts immediately, not to make the policy change effective. See the backend's
++[adoption and rollback guide](https://github.com/convex-in-prod/convex-backend/tree/main/patches/context_reuse#adoption-and-rollback).
 diff --git a/schemas/convex.schema.json b/schemas/convex.schema.json
 index dbb30198a0988be01ed57ff599e6d900c967ef2d..41c72ed66489823e9adbe7fb66a3fc0853c19162 100644
 --- a/schemas/convex.schema.json

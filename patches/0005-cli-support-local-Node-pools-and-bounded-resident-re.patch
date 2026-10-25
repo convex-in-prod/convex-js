@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 30 Sep 2026 01:02:07 +0800
-Subject: [PATCH 05/14] cli: support local Node pools and bounded resident
+Subject: [PATCH 05/13] cli: support local Node pools and bounded resident
  retirement
 
 Validate module-scoped local executor pool declarations during bundling and carry them through deployment metadata. Expose the matching server retirement callback so residents can drain under the backend-owned deadline without weakening forced termination or memory-pressure authority.
