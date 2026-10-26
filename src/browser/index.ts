@@ -20,6 +20,7 @@ export { BaseConvexClient } from "./sync/client.js";
 export type {
   BaseConvexClientOptions,
   MutationOptions,
+  MutationTraceEvent,
   SubscribeOptions,
   ConnectionState,
   AuthTokenFetcher,
