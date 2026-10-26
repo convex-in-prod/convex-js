@@ -35,6 +35,7 @@ import {
 } from "./optimistic_updates_impl.js";
 import {
   ActionRequest,
+  ClientMessage,
   MutationRequest,
   QueryWorkloadClass,
   QueryId,
@@ -86,11 +87,58 @@ export type ServerPressureHandler = (
 ) => void | Promise<void>;
 
 /**
+ * Payload-free mutation lifecycle observations. Times use the monotonic
+ * `performance.now()` clock of this client process. Request IDs are local to
+ * this client and are not backend execution request IDs.
+ *
+ * @public
+ */
+type MutationTracePhase =
+  | {
+      phase: "enqueued";
+      requestId: number;
+      functionName: string;
+      mutationId: number;
+      attempt: number;
+    }
+  | {
+      phase: "send_attempt";
+      requestId: number;
+      mightBeSent: boolean;
+      reason: "initial" | "reconnect" | "resume";
+    }
+  | { phase: "response_received"; requestId: number; success: boolean }
+  | { phase: "transition_received" | "transition_applied"; requestId: number }
+  | {
+      phase: "request_promise_resolved";
+      requestId: number;
+      success: boolean;
+      willRetry: boolean;
+    }
+  | { phase: "mutation_aborted"; mutationId: number }
+  | { phase: "client_closed" };
+
+export type MutationTraceEvent =
+  | ({ monotonicTime: number } & MutationTracePhase)
+  // Cleanup has no timestamp because the diagnostic clock itself can fail.
+  | { phase: "tracing_disabled" };
+
+/**
  * Options for {@link BaseConvexClient}.
  *
  * @public
  */
 export interface BaseConvexClientOptions {
+  /**
+   * Observe mutation transport and consistency phases without arguments,
+   * results, log lines, tokens, or error text. Callback failures are contained.
+   * A resolved request promise precedes the public mutation's continuation;
+   * neither this nor transition application implies a framework render.
+   * A failure ends observation with one best-effort `tracing_disabled` cleanup
+   * callback. Callback execution is synchronous and adds diagnostic overhead;
+   * observers should not perform client operations.
+   */
+  onMutationTrace?: (event: MutationTraceEvent) => void | Promise<void>;
   /**
    * Opts this client's root reactive queries into temporary degradation when
    * the backend is configured to limit degradable query capacity.
@@ -324,6 +372,8 @@ export class BaseConvexClient {
   private firstMessageReceived = false;
   private readonly debug: boolean;
   private readonly logger: Logger;
+  private readonly onMutationTrace: BaseConvexClientOptions["onMutationTrace"];
+  private mutationTraceDisabled = false;
   private maxObservedTimestamp: TS | undefined;
   private connectionStateSubscribers = new Map<
     number,
@@ -359,6 +409,7 @@ export class BaseConvexClient {
     options = { ...options };
     const queryWorkloadClass = options.queryWorkloadClass;
     const onServerPressure = options.onServerPressure;
+    this.onMutationTrace = options.onMutationTrace;
     const authRefreshTokenLeewaySeconds =
       options.authRefreshTokenLeewaySeconds ?? 10;
     let webSocketConstructor = options.webSocketConstructor;
@@ -504,9 +555,7 @@ export class BaseConvexClient {
             this.webSocketManager.sendMessage(authModification);
           }
           this.webSocketManager.sendMessage(querySetModification);
-          for (const message of this.requestManager.restart()) {
-            this.webSocketManager.sendMessage(message);
-          }
+          this.sendPendingRequests(this.requestManager.restart(), "reconnect");
         },
         onResume: () => {
           const [querySetModification, authModification] = this.state.resume();
@@ -516,9 +565,7 @@ export class BaseConvexClient {
           if (querySetModification) {
             this.webSocketManager.sendMessage(querySetModification);
           }
-          for (const message of this.requestManager.resume()) {
-            this.webSocketManager.sendMessage(message);
-          }
+          this.sendPendingRequests(this.requestManager.resume(), "resume");
         },
         onMessage: (serverMessage: ServerMessage) => {
           // Metrics events grow linearly with reconnection attempts so this
@@ -530,6 +577,7 @@ export class BaseConvexClient {
           }
           switch (serverMessage.type) {
             case "Transition": {
+              const receivedAt = this.mutationTraceTime();
               this.observedTimestamp(serverMessage.endVersion.ts);
               this.authenticationManager.onTransition(serverMessage);
               this.remoteQuerySet.transition(serverMessage);
@@ -572,6 +620,7 @@ export class BaseConvexClient {
               // transition listeners run. The pressure callback still follows
               // those listeners to preserve their established ordering.
               this.notifyOnQueryResultChanges(completedRequests);
+              const appliedAt = this.mutationTraceTime();
               if (pressure !== undefined) {
                 try {
                   const result = onServerPressure?.(pressure);
@@ -592,22 +641,54 @@ export class BaseConvexClient {
                   );
                 }
               }
+              // Identify covering transitions using the same completion decision
+              // as consistency enforcement, without changing its ordering.
+              for (const requestId of completedRequests.keys()) {
+                this.traceMutation(
+                  {
+                    phase: "transition_received",
+                    requestId,
+                  },
+                  receivedAt,
+                );
+                this.traceMutation(
+                  {
+                    phase: "transition_applied",
+                    requestId,
+                  },
+                  appliedAt,
+                );
+              }
               break;
             }
             case "MutationResponse": {
-              if (serverMessage.success) {
-                this.observedTimestamp(serverMessage.ts);
-              }
-              const completedMutationInfo =
-                this.requestManager.onResponse(serverMessage);
-              if (completedMutationInfo !== null) {
-                this.notifyOnQueryResultChanges(
-                  new Map([
-                    [
-                      completedMutationInfo.requestId,
-                      completedMutationInfo.result,
-                    ],
-                  ]),
+              const receivedAt = this.mutationTraceTime();
+              try {
+                if (serverMessage.success) {
+                  this.observedTimestamp(serverMessage.ts);
+                }
+                const completedMutationInfo =
+                  this.requestManager.onResponse(serverMessage);
+                if (completedMutationInfo !== null) {
+                  this.notifyOnQueryResultChanges(
+                    new Map([
+                      [
+                        completedMutationInfo.requestId,
+                        completedMutationInfo.result,
+                      ],
+                    ]),
+                  );
+                }
+              } finally {
+                // A pre-existing logger/listener error does not erase receipt evidence
+                // or get replaced by an optional diagnostic callback failure.
+                this.traceMutation(
+                  {
+                    phase: "response_received",
+                    requestId: serverMessage.requestId,
+                    success: serverMessage.success,
+                  },
+                  receivedAt,
                 );
               }
               break;
@@ -623,6 +704,7 @@ export class BaseConvexClient {
             case "FatalError": {
               const error = logFatalError(this.logger, serverMessage.error);
               void this.webSocketManager.terminate();
+              this.traceMutation({ phase: "client_closed" });
               throw error;
             }
             default: {
@@ -646,6 +728,88 @@ export class BaseConvexClient {
     // Begin client in a paused state waiting for an auth token.
     if (options.expectAuth) {
       pauseSocket();
+    }
+  }
+
+  private sendPendingRequests(
+    messages: ClientMessage[],
+    reason: "reconnect" | "resume",
+  ): void {
+    const observations:
+      | Array<{ event: MutationTracePhase; time: number }>
+      | undefined =
+      this.onMutationTrace !== undefined && !this.mutationTraceDisabled
+        ? []
+        : undefined;
+    for (const message of messages) {
+      const mightBeSent = this.webSocketManager.sendMessage(message);
+      if (observations !== undefined && message.type === "Mutation") {
+        const time = this.mutationTraceTime();
+        if (time !== undefined) {
+          observations.push({
+            event: {
+              phase: "send_attempt",
+              requestId: message.requestId,
+              mightBeSent,
+              reason,
+            },
+            time,
+          });
+        }
+      }
+    }
+    // Reentrant observers cannot insert new sends ahead of this existing batch.
+    if (observations !== undefined) {
+      for (const { event, time } of observations)
+        this.traceMutation(event, time);
+    }
+  }
+
+  private disableMutationTrace(): void {
+    if (this.mutationTraceDisabled) return;
+    this.mutationTraceDisabled = true;
+    try {
+      const pending = this.onMutationTrace?.({ phase: "tracing_disabled" });
+      if (pending !== undefined) {
+        void Promise.resolve(pending).catch(() => {
+          // Best-effort diagnostic cleanup cannot report its own failure.
+        });
+      }
+    } catch {
+      // Best-effort diagnostic cleanup cannot report its own failure.
+    }
+  }
+
+  private mutationTraceTime(): number | undefined {
+    if (this.onMutationTrace === undefined || this.mutationTraceDisabled)
+      return;
+    try {
+      const time = performance.now();
+      if (!Number.isFinite(time))
+        throw new Error("Invalid mutation trace clock");
+      return time;
+    } catch {
+      this.disableMutationTrace();
+      return;
+    }
+  }
+
+  private traceMutation(event: MutationTracePhase, observedAt?: number): void {
+    if (this.onMutationTrace === undefined || this.mutationTraceDisabled)
+      return;
+    try {
+      const monotonicTime = observedAt ?? this.mutationTraceTime();
+      if (monotonicTime === undefined) return;
+      // Close callbacks can reenter close; normal observation has already ended.
+      if (event.phase === "client_closed") this.mutationTraceDisabled = true;
+      const pending = this.onMutationTrace({ ...event, monotonicTime });
+      if (pending !== undefined) {
+        void Promise.resolve(pending).catch(() => this.disableMutationTrace());
+      }
+    } catch {
+      // Optional diagnostics, including their clock, cannot own request progress.
+      // Calling a user-supplied logger here could itself interrupt that progress.
+      this.disableMutationTrace();
     }
   }
 
@@ -1068,25 +1232,43 @@ export class BaseConvexClient {
     const writeConflictRetryOptions =
       validateWriteConflictRetryOptions(options);
     let retriesRemaining = writeConflictRetryOptions.maxWriteConflictRetries;
-    while (true) {
-      const { mutationPromise } = this.enqueueMutation(
-        udfPath,
-        args,
-        options,
-        componentPath,
-      );
-      const result = await mutationPromise;
-      if (
-        retriesRemaining <= 0 ||
-        !isWriteConflictRetryableResult(result) ||
-        this.webSocketManager.socketState() === "terminated"
-      ) {
-        return result;
+    let mutationId: number | undefined;
+    let attempt = 1;
+    try {
+      while (true) {
+        const { requestId, mutationPromise } = this.enqueueMutation(
+          udfPath,
+          args,
+          options,
+          componentPath,
+          { mutationId, attempt },
+        );
+        // Use the allocated ID, not a prediction before argument/optimistic callbacks.
+        mutationId ??= requestId;
+        const result = await mutationPromise;
+        const willRetry =
+          retriesRemaining > 0 &&
+          isWriteConflictRetryableResult(result) &&
+          this.webSocketManager.socketState() !== "terminated";
+        this.traceMutation({
+          phase: "request_promise_resolved",
+          requestId,
+          success: result.success,
+          willRetry,
+        });
+        if (!willRetry) return result;
+        retriesRemaining -= 1;
+        attempt += 1;
+        await sleepForWriteConflictRetry(
+          writeConflictRetryOptions.writeConflictRetryDelayMs,
+        );
       }
-      retriesRemaining -= 1;
-      await sleepForWriteConflictRetry(
-        writeConflictRetryOptions.writeConflictRetryDelayMs,
-      );
+    } catch (error) {
+      // A later enqueue/optimistic callback can throw after a retrying result.
+      // End that logical diagnostic owner without inspecting or changing the error.
+      if (mutationId !== undefined)
+        this.traceMutation({ phase: "mutation_aborted", mutationId });
+      throw error;
     }
   }
 
@@ -1098,6 +1280,7 @@ export class BaseConvexClient {
     args?: Record<string, Value>,
     options?: MutationOptions,
     componentPath?: string,
+    traceContext?: { mutationId: number | undefined; attempt: number },
   ): { requestId: RequestId; mutationPromise: Promise<FunctionResult> } {
     const mutationArgs = parseArgs(args);
     this.tryReportLongDisconnect();
@@ -1157,8 +1340,31 @@ export class BaseConvexClient {
       componentPath,
       args: [convexToJson(mutationArgs)],
     };
+    const enqueuedAt = this.mutationTraceTime();
     const mightBeSent = this.webSocketManager.sendMessage(message);
     const mutationPromise = this.requestManager.request(message, mightBeSent);
+    const sentAt = this.mutationTraceTime();
+    // Deliver synchronously for UI correlation, after send/registration so an
+    // observer that enqueues another mutation cannot reverse their wire order.
+    this.traceMutation(
+      {
+        phase: "enqueued",
+        requestId,
+        functionName: udfPath,
+        mutationId: traceContext?.mutationId ?? requestId,
+        attempt: traceContext?.attempt ?? 1,
+      },
+      enqueuedAt,
+    );
+    this.traceMutation(
+      {
+        phase: "send_attempt",
+        requestId,
+        mightBeSent,
+        reason: "initial",
+      },
+      sentAt,
+    );
     return {
       requestId,
       mutationPromise,
@@ -1222,7 +1428,9 @@ export class BaseConvexClient {
    */
   async close(): Promise<void> {
     this.authenticationManager.stop();
-    return this.webSocketManager.terminate();
+    const closed = this.webSocketManager.terminate();
+    this.traceMutation({ phase: "client_closed" });
+    return closed;
   }
 
   /**
