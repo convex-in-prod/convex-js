@@ -196,7 +196,7 @@ index 2fc25ec0b3bb7036e2c1eba2431113527d0e8e7d..59bde21eabfeec1fd8791a4c8bc46563
    },
    "peerDependencies": {
 diff --git a/patches/README.md b/patches/README.md
-index f4d7dfbd93649df0326da277c22c76b6846f3fbb..cad37217a5188d1d4a6ccd287bc0dfb918be8b1a 100644
+index 9f3b0d8f9d5fa970bdfb4f80cc560ca948ba6fd0..b1e5bf1678469862b1e339db38bcc37c8eec71e3 100644
 --- a/patches/README.md
 +++ b/patches/README.md
 @@ -18,6 +18,36 @@ in the

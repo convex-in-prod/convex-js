@@ -14,12 +14,12 @@ non-committing analysis. Preserve explicit native resident selection and add
 the upstream mutation file-read adapter beside typed runtime value syscalls.
 ---
  .convex-in-prod-upstream                   |   1 +
- .github/workflows/build-convex-in-prod.yml | 159 ++++++++++++++++++
+ .github/workflows/build-convex-in-prod.yml | 159 +++++++++++++++++
  CHANGELOG.md                               |  11 ++
  package.json                               |   2 +-
  packages/README.md                         |  18 ++
- patches/README.md                          | 187 +++++++++++++++++++++
- 6 files changed, 377 insertions(+), 1 deletion(-)
+ patches/README.md                          | 189 +++++++++++++++++++++
+ 6 files changed, 379 insertions(+), 1 deletion(-)
  create mode 100644 .convex-in-prod-upstream
  create mode 100644 .github/workflows/build-convex-in-prod.yml
  create mode 100644 packages/README.md
@@ -258,10 +258,10 @@ index 0000000000000000000000000000000000000000..e9b0902b93eda3a4fc907dcab6dbf197
 +[the release procedure](../patches/README.md#rebase-and-release).
 diff --git a/patches/README.md b/patches/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..9b7ff86de63a57744f4e66e739a43777b64c4c14
+index 0000000000000000000000000000000000000000..c403b2184f75333bc63ea61de79aa19f49862b04
 --- /dev/null
 +++ b/patches/README.md
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,189 @@
 +# Convex-In-Prod Patch Stack
 +
 +The fork's `main` branch carries a short generic patch stack over the exact
@@ -347,10 +347,12 @@ index 0000000000000000000000000000000000000000..9b7ff86de63a57744f4e66e739a43777
 +`experimental_reuseContext` export a bundle-time default and retain a small,
 +reasoned exclusion map. With a backend that accepts typed context-reuse policy,
 +the same centralized setting can also enable reviewed HTTP-action graphs and an
-+explicit list of ordinary isolate action entries. Equivalent initialization
-+graphs are grouped within each action-permission set; ordinary-action grouping
-+can be disabled independently. All reuse settings are disabled by default and do
-+not place application module names in backend logic. See
++explicit list of ordinary isolate action entries. Database initialization groups
++include every eligible entry, while separate action groups include only reviewed
++action entries. Disabling ordinary-action grouping preserves database grouping.
++Version 2 initializer policies require a backend that supports separate roots.
++All reuse settings are disabled by default and do not place application module
++names in backend logic. See
 +[`default_database_context_reuse/README.md`](default_database_context_reuse/README.md).
 +
 +### Stateless UTF-8 value comparison

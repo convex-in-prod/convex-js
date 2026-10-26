@@ -179,7 +179,7 @@ index 0000000000000000000000000000000000000000..5506beb91a83daf7d34c9dd7baa25a20
 +  });
 +});
 diff --git a/src/bundler/index.ts b/src/bundler/index.ts
-index e5e04d2b3b6c7b6c0895fbb5249bdfa7093820f5..1427c0d6a51cdbd5af64aa447499ffb655a2e5af 100644
+index 3a71e40fd9fbcf8d90b60fd195ae68efc5698d6f..086505b8ea1af2c6828215d32f1979a48be6a03a 100644
 --- a/src/bundler/index.ts
 +++ b/src/bundler/index.ts
 @@ -47,19 +47,21 @@ export function* walkDir(
@@ -205,7 +205,7 @@ index e5e04d2b3b6c7b6c0895fbb5249bdfa7093820f5..1427c0d6a51cdbd5af64aa447499ffb6
  }
  
  type EsBuildResult = esbuild.BuildResult & {
-@@ -287,6 +289,7 @@ export async function bundle({
+@@ -291,6 +293,7 @@ export async function bundle({
    includeSourcesContent = false,
    splitting,
    experimentalContextReuse,
@@ -213,7 +213,7 @@ index e5e04d2b3b6c7b6c0895fbb5249bdfa7093820f5..1427c0d6a51cdbd5af64aa447499ffb6
  }: {
    ctx: Context;
    dir: string;
-@@ -299,6 +302,7 @@ export async function bundle({
+@@ -303,6 +306,7 @@ export async function bundle({
    includeSourcesContent?: boolean;
    splitting?: boolean;
    experimentalContextReuse?: ExperimentalContextReuse;
@@ -221,7 +221,7 @@ index e5e04d2b3b6c7b6c0895fbb5249bdfa7093820f5..1427c0d6a51cdbd5af64aa447499ffb6
  }): Promise<{
    modules: Bundle[];
    externalDependencies: Map<string, string>;
-@@ -338,6 +342,13 @@ export async function bundle({
+@@ -342,6 +346,13 @@ export async function bundle({
    const sourceMaps = new Map();
    const modules: Bundle[] = [];
    const environment = platform === "node" ? "node" : "isolate";
@@ -235,7 +235,7 @@ index e5e04d2b3b6c7b6c0895fbb5249bdfa7093820f5..1427c0d6a51cdbd5af64aa447499ffb6
    const contextReuseOutputPolicy = new Map<string, ContextReuseOutputPolicy>();
    if (experimentalContextReuse !== undefined) {
      const actionEntries = new Set(
-@@ -481,7 +492,33 @@ export async function bundle({
+@@ -488,7 +499,33 @@ export async function bundle({
          contextReusePolicy,
        );
      }
@@ -270,7 +270,7 @@ index e5e04d2b3b6c7b6c0895fbb5249bdfa7093820f5..1427c0d6a51cdbd5af64aa447499ffb6
    }
    for (const module of modules) {
      const sourceMapPath = module.path + ".map";
-@@ -738,13 +775,16 @@ export async function entryPoints(
+@@ -745,13 +782,16 @@ export async function entryPoints(
  
  // A fallback regex in case we fail to parse the AST.
  export const useNodeDirectiveRegex = /^\s*("|')use node("|');?\s*$/;
@@ -289,7 +289,7 @@ index e5e04d2b3b6c7b6c0895fbb5249bdfa7093820f5..1427c0d6a51cdbd5af64aa447499ffb6
    }
  
    // We parse the AST here to extract the "use node" declaration. This is more
-@@ -758,27 +798,26 @@ function hasUseNodeDirective(ctx: Context, fpath: string): boolean {
+@@ -765,27 +805,26 @@ function hasUseNodeDirective(ctx: Context, fpath: string): boolean {
        // here too.
        plugins: ["jsx", "typescript"],
      });
@@ -326,7 +326,7 @@ index e5e04d2b3b6c7b6c0895fbb5249bdfa7093820f5..1427c0d6a51cdbd5af64aa447499ffb6
    }
  }
  
-@@ -796,7 +835,41 @@ async function determineEnvironment(
+@@ -803,7 +842,41 @@ async function determineEnvironment(
  ): Promise<ModuleEnvironment> {
    const relPath = path.relative(dir, fpath);
  
@@ -369,7 +369,7 @@ index e5e04d2b3b6c7b6c0895fbb5249bdfa7093820f5..1427c0d6a51cdbd5af64aa447499ffb6
    if (useNodeDirectiveFound) {
      if (mustBeIsolate(relPath)) {
        return await ctx.crash({
-@@ -805,7 +878,7 @@ async function determineEnvironment(
+@@ -812,7 +885,7 @@ async function determineEnvironment(
          printedMessage: `"use node" directive is not allowed for ${relPath}.`,
        });
      }
@@ -378,7 +378,7 @@ index e5e04d2b3b6c7b6c0895fbb5249bdfa7093820f5..1427c0d6a51cdbd5af64aa447499ffb6
    }
  
    const actionsPrefix = actionsDir + path.sep;
-@@ -823,14 +896,18 @@ async function determineEnvironment(
+@@ -830,14 +903,18 @@ async function determineEnvironment(
  export async function entryPointsByEnvironment(ctx: Context, dir: string) {
    const isolate = [];
    const node = [];
