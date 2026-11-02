@@ -14,15 +14,19 @@ non-committing analysis. Preserve native resident selection and upstream
 mutation file access beside typed runtime value syscalls.
 
 Install with ordinary npm peer dependency resolution.
+
+Use npm 11 for the isolated code-generation workspace. npm 10 crashes in
+its dependency resolver on this peer graph; npm 11 resolves the clean
+manifest set without peer overrides.
 ---
  .convex-in-prod-upstream                   |   1 +
- .github/workflows/build-convex-in-prod.yml | 156 +++++++++++++++++
+ .github/workflows/build-convex-in-prod.yml | 157 +++++++++++++++++
  .github/workflows/test-and-lint.yml        |   2 +-
  CHANGELOG.md                               |  19 +-
  package.json                               |   2 +-
  packages/README.md                         |  18 ++
  patches/README.md                          | 191 +++++++++++++++++++++
- 7 files changed, 383 insertions(+), 6 deletions(-)
+ 7 files changed, 384 insertions(+), 6 deletions(-)
  create mode 100644 .convex-in-prod-upstream
  create mode 100644 .github/workflows/build-convex-in-prod.yml
  create mode 100644 packages/README.md
@@ -37,10 +41,10 @@ index 0000000000000000000000000000000000000000..bfab88c52e03292d0566a78658a92dee
 +d54e497d3a86d220f993b77e4b59b6f3947fb8d9
 diff --git a/.github/workflows/build-convex-in-prod.yml b/.github/workflows/build-convex-in-prod.yml
 new file mode 100644
-index 0000000000000000000000000000000000000000..1a237e40e1246bde25062191ed6541d17f9b53ef
+index 0000000000000000000000000000000000000000..61aa5f8eef61abbf8bf527114456648ddab57aaa
 --- /dev/null
 +++ b/.github/workflows/build-convex-in-prod.yml
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,157 @@
 +name: Build convex-in-prod package
 +
 +on:
@@ -69,8 +73,9 @@ index 0000000000000000000000000000000000000000..1a237e40e1246bde25062191ed6541d1
 +        with:
 +          node-version: "22"
 +
-+      - name: NPM v10
-+        run: npm install -g npm@10 --registry=https://registry.npmjs.org
++      # npm 10 crashes while resolving the isolated compiler API workspace.
++      - name: NPM v11
++        run: npm install -g npm@11.19.1 --registry=https://registry.npmjs.org
 +
 +      # Upstream's prepack build uses uv to select its declared Python version.
 +      - name: Python build tooling

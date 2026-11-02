@@ -9,8 +9,8 @@
 0008-sdk-support-typed-runtime-values-and-bulk-query-coll.patch 8d04d24b28c9ebae3842665c898f348c5b0ad3cd
 0009-http-client-preserve-per-call-mutation-priority-thro.patch b7476840323dc36441b22c13a822916102f604d3
 0010-deployment-publish-native-resident-selection-and-met.patch 49401b86165b207b43d53d43c55cb342fdc67b1b
-0011-packaging-keep-source-provenance-separate-from-immut.patch 3eeb2e6c85b72f4333d2865590757cb61fcf4b9c
-0012-cli-change-live-primary-runtime-and-shadow-sampling.patch dd3171cbd60ba0c2a88a1138c1ab0b4dba067b19
-0013-build-use-tsrs-with-shared-incremental-build-caches.patch 81a288c00a70aaf1fe983ecb479ba7ed78e7703a
-0014-browser-expose-payload-free-mutation-phase-observati.patch 3dc420c9852f9ec55c763d1fad4878dd9e41f336
-0015-sync-settle-mutations-covered-by-an-earlier-transiti.patch 5490c31aa16cc022d85d2078d95650c17eb8c99d
+0011-packaging-keep-source-provenance-separate-from-immut.patch 507e15aa69d3bd8806901eae1fcb9f3f6f590fcd
+0012-cli-change-live-primary-runtime-and-shadow-sampling.patch 6050306f683fcd5de33bce9d8d803fedac7e9c21
+0013-build-use-tsrs-with-shared-incremental-build-caches.patch 798c283d108121ff84ce323cc561ffe550952b77
+0014-browser-expose-payload-free-mutation-phase-observati.patch 56af657706af0ca95e8463159a313aea2539045d
+0015-sync-settle-mutations-covered-by-an-earlier-transiti.patch b836fe4308925133bbc93e7cde8bb1482c63932d

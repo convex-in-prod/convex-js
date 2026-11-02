@@ -92,10 +92,10 @@ compiler output.
  create mode 100644 src/cli/lib/typecheck.test.ts
 
 diff --git a/.github/workflows/build-convex-in-prod.yml b/.github/workflows/build-convex-in-prod.yml
-index 1a237e40e1246bde25062191ed6541d17f9b53ef..a79985ed12a79a2b376f508cd8338385528d5472 100644
+index 61aa5f8eef61abbf8bf527114456648ddab57aaa..d3bc862b2f355e6b3523b8906ada93dbac622f36 100644
 --- a/.github/workflows/build-convex-in-prod.yml
 +++ b/.github/workflows/build-convex-in-prod.yml
-@@ -37,7 +37,9 @@ jobs:
+@@ -38,7 +38,9 @@ jobs:
          run: npm install
  
        - name: Test
