@@ -107,7 +107,14 @@ type MutationTracePhase =
       mightBeSent: boolean;
       reason: "initial" | "reconnect" | "resume";
     }
-  | { phase: "response_received"; requestId: number; success: boolean }
+  | {
+      phase: "response_received";
+      requestId: number;
+      success: boolean;
+      // This response settled a success against query state already applied on
+      // this connection. No new transition_received/transition_applied is emitted.
+      alreadyApplied: boolean;
+    }
   | { phase: "transition_received" | "transition_applied"; requestId: number }
   | {
       phase: "request_promise_resolved";
@@ -663,13 +670,17 @@ export class BaseConvexClient {
             }
             case "MutationResponse": {
               const receivedAt = this.mutationTraceTime();
+              let alreadyApplied = false;
               try {
                 if (serverMessage.success) {
                   this.observedTimestamp(serverMessage.ts);
                 }
-                const completedMutationInfo =
-                  this.requestManager.onResponse(serverMessage);
+                const completedMutationInfo = this.requestManager.onResponse(
+                  serverMessage,
+                  this.remoteQuerySet.timestamp(),
+                );
                 if (completedMutationInfo !== null) {
+                  alreadyApplied = serverMessage.success;
                   this.notifyOnQueryResultChanges(
                     new Map([
                       [
@@ -687,6 +698,7 @@ export class BaseConvexClient {
                     phase: "response_received",
                     requestId: serverMessage.requestId,
                     success: serverMessage.success,
+                    alreadyApplied,
                   },
                   receivedAt,
                 );
@@ -694,7 +706,10 @@ export class BaseConvexClient {
               break;
             }
             case "ActionResponse": {
-              this.requestManager.onResponse(serverMessage);
+              this.requestManager.onResponse(
+                serverMessage,
+                this.remoteQuerySet.timestamp(),
+              );
               break;
             }
             case "AuthError": {

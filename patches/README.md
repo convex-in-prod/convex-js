@@ -124,6 +124,20 @@ This change is derived from
 [convex/convex-js PR 170](https://github.com/convex/convex-js/pull/170). Remove
 the local commit when upstream contains equivalent behavior.
 
+### Mutation settlement after an earlier transition
+
+A successful mutation response settles immediately when the current connection's
+applied query snapshot already covers its commit timestamp. Response handling
+uses the existing optimistic-update removal and query notification path. When
+the snapshot is behind, the mutation still waits for a covering transition. The
+maximum observed timestamp cannot establish coverage: it includes mutation
+responses and survives reconnects, whereas the applied query set resets.
+
+Mutation tracing reports `alreadyApplied` on `response_received` for this
+completion path; it does not invent receipt or application of another
+transition. This is a client-only settlement fix with no wire-protocol or
+backend change.
+
 ### Degradable reactive-query pressure
 
 A sync client may opt its root reactive queries into the closed `"degradable"`
