@@ -1,0 +1,1320 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Tue, 27 Oct 2026 03:31:36 +0800
+Subject: [PATCH 14/15] browser: expose payload-free mutation phase
+ observations
+
+Add an opt-in observer for mutation enqueue, possible send, response,
+covering reactive transition, retry, and promise settlement phases.
+Preserve logical mutation identity across write-conflict retries while
+retaining per-attempt request IDs for timing correlation.
+
+Keep the observer outside transport ordering and mutation authority.
+Disable failed observers and bound retry bookkeeping without changing
+request retry, completion, or pressure behavior. Do not expose arguments,
+results, credentials, log lines, or error text.
+
+Validated with mutation tracing and client behavior tests, SDK build,
+type checks, and generated runtime/declaration/source-map correspondence.
+---
+ src/browser/index.ts                    |   1 +
+ src/browser/sync/client.ts              | 284 ++++++--
+ src/browser/sync/mutation_trace.test.ts | 872 ++++++++++++++++++++++++
+ 3 files changed, 1119 insertions(+), 38 deletions(-)
+ create mode 100644 src/browser/sync/mutation_trace.test.ts
+
+diff --git a/src/browser/index.ts b/src/browser/index.ts
+index b7995fb96736c5a6eef46a526967758c7212ced4..bae3d6c975a162f6c48456c5e1d38e69de2d21b6 100644
+--- a/src/browser/index.ts
++++ b/src/browser/index.ts
+@@ -20,6 +20,7 @@ export { BaseConvexClient } from "./sync/client.js";
+ export type {
+   BaseConvexClientOptions,
+   MutationOptions,
++  MutationTraceEvent,
+   SubscribeOptions,
+   ConnectionState,
+   AuthTokenFetcher,
+diff --git a/src/browser/sync/client.ts b/src/browser/sync/client.ts
+index 3dd4b5e457425e3036d79a54e45985dbf874b8ea..3dcf4a5c517956055652d46951b8b443c52811bf 100644
+--- a/src/browser/sync/client.ts
++++ b/src/browser/sync/client.ts
+@@ -35,6 +35,7 @@ import {
+ } from "./optimistic_updates_impl.js";
+ import {
+   ActionRequest,
++  ClientMessage,
+   MutationRequest,
+   QueryWorkloadClass,
+   QueryId,
+@@ -85,12 +86,59 @@ export type ServerPressureHandler = (
+   pressure: ServerPressure,
+ ) => void | Promise<void>;
+ 
++/**
++ * Payload-free mutation lifecycle observations. Times use the monotonic
++ * `performance.now()` clock of this client process. Request IDs are local to
++ * this client and are not backend execution request IDs.
++ *
++ * @public
++ */
++type MutationTracePhase =
++  | {
++      phase: "enqueued";
++      requestId: number;
++      functionName: string;
++      mutationId: number;
++      attempt: number;
++    }
++  | {
++      phase: "send_attempt";
++      requestId: number;
++      mightBeSent: boolean;
++      reason: "initial" | "reconnect" | "resume";
++    }
++  | { phase: "response_received"; requestId: number; success: boolean }
++  | { phase: "transition_received" | "transition_applied"; requestId: number }
++  | {
++      phase: "request_promise_resolved";
++      requestId: number;
++      success: boolean;
++      willRetry: boolean;
++    }
++  | { phase: "mutation_aborted"; mutationId: number }
++  | { phase: "client_closed" };
++
++export type MutationTraceEvent =
++  | ({ monotonicTime: number } & MutationTracePhase)
++  // Cleanup has no timestamp because the diagnostic clock itself can fail.
++  | { phase: "tracing_disabled" };
++
+ /**
+  * Options for {@link BaseConvexClient}.
+  *
+  * @public
+  */
+ export interface BaseConvexClientOptions {
++  /**
++   * Observe mutation transport and consistency phases without arguments,
++   * results, log lines, tokens, or error text. Callback failures are contained.
++   * A resolved request promise precedes the public mutation's continuation;
++   * neither this nor transition application implies a framework render.
++   * A failure ends observation with one best-effort `tracing_disabled` cleanup
++   * callback. Callback execution is synchronous and adds diagnostic overhead;
++   * observers should not perform client operations.
++   */
++  onMutationTrace?: (event: MutationTraceEvent) => void | Promise<void>;
+   /**
+    * Opts this client's root reactive queries into temporary degradation when
+    * the backend is configured to limit degradable query capacity.
+@@ -324,6 +372,8 @@ export class BaseConvexClient {
+   private firstMessageReceived = false;
+   private readonly debug: boolean;
+   private readonly logger: Logger;
++  private readonly onMutationTrace: BaseConvexClientOptions["onMutationTrace"];
++  private mutationTraceDisabled = false;
+   private maxObservedTimestamp: TS | undefined;
+   private connectionStateSubscribers = new Map<
+     number,
+@@ -359,6 +409,7 @@ export class BaseConvexClient {
+     options = { ...options };
+     const queryWorkloadClass = options.queryWorkloadClass;
+     const onServerPressure = options.onServerPressure;
++    this.onMutationTrace = options.onMutationTrace;
+     const authRefreshTokenLeewaySeconds =
+       options.authRefreshTokenLeewaySeconds ?? 10;
+     let webSocketConstructor = options.webSocketConstructor;
+@@ -504,9 +555,7 @@ export class BaseConvexClient {
+             this.webSocketManager.sendMessage(authModification);
+           }
+           this.webSocketManager.sendMessage(querySetModification);
+-          for (const message of this.requestManager.restart()) {
+-            this.webSocketManager.sendMessage(message);
+-          }
++          this.sendPendingRequests(this.requestManager.restart(), "reconnect");
+         },
+         onResume: () => {
+           const [querySetModification, authModification] = this.state.resume();
+@@ -516,9 +565,7 @@ export class BaseConvexClient {
+           if (querySetModification) {
+             this.webSocketManager.sendMessage(querySetModification);
+           }
+-          for (const message of this.requestManager.resume()) {
+-            this.webSocketManager.sendMessage(message);
+-          }
++          this.sendPendingRequests(this.requestManager.resume(), "resume");
+         },
+         onMessage: (serverMessage: ServerMessage) => {
+           // Metrics events grow linearly with reconnection attempts so this
+@@ -530,6 +577,7 @@ export class BaseConvexClient {
+           }
+           switch (serverMessage.type) {
+             case "Transition": {
++              const receivedAt = this.mutationTraceTime();
+               this.observedTimestamp(serverMessage.endVersion.ts);
+               this.authenticationManager.onTransition(serverMessage);
+               this.remoteQuerySet.transition(serverMessage);
+@@ -572,6 +620,7 @@ export class BaseConvexClient {
+               // transition listeners run. The pressure callback still follows
+               // those listeners to preserve their established ordering.
+               this.notifyOnQueryResultChanges(completedRequests);
++              const appliedAt = this.mutationTraceTime();
+               if (pressure !== undefined) {
+                 try {
+                   const result = onServerPressure?.(pressure);
+@@ -592,22 +641,54 @@ export class BaseConvexClient {
+                   );
+                 }
+               }
++              // Identify covering transitions using the same completion decision
++              // as consistency enforcement, without changing its ordering.
++              for (const requestId of completedRequests.keys()) {
++                this.traceMutation(
++                  {
++                    phase: "transition_received",
++                    requestId,
++                  },
++                  receivedAt,
++                );
++                this.traceMutation(
++                  {
++                    phase: "transition_applied",
++                    requestId,
++                  },
++                  appliedAt,
++                );
++              }
+               break;
+             }
+             case "MutationResponse": {
+-              if (serverMessage.success) {
+-                this.observedTimestamp(serverMessage.ts);
+-              }
+-              const completedMutationInfo =
+-                this.requestManager.onResponse(serverMessage);
+-              if (completedMutationInfo !== null) {
+-                this.notifyOnQueryResultChanges(
+-                  new Map([
+-                    [
+-                      completedMutationInfo.requestId,
+-                      completedMutationInfo.result,
+-                    ],
+-                  ]),
++              const receivedAt = this.mutationTraceTime();
++              try {
++                if (serverMessage.success) {
++                  this.observedTimestamp(serverMessage.ts);
++                }
++                const completedMutationInfo =
++                  this.requestManager.onResponse(serverMessage);
++                if (completedMutationInfo !== null) {
++                  this.notifyOnQueryResultChanges(
++                    new Map([
++                      [
++                        completedMutationInfo.requestId,
++                        completedMutationInfo.result,
++                      ],
++                    ]),
++                  );
++                }
++              } finally {
++                // A pre-existing logger/listener error does not erase receipt evidence
++                // or get replaced by an optional diagnostic callback failure.
++                this.traceMutation(
++                  {
++                    phase: "response_received",
++                    requestId: serverMessage.requestId,
++                    success: serverMessage.success,
++                  },
++                  receivedAt,
+                 );
+               }
+               break;
+@@ -623,6 +704,7 @@ export class BaseConvexClient {
+             case "FatalError": {
+               const error = logFatalError(this.logger, serverMessage.error);
+               void this.webSocketManager.terminate();
++              this.traceMutation({ phase: "client_closed" });
+               throw error;
+             }
+             default: {
+@@ -649,6 +731,88 @@ export class BaseConvexClient {
+     }
+   }
+ 
++  private sendPendingRequests(
++    messages: ClientMessage[],
++    reason: "reconnect" | "resume",
++  ): void {
++    const observations:
++      | Array<{ event: MutationTracePhase; time: number }>
++      | undefined =
++      this.onMutationTrace !== undefined && !this.mutationTraceDisabled
++        ? []
++        : undefined;
++    for (const message of messages) {
++      const mightBeSent = this.webSocketManager.sendMessage(message);
++      if (observations !== undefined && message.type === "Mutation") {
++        const time = this.mutationTraceTime();
++        if (time !== undefined) {
++          observations.push({
++            event: {
++              phase: "send_attempt",
++              requestId: message.requestId,
++              mightBeSent,
++              reason,
++            },
++            time,
++          });
++        }
++      }
++    }
++    // Reentrant observers cannot insert new sends ahead of this existing batch.
++    if (observations !== undefined) {
++      for (const { event, time } of observations)
++        this.traceMutation(event, time);
++    }
++  }
++
++  private disableMutationTrace(): void {
++    if (this.mutationTraceDisabled) return;
++    this.mutationTraceDisabled = true;
++    try {
++      const pending = this.onMutationTrace?.({ phase: "tracing_disabled" });
++      if (pending !== undefined) {
++        void Promise.resolve(pending).catch(() => {
++          // Best-effort diagnostic cleanup cannot report its own failure.
++        });
++      }
++    } catch {
++      // Best-effort diagnostic cleanup cannot report its own failure.
++    }
++  }
++
++  private mutationTraceTime(): number | undefined {
++    if (this.onMutationTrace === undefined || this.mutationTraceDisabled)
++      return;
++    try {
++      const time = performance.now();
++      if (!Number.isFinite(time))
++        throw new Error("Invalid mutation trace clock");
++      return time;
++    } catch {
++      this.disableMutationTrace();
++      return;
++    }
++  }
++
++  private traceMutation(event: MutationTracePhase, observedAt?: number): void {
++    if (this.onMutationTrace === undefined || this.mutationTraceDisabled)
++      return;
++    try {
++      const monotonicTime = observedAt ?? this.mutationTraceTime();
++      if (monotonicTime === undefined) return;
++      // Close callbacks can reenter close; normal observation has already ended.
++      if (event.phase === "client_closed") this.mutationTraceDisabled = true;
++      const pending = this.onMutationTrace({ ...event, monotonicTime });
++      if (pending !== undefined) {
++        void Promise.resolve(pending).catch(() => this.disableMutationTrace());
++      }
++    } catch {
++      // Optional diagnostics, including their clock, cannot own request progress.
++      // Calling a user-supplied logger here could itself interrupt that progress.
++      this.disableMutationTrace();
++    }
++  }
++
+   /**
+    * Return true if there is outstanding work from prior to the time of the most recent restart.
+    * This indicates that the client has not proven itself to have gotten past the issue that
+@@ -1068,25 +1232,43 @@ export class BaseConvexClient {
+     const writeConflictRetryOptions =
+       validateWriteConflictRetryOptions(options);
+     let retriesRemaining = writeConflictRetryOptions.maxWriteConflictRetries;
+-    while (true) {
+-      const { mutationPromise } = this.enqueueMutation(
+-        udfPath,
+-        args,
+-        options,
+-        componentPath,
+-      );
+-      const result = await mutationPromise;
+-      if (
+-        retriesRemaining <= 0 ||
+-        !isWriteConflictRetryableResult(result) ||
+-        this.webSocketManager.socketState() === "terminated"
+-      ) {
+-        return result;
++    let mutationId: number | undefined;
++    let attempt = 1;
++    try {
++      while (true) {
++        const { requestId, mutationPromise } = this.enqueueMutation(
++          udfPath,
++          args,
++          options,
++          componentPath,
++          { mutationId, attempt },
++        );
++        // Use the allocated ID, not a prediction before argument/optimistic callbacks.
++        mutationId ??= requestId;
++        const result = await mutationPromise;
++        const willRetry =
++          retriesRemaining > 0 &&
++          isWriteConflictRetryableResult(result) &&
++          this.webSocketManager.socketState() !== "terminated";
++        this.traceMutation({
++          phase: "request_promise_resolved",
++          requestId,
++          success: result.success,
++          willRetry,
++        });
++        if (!willRetry) return result;
++        retriesRemaining -= 1;
++        attempt += 1;
++        await sleepForWriteConflictRetry(
++          writeConflictRetryOptions.writeConflictRetryDelayMs,
++        );
+       }
+-      retriesRemaining -= 1;
+-      await sleepForWriteConflictRetry(
+-        writeConflictRetryOptions.writeConflictRetryDelayMs,
+-      );
++    } catch (error) {
++      // A later enqueue/optimistic callback can throw after a retrying result.
++      // End that logical diagnostic owner without inspecting or changing the error.
++      if (mutationId !== undefined)
++        this.traceMutation({ phase: "mutation_aborted", mutationId });
++      throw error;
+     }
+   }
+ 
+@@ -1098,6 +1280,7 @@ export class BaseConvexClient {
+     args?: Record<string, Value>,
+     options?: MutationOptions,
+     componentPath?: string,
++    traceContext?: { mutationId: number | undefined; attempt: number },
+   ): { requestId: RequestId; mutationPromise: Promise<FunctionResult> } {
+     const mutationArgs = parseArgs(args);
+     this.tryReportLongDisconnect();
+@@ -1157,8 +1340,31 @@ export class BaseConvexClient {
+       componentPath,
+       args: [convexToJson(mutationArgs)],
+     };
++    const enqueuedAt = this.mutationTraceTime();
+     const mightBeSent = this.webSocketManager.sendMessage(message);
+     const mutationPromise = this.requestManager.request(message, mightBeSent);
++    const sentAt = this.mutationTraceTime();
++    // Deliver synchronously for UI correlation, after send/registration so an
++    // observer that enqueues another mutation cannot reverse their wire order.
++    this.traceMutation(
++      {
++        phase: "enqueued",
++        requestId,
++        functionName: udfPath,
++        mutationId: traceContext?.mutationId ?? requestId,
++        attempt: traceContext?.attempt ?? 1,
++      },
++      enqueuedAt,
++    );
++    this.traceMutation(
++      {
++        phase: "send_attempt",
++        requestId,
++        mightBeSent,
++        reason: "initial",
++      },
++      sentAt,
++    );
+     return {
+       requestId,
+       mutationPromise,
+@@ -1222,7 +1428,9 @@ export class BaseConvexClient {
+    */
+   async close(): Promise<void> {
+     this.authenticationManager.stop();
+-    return this.webSocketManager.terminate();
++    const closed = this.webSocketManager.terminate();
++    this.traceMutation({ phase: "client_closed" });
++    return closed;
+   }
+ 
+   /**
+diff --git a/src/browser/sync/mutation_trace.test.ts b/src/browser/sync/mutation_trace.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5bd5281af6be3637e6c8a1df2e578aaa97c4d3a8
+--- /dev/null
++++ b/src/browser/sync/mutation_trace.test.ts
+@@ -0,0 +1,872 @@
++import { describe, expect, test, vi } from "vitest";
++import { BaseConvexClient, type MutationTraceEvent } from "./client.js";
++import { Long } from "../../vendor/long.js";
++import {
++  nodeWebSocket,
++  encodeServerMessage,
++  withInMemoryWebSocket,
++} from "./client_node_test_helpers.js";
++
++const options = {
++  webSocketConstructor: nodeWebSocket,
++  logger: false,
++  unsavedChangesWarning: false,
++  skipConvexDeploymentUrlCheck: true,
++};
++
++const transition = {
++  type: "Transition" as const,
++  startVersion: { querySet: 0, identity: 0, ts: Long.fromNumber(0) },
++  endVersion: { querySet: 0, identity: 0, ts: Long.fromNumber(10) },
++  modifications: [],
++};
++
++describe("payload-free mutation tracing", () => {
++  test("waits for a covering transition and observes application before the promise continuation", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      const events: MutationTraceEvent[] = [];
++      let listenerFinishedAt = 0;
++      const client = new BaseConvexClient(address, () => {}, {
++        ...options,
++        onMutationTrace: (event) => {
++          events.push(event);
++        },
++      });
++      client.addOnTransitionHandler(() => {
++        listenerFinishedAt = performance.now();
++      });
++      try {
++        await receive();
++        await receive();
++        const result = client.mutation("messages:create", {
++          text: "private argument",
++        });
++        const request = await receive();
++        if (request.type !== "Mutation") throw new Error("Expected mutation");
++        send({
++          type: "MutationResponse",
++          requestId: request.requestId,
++          success: true,
++          ts: Long.fromNumber(10),
++          result: "private result",
++          logLines: ["private log"],
++        });
++        await vi.waitFor(() =>
++          expect(events.at(-1)?.phase).toBe("response_received"),
++        );
++        expect(events.map((event) => event.phase)).toEqual([
++          "enqueued",
++          "send_attempt",
++          "response_received",
++        ]);
++        send(transition);
++        await expect(result).resolves.toBe("private result");
++        expect(events.map((event) => event.phase)).toEqual([
++          "enqueued",
++          "send_attempt",
++          "response_received",
++          "transition_received",
++          "transition_applied",
++          "request_promise_resolved",
++        ]);
++        const times = events.flatMap((event) =>
++          "monotonicTime" in event ? [event.monotonicTime] : [],
++        );
++        expect(times).toEqual([...times].sort((a, b) => a - b));
++        expect(times[3]).toBeLessThanOrEqual(listenerFinishedAt);
++        expect(times[4]).toBeGreaterThanOrEqual(listenerFinishedAt);
++        expect(JSON.stringify(events)).not.toContain("private");
++      } finally {
++        await client.close();
++      }
++      expect(events.at(-1)?.phase).toBe("client_closed");
++    });
++  });
++
++  test("retains one request identity through queued send and response replay after reconnect", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send, close }) => {
++      const events: MutationTraceEvent[] = [];
++      const client = new BaseConvexClient(address, () => {}, {
++        ...options,
++        onMutationTrace: (event) => {
++          events.push(event);
++        },
++      });
++      try {
++        const result = client.mutation("messages:create", {});
++        expect(events[1]).toMatchObject({
++          phase: "send_attempt",
++          mightBeSent: false,
++        });
++        await receive();
++        await receive();
++        const request = await receive();
++        if (request.type !== "Mutation") throw new Error("Expected mutation");
++        send({
++          type: "MutationResponse",
++          requestId: request.requestId,
++          success: true,
++          ts: Long.fromNumber(10),
++          result: null,
++          logLines: [],
++        });
++        await vi.waitFor(() =>
++          expect(events.at(-1)?.phase).toBe("response_received"),
++        );
++        close();
++        await receive();
++        await receive();
++        expect(await receive()).toMatchObject({
++          type: "Mutation",
++          requestId: request.requestId,
++        });
++        send({
++          type: "MutationResponse",
++          requestId: request.requestId,
++          success: true,
++          ts: Long.fromNumber(10),
++          result: null,
++          logLines: [],
++        });
++        send(transition);
++        await expect(result).resolves.toBeNull();
++        expect(
++          events.filter((event) => event.phase === "enqueued"),
++        ).toHaveLength(1);
++        expect(
++          events.filter((event) => event.phase === "send_attempt"),
++        ).toHaveLength(3);
++        expect(
++          events.filter((event) => event.phase === "request_promise_resolved"),
++        ).toHaveLength(1);
++        expect(
++          new Set(
++            events
++              .filter((event) => "requestId" in event)
++              .map((event) => event.requestId),
++          ),
++        ).toEqual(new Set([request.requestId]));
++      } finally {
++        await client.close();
++      }
++    });
++  }, 10_000);
++
++  test("reports failures without waiting for a transition or copying error data", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      const events: MutationTraceEvent[] = [];
++      const client = new BaseConvexClient(address, () => {}, {
++        ...options,
++        onMutationTrace: (event) => {
++          events.push(event);
++        },
++      });
++      try {
++        await receive();
++        await receive();
++        const result = client.mutation("messages:create", {});
++        const rejection = expect(result).rejects.toThrow("private failure");
++        const request = await receive();
++        if (request.type !== "Mutation") throw new Error("Expected mutation");
++        send({
++          type: "MutationResponse",
++          requestId: request.requestId,
++          success: false,
++          result: "private failure",
++          errorData: { secret: "private data" },
++          logLines: [],
++        });
++        await rejection;
++        expect(events.map((event) => event.phase)).toEqual([
++          "enqueued",
++          "send_attempt",
++          "response_received",
++          "request_promise_resolved",
++        ]);
++        expect(events.at(-1)).toMatchObject({ success: false });
++        expect(JSON.stringify(events)).not.toContain("private");
++      } finally {
++        await client.close();
++      }
++    });
++  });
++
++  test.each(["throw", "reject"] as const)(
++    "observer %s cannot change mutation completion",
++    async (mode) => {
++      await withInMemoryWebSocket(async ({ address, receive, send }) => {
++        const client = new BaseConvexClient(address, () => {}, {
++          ...options,
++          logger: {
++            logVerbose: () => {},
++            log: () => {},
++            warn: () => {
++              throw new Error("custom logger failed");
++            },
++            error: () => {
++              throw new Error("custom logger failed");
++            },
++          },
++          onMutationTrace: () => {
++            if (mode === "throw") throw new Error("private observer detail");
++            return Promise.reject(new Error("private observer detail"));
++          },
++        });
++        try {
++          await receive();
++          await receive();
++          const result = client.mutation("messages:create", {});
++          const request = await receive();
++          if (request.type !== "Mutation") throw new Error("Expected mutation");
++          send({
++            type: "MutationResponse",
++            requestId: request.requestId,
++            success: true,
++            ts: Long.fromNumber(10),
++            result: "created",
++            logLines: [],
++          });
++          send(transition);
++          await expect(result).resolves.toBe("created");
++          const nextResult = client.mutation("messages:create", {});
++          const nextRequest = await receive();
++          if (nextRequest.type !== "Mutation")
++            throw new Error("Expected next mutation");
++          send({
++            type: "MutationResponse",
++            requestId: nextRequest.requestId,
++            success: true,
++            ts: Long.fromNumber(20),
++            result: "created again",
++            logLines: [],
++          });
++          send({
++            ...transition,
++            startVersion: transition.endVersion,
++            endVersion: { ...transition.endVersion, ts: Long.fromNumber(20) },
++          });
++          await expect(nextResult).resolves.toBe("created again");
++        } finally {
++          await client.close();
++        }
++      });
++    },
++  );
++  test.each([false, true])(
++    "missing diagnostic clock cannot affect mutation or close (observer: %s)",
++    async (observe) => {
++      await withInMemoryWebSocket(async ({ address, receive, send }) => {
++        const events: MutationTraceEvent[] = [];
++        const client = new BaseConvexClient(address, () => {}, {
++          ...options,
++          ...(observe
++            ? {
++                onMutationTrace: (event: MutationTraceEvent) => {
++                  events.push(event);
++                },
++              }
++            : {}),
++        });
++        try {
++          await receive();
++          await receive();
++          let result: Promise<unknown>;
++          vi.stubGlobal("performance", undefined);
++          try {
++            result = client.mutation("messages:create", {});
++          } finally {
++            vi.unstubAllGlobals();
++          }
++          const request = await receive();
++          if (request.type !== "Mutation") throw new Error("Expected mutation");
++          send({
++            type: "MutationResponse",
++            requestId: request.requestId,
++            success: true,
++            ts: Long.fromNumber(10),
++            result: "created",
++            logLines: [],
++          });
++          send(transition);
++          await expect(result).resolves.toBe("created");
++          expect(events).toEqual(
++            observe ? [{ phase: "tracing_disabled" }] : [],
++          );
++        } finally {
++          vi.stubGlobal("performance", undefined);
++          try {
++            await client.close();
++          } finally {
++            vi.unstubAllGlobals();
++          }
++        }
++      });
++    },
++  );
++
++  test("retry observations share logical identity and distinguish a retrying result", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      const events: MutationTraceEvent[] = [];
++      const client = new BaseConvexClient(address, () => {}, {
++        ...options,
++        onMutationTrace: (event) => {
++          events.push(event);
++        },
++      });
++      try {
++        await receive();
++        await receive();
++        const result = client.mutation(
++          "messages:create",
++          {},
++          { writeConflictRetryDelayMs: 1 },
++        );
++        const first = await receive();
++        if (first.type !== "Mutation") throw new Error("Expected mutation");
++        const unrelated = client.action("messages:action", {});
++        const action = await receive();
++        if (action.type !== "Action")
++          throw new Error("Expected interleaved action");
++        send({
++          type: "ActionResponse",
++          requestId: action.requestId,
++          success: true,
++          result: null,
++          logLines: [],
++        });
++        send({
++          type: "MutationResponse",
++          requestId: first.requestId,
++          success: false,
++          result: "OptimisticConcurrencyControlFailure",
++          logLines: [],
++        });
++        const second = await receive();
++        if (second.type !== "Mutation") throw new Error("Expected retry");
++        expect(second.requestId).toBe(first.requestId + 2);
++        send({
++          type: "MutationResponse",
++          requestId: second.requestId,
++          success: true,
++          ts: Long.fromNumber(10),
++          result: "created",
++          logLines: [],
++        });
++        send(transition);
++        await expect(result).resolves.toBe("created");
++        await expect(unrelated).resolves.toBeNull();
++        expect(
++          events.filter((event) => event.phase === "enqueued"),
++        ).toMatchObject([
++          {
++            requestId: first.requestId,
++            mutationId: first.requestId,
++            attempt: 1,
++          },
++          {
++            requestId: second.requestId,
++            mutationId: first.requestId,
++            attempt: 2,
++          },
++        ]);
++        expect(
++          events.filter((event) => event.phase === "request_promise_resolved"),
++        ).toMatchObject([
++          { requestId: first.requestId, success: false, willRetry: true },
++          { requestId: second.requestId, success: true, willRetry: false },
++        ]);
++      } finally {
++        await client.close();
++      }
++    });
++  });
++
++  test("reentrant observers cannot reverse initial sends or run before pressure application", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      const order: string[] = [];
++      let nested: Promise<unknown> | undefined;
++      const client = new BaseConvexClient(
++        address,
++        () => order.push("listener"),
++        {
++          ...options,
++          onServerPressure: () => {
++            order.push("pressure");
++          },
++          onMutationTrace: (event) => {
++            if (
++              event.phase === "enqueued" &&
++              event.functionName === "messages:first"
++            ) {
++              nested = client.mutation("messages:nested", {});
++            }
++            if (event.phase === "transition_received") {
++              order.push("trace");
++              expect(client.connectionState().inflightMutations).toBe(0);
++              expect(client.localQueryResult("messages:list", {})).toBe(
++                "updated",
++              );
++            }
++          },
++        },
++      );
++      client.subscribe("messages:list", {});
++      try {
++        await receive();
++        const querySet = await receive();
++        if (
++          querySet.type !== "ModifyQuerySet" ||
++          querySet.modifications[0]?.type !== "Add"
++        ) {
++          throw new Error("Expected query subscription");
++        }
++        const first = client.mutation("messages:first", {});
++        const firstRequest = await receive();
++        const nestedRequest = await receive();
++        expect(firstRequest).toMatchObject({
++          type: "Mutation",
++          udfPath: "messages:first",
++        });
++        expect(nestedRequest).toMatchObject({
++          type: "Mutation",
++          udfPath: "messages:nested",
++        });
++        if (
++          firstRequest.type !== "Mutation" ||
++          nestedRequest.type !== "Mutation"
++        )
++          throw new Error("Expected mutations");
++        for (const request of [firstRequest, nestedRequest]) {
++          send({
++            type: "MutationResponse",
++            requestId: request.requestId,
++            success: true,
++            ts: Long.fromNumber(10),
++            result: request.udfPath,
++            logLines: [],
++          });
++        }
++        send({
++          ...transition,
++          endVersion: { ...transition.endVersion, querySet: 1 },
++          modifications: [
++            {
++              type: "QueryUpdated",
++              queryId: querySet.modifications[0].queryId,
++              value: "updated",
++              logLines: [],
++              journal: null,
++            },
++          ],
++          serverPressure: {
++            kind: "degradable_query_capacity",
++            retryAfterMs: 250,
++          },
++        });
++        expect(await Promise.all([first, nested])).toEqual([
++          "messages:first",
++          "messages:nested",
++        ]);
++        expect(order).toEqual(["listener", "pressure", "trace", "trace"]);
++      } finally {
++        await client.close();
++      }
++    });
++  });
++
++  test("auth pause queues a mutation and resume retains the same request", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      const events: MutationTraceEvent[] = [];
++      const client = new BaseConvexClient(address, () => {}, {
++        ...options,
++        onMutationTrace: (event) => {
++          events.push(event);
++        },
++      });
++      try {
++        await receive();
++        await receive();
++        let releaseToken!: (token: string | null) => void;
++        const token = new Promise<string | null>((resolve) => {
++          releaseToken = resolve;
++        });
++        client.setAuth(
++          () => token,
++          () => {},
++        );
++        const result = client.mutation("messages:create", {});
++        expect(events.at(-1)).toMatchObject({
++          phase: "send_attempt",
++          mightBeSent: false,
++          reason: "initial",
++        });
++        releaseToken(null);
++        const request = await receive();
++        if (request.type !== "Mutation")
++          throw new Error("Expected resumed mutation");
++        send({
++          type: "MutationResponse",
++          requestId: request.requestId,
++          success: true,
++          ts: Long.fromNumber(10),
++          result: "created",
++          logLines: [],
++        });
++        send(transition);
++        await expect(result).resolves.toBe("created");
++        expect(
++          events.filter((event) => event.phase === "send_attempt"),
++        ).toMatchObject([
++          {
++            requestId: request.requestId,
++            reason: "initial",
++            mightBeSent: false,
++          },
++          { requestId: request.requestId, reason: "resume", mightBeSent: true },
++        ]);
++      } finally {
++        await client.close();
++      }
++    });
++  });
++
++  test("a transition before the response does not invent settlement or covering markers", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      const events: MutationTraceEvent[] = [];
++      const client = new BaseConvexClient(address, () => {}, {
++        ...options,
++        onMutationTrace: (event) => {
++          events.push(event);
++        },
++      });
++      try {
++        await receive();
++        await receive();
++        const result = client.mutation("messages:create", {});
++        const request = await receive();
++        if (request.type !== "Mutation") throw new Error("Expected mutation");
++        send(transition);
++        send({
++          type: "MutationResponse",
++          requestId: request.requestId,
++          success: true,
++          ts: Long.fromNumber(10),
++          result: "created",
++          logLines: [],
++        });
++        await vi.waitFor(() =>
++          expect(events.at(-1)?.phase).toBe("response_received"),
++        );
++        expect(client.connectionState().inflightMutations).toBe(1);
++        expect(
++          events.some((event) => event.phase === "transition_received"),
++        ).toBe(false);
++        send({
++          ...transition,
++          startVersion: transition.endVersion,
++          endVersion: { ...transition.endVersion, ts: Long.fromNumber(20) },
++        });
++        await expect(result).resolves.toBe("created");
++        expect(
++          events.filter((event) => event.phase === "transition_received"),
++        ).toHaveLength(1);
++      } finally {
++        await client.close();
++      }
++    });
++  });
++
++  test("clock failure after enqueue emits untimed cleanup while the mutation still completes", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      const events: MutationTraceEvent[] = [];
++      const client = new BaseConvexClient(address, () => {}, {
++        ...options,
++        onMutationTrace: (event) => {
++          events.push(event);
++        },
++      });
++      const clock = vi.spyOn(performance, "now");
++      try {
++        await receive();
++        await receive();
++        const result = client.mutation("messages:create", {});
++        const request = await receive();
++        if (request.type !== "Mutation") throw new Error("Expected mutation");
++        clock.mockReturnValue(Number.NaN);
++        send({
++          type: "MutationResponse",
++          requestId: request.requestId,
++          success: true,
++          ts: Long.fromNumber(10),
++          result: "created",
++          logLines: [],
++        });
++        send(transition);
++        await expect(result).resolves.toBe("created");
++        expect(events.map((event) => event.phase)).toEqual([
++          "enqueued",
++          "send_attempt",
++          "tracing_disabled",
++        ]);
++      } finally {
++        clock.mockRestore();
++        await client.close();
++      }
++    });
++  });
++
++  test("a failing retry enqueue ends logical observation without replacing the original error", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      const events: MutationTraceEvent[] = [];
++      const failure = new Error("private optimistic failure");
++      let attempts = 0;
++      const client = new BaseConvexClient(address, () => {}, {
++        ...options,
++        onMutationTrace: (event) => {
++          events.push(event);
++        },
++      });
++      try {
++        await receive();
++        await receive();
++        const result = client.mutation(
++          "messages:create",
++          {},
++          {
++            writeConflictRetryDelayMs: 1,
++            optimisticUpdate: () => {
++              if (++attempts > 1) throw failure;
++            },
++          },
++        );
++        const rejection = expect(result).rejects.toBe(failure);
++        const request = await receive();
++        if (request.type !== "Mutation") throw new Error("Expected mutation");
++        send({
++          type: "MutationResponse",
++          requestId: request.requestId,
++          success: false,
++          result: "OptimisticConcurrencyControlFailure",
++          logLines: [],
++        });
++        await rejection;
++        expect(events.at(-1)).toMatchObject({
++          phase: "mutation_aborted",
++          mutationId: request.requestId,
++        });
++        expect(JSON.stringify(events)).not.toContain("private");
++        expect(client.connectionState().inflightMutations).toBe(0);
++      } finally {
++        await client.close();
++      }
++    });
++  });
++
++  test("close observations are terminal even when the observer reenters close", async () => {
++    await withInMemoryWebSocket(async ({ address, receive }) => {
++      const events: MutationTraceEvent[] = [];
++      let reenteredClose: Promise<void> | undefined;
++      const client = new BaseConvexClient(address, () => {}, {
++        ...options,
++        onMutationTrace: (event) => {
++          events.push(event);
++          if (event.phase === "client_closed") reenteredClose = client.close();
++        },
++      });
++      await receive();
++      await receive();
++      void client.mutation("messages:create", {});
++      await receive();
++      await client.close();
++      await reenteredClose;
++      expect(
++        events.filter((event) => event.phase === "client_closed"),
++      ).toHaveLength(1);
++      expect(client.connectionState().isWebSocketConnected).toBe(false);
++    });
++  });
++
++  test.each([true, false])(
++    "listener errors preserve request settlement and receipt evidence (success: %s)",
++    async (success) => {
++      await withInMemoryWebSocket(async ({ address, receive, send }) => {
++        let transport: WebSocket | undefined;
++        class CapturedWebSocket extends nodeWebSocket {
++          constructor(...args: ConstructorParameters<typeof nodeWebSocket>) {
++            super(...args);
++            transport = this;
++          }
++        }
++        const failure = new Error("existing listener failure");
++        const events: MutationTraceEvent[] = [];
++        const client = new BaseConvexClient(
++          address,
++          () => {
++            throw failure;
++          },
++          {
++            ...options,
++            webSocketConstructor: CapturedWebSocket,
++            onMutationTrace: (event) => {
++              events.push(event);
++            },
++          },
++        );
++        try {
++          await receive();
++          await receive();
++          const result = client.mutation("messages:create", {});
++          const request = await receive();
++          if (request.type !== "Mutation") throw new Error("Expected mutation");
++          if (success) {
++            send({
++              type: "MutationResponse",
++              requestId: request.requestId,
++              success: true,
++              ts: Long.fromNumber(10),
++              result: "created",
++              logLines: [],
++            });
++            await vi.waitFor(() =>
++              expect(events.at(-1)?.phase).toBe("response_received"),
++            );
++          }
++          const settlement = success
++            ? expect(result).resolves.toBe("created")
++            : expect(result).rejects.toThrow("application failed");
++          if (transport === undefined || transport.onmessage === null)
++            throw new Error("Expected active transport");
++          const socket = transport;
++          const onMessage = transport.onmessage;
++          // Invoke the installed receive handler directly only to capture its existing
++          // thrown listener error; request/transition processing remains real SDK code.
++          expect(() =>
++            onMessage.call(
++              socket,
++              new MessageEvent("message", {
++                data: encodeServerMessage(
++                  success
++                    ? transition
++                    : {
++                        type: "MutationResponse",
++                        requestId: request.requestId,
++                        success: false,
++                        result: "application failed",
++                        logLines: [],
++                      },
++                ),
++              }),
++            ),
++          ).toThrow(failure);
++          await settlement;
++          expect(client.connectionState().inflightMutations).toBe(0);
++          expect(events.map((event) => event.phase)).toEqual([
++            "enqueued",
++            "send_attempt",
++            "response_received",
++            "request_promise_resolved",
++          ]);
++        } finally {
++          await client.close();
++        }
++      });
++    },
++  );
++
++  test("an absent observer performs no diagnostic clock reads", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      const client = new BaseConvexClient(address, () => {}, options);
++      try {
++        await receive();
++        await receive();
++        const clock = vi.spyOn(performance, "now");
++        const result = client.mutation("messages:create", {});
++        try {
++          expect(clock).not.toHaveBeenCalled();
++        } finally {
++          clock.mockRestore();
++        }
++        const request = await receive();
++        if (request.type !== "Mutation") throw new Error("Expected mutation");
++        send({
++          type: "MutationResponse",
++          requestId: request.requestId,
++          success: true,
++          ts: Long.fromNumber(10),
++          result: null,
++          logLines: [],
++        });
++        send(transition);
++        await expect(result).resolves.toBeNull();
++      } finally {
++        await client.close();
++      }
++    });
++  });
++
++  test("fatal transport termination ends observation without settling the pending request", async () => {
++    await withInMemoryWebSocket(async ({ address, receive }) => {
++      let transport: WebSocket | undefined;
++      class CapturedWebSocket extends nodeWebSocket {
++        constructor(...args: ConstructorParameters<typeof nodeWebSocket>) {
++          super(...args);
++          transport = this;
++        }
++      }
++      const events: MutationTraceEvent[] = [];
++      const client = new BaseConvexClient(address, () => {}, {
++        ...options,
++        webSocketConstructor: CapturedWebSocket,
++        onMutationTrace: (event) => {
++          events.push(event);
++        },
++      });
++      try {
++        await receive();
++        await receive();
++        let settled = false;
++        void client.mutation("messages:create", {}).then(
++          () => {
++            settled = true;
++          },
++          () => {
++            settled = true;
++          },
++        );
++        await receive();
++        if (transport === undefined || transport.onmessage === null)
++          throw new Error("Expected active transport");
++        const socket = transport;
++        const onMessage = transport.onmessage;
++        expect(() =>
++          onMessage.call(
++            socket,
++            new MessageEvent("message", {
++              data: encodeServerMessage({
++                type: "FatalError",
++                error: "private fatal detail",
++              }),
++            }),
++          ),
++        ).toThrow("private fatal detail");
++        await Promise.resolve();
++        expect(settled).toBe(false);
++        expect(client.connectionState()).toMatchObject({
++          isWebSocketConnected: false,
++          inflightMutations: 1,
++        });
++        expect(events.map((event) => event.phase)).toEqual([
++          "enqueued",
++          "send_attempt",
++          "client_closed",
++        ]);
++        expect(JSON.stringify(events)).not.toContain("private");
++      } finally {
++        await client.close();
++      }
++      expect(
++        events.filter((event) => event.phase === "client_closed"),
++      ).toHaveLength(1);
++    });
++  });
++});

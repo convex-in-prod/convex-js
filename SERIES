@@ -12,3 +12,5 @@
 0011-packaging-keep-source-provenance-separate-from-immut.patch b3bf348cfb6479825e172eac05c7fc10baef975d
 0012-cli-change-live-primary-runtime-and-shadow-sampling.patch 4905ad7dd035bc6c5f640a7812ec93ee75a270b8
 0013-build-use-tsrs-with-shared-incremental-build-caches.patch 2582167f6286c1222c87bc6d6c60e8866c9e940d
+0014-browser-expose-payload-free-mutation-phase-observati.patch 224c1843cc4f50fa70a6c13d17425728f45f5a15
+0015-sync-settle-mutations-covered-by-an-earlier-transiti.patch 7fa78572fc39b57d7f941088c498ca9ed5dbe0ed
