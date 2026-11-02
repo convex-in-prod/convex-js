@@ -451,10 +451,10 @@ index 56ab2e5812767341a839da3fe32ccaf8000de2b1..3f8b8a727f101c47ad6247ecb70d5f46
        new Option(
          "-y, --yes",
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index e8546915f10960e7a0881814502d60eaf428a9e4..72a189707d210f7986d1ed3666d7b67daa48398b 100644
+index 701528591ebd28df368bd595df67322dea9bf895..6c6a917f9048dd849ea067a657a258ec4f102fcc 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
-@@ -95,6 +95,7 @@ export type PushOptions = {
+@@ -100,6 +100,7 @@ export type PushOptions = {
    // runs never deploy (e.g. codegen).
    warnOnSlowSchemaValidation: boolean;
    message: string | null;
@@ -462,7 +462,7 @@ index e8546915f10960e7a0881814502d60eaf428a9e4..72a189707d210f7986d1ed3666d7b67d
  };
  
  export async function runCodegen(
-@@ -174,6 +175,7 @@ export function hash(bundle: Bundle) {
+@@ -179,6 +180,7 @@ export function hash(bundle: Bundle) {
  function isModuleTheSame(newBundle: Bundle, oldBundleHash: BundleHash) {
    return (
      newBundle.environment === oldBundleHash.environment &&
@@ -470,7 +470,7 @@ index e8546915f10960e7a0881814502d60eaf428a9e4..72a189707d210f7986d1ed3666d7b67d
      hash(newBundle) === oldBundleHash.hash
    );
  }
-@@ -194,6 +196,7 @@ export function partitionModulesByChanges(
+@@ -199,6 +201,7 @@ export function partitionModulesByChanges(
      .map((func) => ({
        path: func.path,
        environment: func.environment,
@@ -478,7 +478,7 @@ index e8546915f10960e7a0881814502d60eaf428a9e4..72a189707d210f7986d1ed3666d7b67d
        sha256: hash(func),
      }));
    const changedModules = functions.filter((newBundle) => {
-@@ -257,6 +260,7 @@ async function startComponentsPushAndCodegen(
+@@ -262,6 +265,7 @@ async function startComponentsPushAndCodegen(
      stagedValidatorDeletionCheck: StagedValidatorDeletionCheck;
      warnOnSlowSchemaValidation: boolean;
      codegenOnlyThisComponent?: string | undefined;
@@ -486,7 +486,7 @@ index e8546915f10960e7a0881814502d60eaf428a9e4..72a189707d210f7986d1ed3666d7b67d
    },
  ): Promise<StartPushResponse | null> {
    const convexDir = await getFunctionsDirectoryPath(ctx);
-@@ -553,6 +557,22 @@ async function startComponentsPushAndCodegen(
+@@ -558,6 +562,22 @@ async function startComponentsPushAndCodegen(
      startPush(ctx, span, startPushRequest, options),
    );
  
@@ -507,9 +507,9 @@ index e8546915f10960e7a0881814502d60eaf428a9e4..72a189707d210f7986d1ed3666d7b67d
 +  }
 +
    if (options.verbose) {
-     logMessage("startPush: " + JSON.stringify(startPushResponse, null, 2));
-   }
-@@ -648,7 +668,10 @@ function logStartPushSizes(span: Span, startPushRequest: StartPushRequest) {
+     logMessage(
+       "startPush: " +
+@@ -656,7 +676,10 @@ function logStartPushSizes(span: Span, startPushRequest: StartPushRequest) {
        if (module.environment === "isolate") {
          v8Size += module.source.length + (module.sourceMap ?? "").length;
          v8Count += 1;
@@ -710,7 +710,7 @@ index e8ea18e8d88a822ba4b3ac5abdbec8ad9ec8cc38..b7860b91e21e6acc6988a348fce2c838
  
  export const nodeDependency = looseObject({
 diff --git a/src/cli/lib/deployApi/startPush.ts b/src/cli/lib/deployApi/startPush.ts
-index 0d4d050161165366badcdf343bb2556ae78435fc..7e9a9e4c7b69eca4a581e57b5bf294c4711aa550 100644
+index eeb9d224888fc2cea6202f65e98507503b45d092..4ffc53184228e561abf1df3d04fc290be9c282a1 100644
 --- a/src/cli/lib/deployApi/startPush.ts
 +++ b/src/cli/lib/deployApi/startPush.ts
 @@ -45,6 +45,7 @@ export const startPushResponse = looseObject({
@@ -746,10 +746,10 @@ index 13dbf6520ebf952dbe8b557aab50e0cccb4f24eb..598cddb186c140f3db6b322c5d3d4c99
        typecheckComponents: args.typecheckComponents,
        debug: false,
 diff --git a/src/server/index.ts b/src/server/index.ts
-index 1ceccc0c20a689c9a15f89e3672fac5adb1ca3f8..d9c048bc929a8fb7a98fdff6bff03a9597847ce5 100644
+index b29edcf1c36b50fe13377fbf2a434c0d2e872ec9..d7090324c3ac1fb81fdea8f1150b747c2a35e689 100644
 --- a/src/server/index.ts
 +++ b/src/server/index.ts
-@@ -108,6 +108,12 @@ export {
+@@ -113,6 +113,12 @@ export {
    getServiceUrl,
    type ServiceName,
  } from "./impl/actions_impl.js";

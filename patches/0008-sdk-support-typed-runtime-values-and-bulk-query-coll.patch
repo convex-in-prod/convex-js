@@ -13,10 +13,15 @@ constructing value-object or JSON envelopes only for older consumers. Build
 opaque native query records at predicate construction and preserve captured
 literal ownership, consumed-builder behavior, operation ordering and errors.
 Keep action scheduling and ordinary V8 execution on their existing adapters.
+
+Retain mutation-specific auth in both serialized and typed invocation entry
+points. JWT signing keeps its ordinary JSON syscall even when identity reads
+use the typed boundary, which has no signing opcode. Cover this combination
+through both mutation entry points and both identity transports.
 ---
  src/server/components/index.ts                |  12 +-
  src/server/impl/actions_impl.ts               |   9 +-
- src/server/impl/authentication_impl.ts        |  11 +-
+ src/server/impl/authentication_impl.ts        |  17 +-
  src/server/impl/database_impl.ts              |  94 ++++----
  src/server/impl/filter_builder_impl.ts        | 167 ++++++++++----
  src/server/impl/index_range_builder_impl.ts   | 105 ++++-----
@@ -29,19 +34,19 @@ Keep action scheduling and ordinary V8 execution on their existing adapters.
  src/server/impl/search_filter_builder_impl.ts |  51 ++--
  src/server/impl/storage_impl.ts               |  50 ++--
  src/server/impl/syscall.ts                    | 218 +++++++++++++++++-
- src/server/impl/value_syscall.test.ts         | 112 +++++++++
+ src/server/impl/value_syscall.test.ts         | 151 ++++++++++++
  src/server/registration.ts                    |   6 +
  src/values/validators.ts                      |   7 +-
  src/values/value.ts                           |  51 +++-
  src/values/value_owned.test.ts                |  47 ++++
- 20 files changed, 1140 insertions(+), 277 deletions(-)
+ 20 files changed, 1185 insertions(+), 277 deletions(-)
  create mode 100644 src/server/impl/query_builder.test.ts
  create mode 100644 src/server/impl/query_value.ts
  create mode 100644 src/server/impl/value_syscall.test.ts
  create mode 100644 src/values/value_owned.test.ts
 
 diff --git a/src/server/components/index.ts b/src/server/components/index.ts
-index 783c4643f131696c3c18f5997836bcbca9cc07ef..b54753b6d8fe8fafc846855e8dc72be980b3973c 100644
+index 9e74964b6c4e23e8cf3cfc7d364660b80ba613f5..4ede471b9472ab9f02180194c83423bd26837e2c 100644
 --- a/src/server/components/index.ts
 +++ b/src/server/components/index.ts
 @@ -6,7 +6,7 @@ import {
@@ -53,7 +58,7 @@ index 783c4643f131696c3c18f5997836bcbca9cc07ef..b54753b6d8fe8fafc846855e8dc72be9
  import { DefaultFunctionArgs } from "../registration.js";
  import {
    AppDefinitionAnalysis,
-@@ -72,10 +72,12 @@ export async function createFunctionHandle<
+@@ -83,10 +83,12 @@ export async function createFunctionHandle<
      | FunctionReference_future<Type, "public" | "internal", Args, ReturnType>,
  ): Promise<FunctionHandle<Type, Args, ReturnType>> {
    const address = getFunctionAddress(functionReference);
@@ -71,7 +76,7 @@ index 783c4643f131696c3c18f5997836bcbca9cc07ef..b54753b6d8fe8fafc846855e8dc72be9
  
  interface ComponentExports {
 diff --git a/src/server/impl/actions_impl.ts b/src/server/impl/actions_impl.ts
-index e83bb9db47b8e63e7a88ea8101baf696ebcabd25..68663090d83aa3b76cad59f3642ed87c4301d82a 100644
+index ec8af3702f209a0497761ad316fc365b779f7793..9ba8718aee3e8ece59ed16fb6ddf3f009fc2e77d 100644
 --- a/src/server/impl/actions_impl.ts
 +++ b/src/server/impl/actions_impl.ts
 @@ -1,4 +1,5 @@
@@ -109,13 +114,18 @@ index e83bb9db47b8e63e7a88ea8101baf696ebcabd25..68663090d83aa3b76cad59f3642ed87c
    };
  }
 diff --git a/src/server/impl/authentication_impl.ts b/src/server/impl/authentication_impl.ts
-index ece9af071fbaebcb38e008138dd25bce664339c6..eb7e4cba2c147ff659be5160b952a988002aad7f 100644
+index 19c1bde44481a0272a405206466558ff588baba5..6b0dd1009f7261cf61ec27f1b57cf51f413c3f74 100644
 --- a/src/server/impl/authentication_impl.ts
 +++ b/src/server/impl/authentication_impl.ts
-@@ -1,12 +1,15 @@
- import { Auth } from "../authentication.js";
+@@ -1,13 +1,20 @@
+ import { Auth, MutationAuth } from "../authentication.js";
+ import { version } from "../../index.js";
 -import { performAsyncSyscall } from "./syscall.js";
-+import { ValueSyscall, performAsyncValueSyscall } from "./syscall.js";
++import {
++  ValueSyscall,
++  performAsyncSyscall,
++  performAsyncValueSyscall,
++} from "./syscall.js";
  
  export function setupAuth(requestId: string): Auth {
    return {
@@ -132,6 +142,15 @@ index ece9af071fbaebcb38e008138dd25bce664339c6..eb7e4cba2c147ff659be5160b952a988
      },
    };
  }
+@@ -16,6 +23,8 @@ export function setupMutationAuth(requestId: string): MutationAuth {
+   return {
+     ...setupAuth(requestId),
+     signJwt: async (options) => {
++      // Signing has no typed value opcode; keep the JSON syscall even when
++      // identity reads use the typed runtime boundary.
+       return await performAsyncSyscall("1.0/signJwt", {
+         requestId,
+         version,
 diff --git a/src/server/impl/database_impl.ts b/src/server/impl/database_impl.ts
 index b031f5ed9c885e651f3b56efd7603dbe109b1685..42f073b1de0abad625258fb553e2ab4d8bb3f959 100644
 --- a/src/server/impl/database_impl.ts
@@ -1230,7 +1249,7 @@ index 0000000000000000000000000000000000000000..ddfb687e64a318cb62d910915696831e
 +  return typeof Convex === "undefined" ? undefined : Convex.queryValueRecord;
 +}
 diff --git a/src/server/impl/registration_impl.ts b/src/server/impl/registration_impl.ts
-index b033c40d905663f20e104a5c1e248648f4e5f9a3..2f1348edcc5479672a434aa64e00771e3712529f 100644
+index fbed4feee2a35afa48f7e719b0d7cce7ee7e3d39..f9be24fdc1f721a060d4b48c031a5b9d59d44938 100644
 --- a/src/server/impl/registration_impl.ts
 +++ b/src/server/impl/registration_impl.ts
 @@ -2,11 +2,11 @@ import {
@@ -1273,7 +1292,7 @@ index b033c40d905663f20e104a5c1e248648f4e5f9a3..2f1348edcc5479672a434aa64e00771e
 -  const args = jsonToConvex(JSON.parse(argsStr));
    const mutationCtx = {
      db: setupWriter(),
-     auth: setupAuth(requestId),
+     auth: setupMutationAuth(requestId),
 @@ -86,7 +93,7 @@ async function invokeMutation<
    };
    const result = await invokeFunction(func, mutationCtx, args as any);
@@ -1932,12 +1951,14 @@ index f3d23278a5f7eda002e9dcbb4a3645067506b6ad..7bbb64fbe8144dbfce26b297d431f2da
   * function set up in the Convex function execution. Unlike `performSyscall`, the
 diff --git a/src/server/impl/value_syscall.test.ts b/src/server/impl/value_syscall.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a3c60d2c90db37b9dbc497574fcd31f0993269a0
+index 0000000000000000000000000000000000000000..2bfd6334e20848d06ba39d6a8cc12fdca379e478
 --- /dev/null
 +++ b/src/server/impl/value_syscall.test.ts
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,151 @@
 +import { afterEach, expect, test, vi } from "vitest";
 +import { setupWriter } from "./database_impl.js";
++import { mutationGeneric } from "./registration_impl.js";
++import { version } from "../../index.js";
 +import {
 +  setupMutationScheduler,
 +  setupActionScheduler,
@@ -2048,11 +2069,48 @@ index 0000000000000000000000000000000000000000..a3c60d2c90db37b9dbc497574fcd31f0
 +  await expect(result).rejects.toBeInstanceOf(ConvexError);
 +  await expect(result).rejects.toMatchObject({ data });
 +});
++
++test.each(["json", "typed"] as const)(
++  "both mutation entry points retain JWT signing with %s identity transport",
++  async (mode) => {
++    const options = { claims: { scope: "test" }, expiresInSeconds: 60 };
++    const signingRequests: unknown[] = [];
++    vi.stubGlobal("Convex", {
++      asyncSyscall: async (op: string, args: string) => {
++        if (op === "1.0/getUserIdentity") {
++          expect(mode).toBe("json");
++          return "null";
++        }
++        expect(op).toBe("1.0/signJwt");
++        signingRequests.push(JSON.parse(args));
++        return JSON.stringify("signed-token");
++      },
++      ...(mode === "typed"
++        ? {
++            asyncSyscallTyped: async (op: number) => {
++              expect(op).toBe(ValueSyscall.Identity);
++              return null;
++            },
++          }
++        : {}),
++    });
++    const mutation = mutationGeneric(async (ctx) => {
++      expect(await ctx.auth.getUserIdentity()).toBeNull();
++      return await ctx.auth.signJwt(options);
++    });
++    expect(await mutation.invokeMutation("[{}]")).toBe('"signed-token"');
++    expect(await mutation.invokeMutationValue({})).toBe("signed-token");
++    expect(signingRequests).toEqual([
++      { requestId: "", version, ...options },
++      { requestId: "", version, ...options },
++    ]);
++  },
++);
 diff --git a/src/server/registration.ts b/src/server/registration.ts
-index 1ede4cb3ad5ec96f559f2b67987c0ac9f955bdef..a4bb7106e2ab37e5d302b7ee12261c8353a99800 100644
+index 33ab8643ba2b50982daeebe964df3f2820ebeaac..a0367fbdda26bae21b778146191c6d581a67475e 100644
 --- a/src/server/registration.ts
 +++ b/src/server/registration.ts
-@@ -528,6 +528,9 @@ export type RegisteredMutation<
+@@ -531,6 +531,9 @@ export type RegisteredMutation<
    /** @internal */
    invokeMutation(argsStr: string): Promise<string>;
  
@@ -2062,7 +2120,7 @@ index 1ede4cb3ad5ec96f559f2b67987c0ac9f955bdef..a4bb7106e2ab37e5d302b7ee12261c83
    /** @internal */
    exportArgs(): string;
  
-@@ -557,6 +560,9 @@ export type RegisteredQuery<
+@@ -560,6 +563,9 @@ export type RegisteredQuery<
    /** @internal */
    invokeQuery(argsStr: string): Promise<string>;
  
@@ -2073,10 +2131,10 @@ index 1ede4cb3ad5ec96f559f2b67987c0ac9f955bdef..a4bb7106e2ab37e5d302b7ee12261c83
    exportArgs(): string;
  
 diff --git a/src/values/validators.ts b/src/values/validators.ts
-index 947fb90263ef28a5cedf76ab1fe1dbc438f9f24a..ac79530198e136934944aa6ea523b660dc36ea0a 100644
+index e8225b4ef243a26c1bc353ec249f3b4428fa443a..6fe6336239fb81236779cf1e4338c6c85b584f32 100644
 --- a/src/values/validators.ts
 +++ b/src/values/validators.ts
-@@ -32,14 +32,15 @@ abstract class BaseValidator<
+@@ -34,14 +34,15 @@ abstract class BaseValidator<
  > {
    /**
     * Only for TypeScript, the TS type of the JS values validated

@@ -37,12 +37,24 @@ separately from Vitest in CI.
 
 Older tsc-based clients remain backend-compatible because checking does not
 change deployment requests or emitted application JavaScript.
+
+Use the current TypeScript 7.1-based tsrs release. Keep TypeScript 6 as the
+JavaScript compiler API for current ESLint tooling and Knip, and isolate
+OpenAPI generation in a private npm workspace with its required TypeScript 5
+API. Install with ordinary peer resolution, update the Vitest ESLint plugin,
+and remove unused TypeDoc. Document that these development tools do not
+select the compiler used for SDK or application checks.
+
+Accept declaration maps that omit an empty sourceRoot, resolving their
+sources relative to the map directory as the source-map format specifies.
+Preserve stale-declaration removal and cache relocation with this newer
+compiler output.
 ---
  .github/workflows/build-convex-in-prod.yml |   4 +-
  .github/workflows/test-and-lint.yml        |   2 +
- CONTRIBUTING.md                            |  43 ++
+ CONTRIBUTING.md                            |  52 +++
  api-extractor-configs/README.md            |   8 +-
- package.json                               |   5 +-
+ package.json                               |  29 +-
  patches/README.md                          |  30 ++
  schemas/convex.schema.json                 |   6 -
  scripts/build.cjs                          |   2 +
@@ -50,8 +62,9 @@ change deployment requests or emitted application JavaScript.
  scripts/checkdeps.mjs                      |   3 +-
  scripts/compare-codegen.mjs                |  14 +-
  scripts/maintain-tsrs-cache.mjs            |  29 ++
+ scripts/openapi/package.json               |   8 +
  scripts/postpack.mjs                       |  15 +-
- scripts/run-tsrs.mjs                       | 195 +++++++++
+ scripts/run-tsrs.mjs                       | 199 +++++++++
  scripts/run-tsrs.test.mjs                  | 451 +++++++++++++++++++++
  scripts/tsrs-cache.mjs                     | 165 ++++++++
  scripts/tsrs-cache.test.mjs                | 139 +++++++
@@ -69,8 +82,9 @@ change deployment requests or emitted application JavaScript.
  src/cli/typecheck.ts                       |  40 +-
  src/values/base64.ts                       |   4 +-
  vitest.config.js                           |   8 +-
- 31 files changed, 1378 insertions(+), 252 deletions(-)
+ 32 files changed, 1413 insertions(+), 262 deletions(-)
  create mode 100644 scripts/maintain-tsrs-cache.mjs
+ create mode 100644 scripts/openapi/package.json
  create mode 100644 scripts/run-tsrs.mjs
  create mode 100644 scripts/run-tsrs.test.mjs
  create mode 100644 scripts/tsrs-cache.mjs
@@ -78,11 +92,11 @@ change deployment requests or emitted application JavaScript.
  create mode 100644 src/cli/lib/typecheck.test.ts
 
 diff --git a/.github/workflows/build-convex-in-prod.yml b/.github/workflows/build-convex-in-prod.yml
-index 161560bc579dca1c281c4f3c059640697efd7fd0..a4af2d6be76e157b0043a4afa3802449dad04143 100644
+index 1a237e40e1246bde25062191ed6541d17f9b53ef..a79985ed12a79a2b376f508cd8338385528d5472 100644
 --- a/.github/workflows/build-convex-in-prod.yml
 +++ b/.github/workflows/build-convex-in-prod.yml
-@@ -40,7 +40,9 @@ jobs:
-         run: npm install --legacy-peer-deps
+@@ -37,7 +37,9 @@ jobs:
+         run: npm install
  
        - name: Test
 -        run: npm test -- --run
@@ -93,7 +107,7 @@ index 161560bc579dca1c281c4f3c059640697efd7fd0..a4af2d6be76e157b0043a4afa3802449
        - name: Typecheck
          run: npm run typecheck
 diff --git a/.github/workflows/test-and-lint.yml b/.github/workflows/test-and-lint.yml
-index 92d3da140f6c8d70c37285b3abc73aef05b5f573..b6d2b31fed733e574c7fe0e343deb22c3d9d2df9 100644
+index 851f014135eab3bf662ccd964ffc1d73804c9690..26e678136e4eab8bf413f814021396a31bdbe294 100644
 --- a/.github/workflows/test-and-lint.yml
 +++ b/.github/workflows/test-and-lint.yml
 @@ -34,6 +34,8 @@ jobs:
@@ -106,13 +120,22 @@ index 92d3da140f6c8d70c37285b3abc73aef05b5f573..b6d2b31fed733e574c7fe0e343deb22c
  
        - run: npm run lint
 diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
-index 962fff4d682426a671adbccf9c5eddecc00a7ba8..8c98ceda597fd110f07a8f85d09764599f8cdfb1 100644
+index 962fff4d682426a671adbccf9c5eddecc00a7ba8..18d487e0778d47e444ce0696f6bfc6e5b815cf35 100644
 --- a/CONTRIBUTING.md
 +++ b/CONTRIBUTING.md
-@@ -48,3 +48,46 @@ published package mirror the filesystem of this repository.
+@@ -48,3 +48,55 @@ published package mirror the filesystem of this repository.
  management-api.json is a programmatically updated file that generates
  src/cli/generatedApi.ts, but generating this file is a manual process. Run
  `npm run generateManagementApiSpec` to update it.
++
++The SDK build and CLI typechecking use the TypeScript 7-based `tsrs` compiler.
++The root `typescript` development dependency is only the TypeScript 6 JavaScript
++compiler API required by ESLint and Knip. OpenAPI generation lives in the
++private `scripts/openapi` npm workspace because its generator still requires the
++TypeScript 5 compiler API. Root `npm install` installs both tool scopes; the
++`generate*ApiSpec` and `check*ApiSpec` scripts select the generator workspace.
++These tool dependencies do not select the compiler used to check SDK or app
++code.
 +
 +`npm run typecheck` and the declaration stages of `npm run build` use
 +incremental tsrs builds through `scripts/run-tsrs.mjs`. Their shared cache root
@@ -173,10 +196,10 @@ index 712beefd061b649982b53026c3eca0fa3e2f9e0e..92344118c5a1c169a60e861914924012
 +files. The [build notes](../CONTRIBUTING.md#build-notes) describe incremental
 +declaration caching and how staging preserves declaration-map paths.
 diff --git a/package.json b/package.json
-index 2fc25ec0b3bb7036e2c1eba2431113527d0e8e7d..59bde21eabfeec1fd8791a4c8bc46563388a4689 100644
+index 967b882fc3c824281eec39862d99714dd63b0f08..73bc847dc4ae21983a23f84015a48fc6fbc285b1 100644
 --- a/package.json
 +++ b/package.json
-@@ -197,7 +197,9 @@
+@@ -197,15 +197,17 @@
      "postpack": "node scripts/postpack.mjs",
      "test": "vitest --silent",
      "test-not-silent": "vitest",
@@ -187,19 +210,81 @@ index 2fc25ec0b3bb7036e2c1eba2431113527d0e8e7d..59bde21eabfeec1fd8791a4c8bc46563
      "test-esm": "node ./scripts/test-esm.mjs && ./scripts/checkdeps.mjs && ./scripts/checkimports.mjs",
      "compare-codegen": "node scripts/compare-codegen.mjs",
      "generateApiSpec": "npm run generateManagementApiSpec && npm run generateFunctionLogsApiSpec",
+     "checkApiSpec": "npm run checkManagementApiSpec && npm run checkFunctionLogsApiSpec",
+-    "generateManagementApiSpec": "openapi-typescript ./cli-management-openapi.json --output ./src/cli/generatedApi.ts --root-types --root-types-no-schema-prefix",
+-    "checkManagementApiSpec": "openapi-typescript ./cli-management-openapi.json --output ./src/cli/generatedApi.ts --root-types --root-types-no-schema-prefix --check",
+-    "generateFunctionLogsApiSpec": "openapi-typescript ./function-logs-openapi.json --output ./src/cli/lib/generatedFunctionLogsApi.ts --root-types --root-types-no-schema-prefix",
+-    "checkFunctionLogsApiSpec": "openapi-typescript ./function-logs-openapi.json --output ./src/cli/lib/generatedFunctionLogsApi.ts --root-types --root-types-no-schema-prefix --check"
++    "generateManagementApiSpec": "npm exec --workspace=scripts/openapi -- openapi-typescript ../../cli-management-openapi.json --output ../../src/cli/generatedApi.ts --root-types --root-types-no-schema-prefix",
++    "checkManagementApiSpec": "npm exec --workspace=scripts/openapi -- openapi-typescript ../../cli-management-openapi.json --output ../../src/cli/generatedApi.ts --root-types --root-types-no-schema-prefix --check",
++    "generateFunctionLogsApiSpec": "npm exec --workspace=scripts/openapi -- openapi-typescript ../../function-logs-openapi.json --output ../../src/cli/lib/generatedFunctionLogsApi.ts --root-types --root-types-no-schema-prefix",
++    "checkFunctionLogsApiSpec": "npm exec --workspace=scripts/openapi -- openapi-typescript ../../function-logs-openapi.json --output ../../src/cli/lib/generatedFunctionLogsApi.ts --root-types --root-types-no-schema-prefix --check"
+   },
+   "files": [
+     "bin",
 @@ -244,6 +246,7 @@
    "dependencies": {
      "esbuild": "0.27.0",
      "prettier": "^3.0.0",
-+    "tsrs": "0.18.0-ts7.1.0-dev.20260929",
++    "tsrs": "0.20.1-ts7.1.0-beta",
      "ws": "8.21.0"
    },
    "peerDependencies": {
+@@ -268,7 +271,10 @@
+   },
+   "@comment devDependencies": [
+     "The dependencies of the CLI are also in devDependencies, built into",
+-    "a bundle."
++    "a bundle.",
++    "TypeScript 6 supplies the JavaScript compiler API required by ESLint and Knip.",
++    "Compilation and typechecking use the TypeScript 7-based tsrs dependency.",
++    "OpenAPI generation has a separate workspace because its compiler API peer still requires TypeScript 5."
+   ],
+   "devDependencies": {
+     "@auth0/auth0-react": "2.15.1",
+@@ -300,7 +306,7 @@
+     "@types/serve-handler": "~6.1.4",
+     "@types/ws": "^8.5.13",
+     "@vercel/detect-agent": "^1.2.5",
+-    "@vitest/eslint-plugin": "~1.6.0",
++    "@vitest/eslint-plugin": "~1.6.28",
+     "adm-zip": "^0.6.1",
+     "bufferutil": "^4.0.7",
+     "chalk": "5",
+@@ -327,7 +333,6 @@
+     "napi-wasm": "1.1.3",
+     "open": "^11.0.0",
+     "openapi-fetch": "~0.17.0",
+-    "openapi-typescript": "~7.8.0",
+     "openapi-typescript-helpers": "~0.1.0",
+     "openid-client": "^5.3.1",
+     "ora": "^9.0.0",
+@@ -340,15 +345,17 @@
+     "skott": "0.35.4",
+     "tar": "^7.5.21",
+     "tsx": "^4.19.4",
+-    "typedoc": "^0.24.6",
+-    "typescript": "~5.0.3",
+-    "typescript-eslint": "~8.57.0",
++    "typescript": "~6.0.3",
++    "typescript-eslint": "~8.72.1",
+     "undici": "7.29.1",
+     "vitest": "^4.1.0",
+     "wait-for-expect": "~4.0.0",
+     "zod": "^3.24.0",
+     "zod-to-json-schema": "^3.24.0"
+   },
++  "workspaces": [
++    "scripts/openapi"
++  ],
+   "engines": {
+     "npm": ">=7.0.0",
+     "node": ">=22.0.0"
 diff --git a/patches/README.md b/patches/README.md
-index 9f3b0d8f9d5fa970bdfb4f80cc560ca948ba6fd0..b1e5bf1678469862b1e339db38bcc37c8eec71e3 100644
+index c90a0ceb5ef71a71227c2a92b760a3d756d4cde8..fd5f7dc3c6fe853f47dd7f1ca4f83318be7436d4 100644
 --- a/patches/README.md
 +++ b/patches/README.md
-@@ -18,6 +18,36 @@ in the
+@@ -20,6 +20,36 @@ The SDK and CLI require Node.js 22 or newer, following upstream 1.49.0.
  
  ## Maintained changes
  
@@ -215,15 +300,15 @@ index 9f3b0d8f9d5fa970bdfb4f80cc560ca948ba6fd0..b1e5bf1678469862b1e339db38bcc37c
 +check in both `enable` and `try` modes. No separate application installation of
 +tsrs is needed. Checks always pass `--noEmit`; esbuild remains the emitter.
 +
-+tsrs 0.18 uses TypeScript 7.1 development semantics and supports Linux x64/arm64
-+and macOS arm64. Unsupported hosts cannot run these application typechecks. The
-+SDK also uses tsrs for source checks and declaration emission. It emits public
-+and internal declarations once each, then copies them into the ESM/CommonJS
-+package layouts; their package markers differ, their declaration contents do
-+not. esbuild still emits runtime JavaScript. The public declarations avoid
-+requiring generic typed arrays solely because the build compiler is newer. Older
-+SDK releases using tsc remain compatible with the backend: typechecking does not
-+change the deployment protocol or emitted application JavaScript.
++The pinned tsrs release uses TypeScript 7.1 semantics and supports Linux
++x64/arm64 and macOS arm64. Unsupported hosts cannot run these application
++typechecks. The SDK also uses tsrs for source checks and declaration emission.
++It emits public and internal declarations once each, then copies them into the
++ESM/CommonJS package layouts; their package markers differ, their declaration
++contents do not. esbuild still emits runtime JavaScript. The public declarations
++avoid requiring generic typed arrays solely because the build compiler is newer.
++Older SDK releases using tsc remain compatible with the backend: typechecking
++does not change the deployment protocol or emitted application JavaScript.
 +
 +SDK typechecks and declaration builds reuse incremental state under the shared
 +`TSRS_CACHE_DIR` root, separated by package namespace, compiler, configuration,
@@ -237,10 +322,10 @@ index 9f3b0d8f9d5fa970bdfb4f80cc560ca948ba6fd0..b1e5bf1678469862b1e339db38bcc37c
  
  `convex runtime-mode` reads the backend's durable runtime policy. On a
 diff --git a/schemas/convex.schema.json b/schemas/convex.schema.json
-index 41c72ed66489823e9adbe7fb66a3fc0853c19162..ac802b22b7ce606b37f53189d9a2438567239a68 100644
+index 96a3f4609d40fc7c1056548fb99acc127dad402b..be6a582e73a87b2c4ed5042536db699f8885b5db 100644
 --- a/schemas/convex.schema.json
 +++ b/schemas/convex.schema.json
-@@ -222,12 +222,6 @@
+@@ -221,12 +221,6 @@
          }
        }
      },
@@ -254,7 +339,7 @@ index 41c72ed66489823e9adbe7fb66a3fc0853c19162..ac802b22b7ce606b37f53189d9a24385
        "$ref": "#/definitions/authKitConfig"
      },
 diff --git a/scripts/build.cjs b/scripts/build.cjs
-index a19d4ccf5c8c80a3f6343dfbb29c204056874625..2072734798186870f59e70bec62b2069ad7362c4 100755
+index 9d733f31b1e9e9ef713c44e98f7d29421f9df4cb..a0c92283376fa710b1a02ac0c17c6fe57a6d42e1 100755
 --- a/scripts/build.cjs
 +++ b/scripts/build.cjs
 @@ -147,6 +147,8 @@ if (process.argv.includes("standalone-cli")) {
@@ -452,6 +537,20 @@ index 0000000000000000000000000000000000000000..e1647798ce9f6506aa27e70b10bb894b
 +process.stdout.write(
 +  `${JSON.stringify(maintainTsrsCache({ projectRoot, retentionDays, apply }), null, 2)}\n`,
 +);
+diff --git a/scripts/openapi/package.json b/scripts/openapi/package.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..393ff73522b79f97e6c7c3551b896dd0de30f9b3
+--- /dev/null
++++ b/scripts/openapi/package.json
+@@ -0,0 +1,8 @@
++{
++  "name": "@convex-in-prod/openapi-codegen",
++  "private": true,
++  "dependencies": {
++    "openapi-typescript": "~7.8.0",
++    "typescript": "~5.9.3"
++  }
++}
 diff --git a/scripts/postpack.mjs b/scripts/postpack.mjs
 index 9a0299ef66100158f6169a7a7a425cd83948e33d..e020762cf830af0a55ac45dba712067944af2228 100644
 --- a/scripts/postpack.mjs
@@ -494,10 +593,10 @@ index 9a0299ef66100158f6169a7a7a425cd83948e33d..e020762cf830af0a55ac45dba7120679
      }
 diff --git a/scripts/run-tsrs.mjs b/scripts/run-tsrs.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..8b0361332bee6a51c9432f52d33e8287d11936ea
+index 0000000000000000000000000000000000000000..cade4c080962cdce629455904e105b3703e84d22
 --- /dev/null
 +++ b/scripts/run-tsrs.mjs
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,199 @@
 +import { spawnSync } from "node:child_process";
 +import { createHash, randomUUID } from "node:crypto";
 +import {
@@ -615,9 +714,13 @@ index 0000000000000000000000000000000000000000..8b0361332bee6a51c9432f52d33e8287
 +      pruneRemovedDeclarations(path, programPaths);
 +    } else if (/\.d\.(?:ts|mts|cts)\.map$/u.test(entry.name)) {
 +      const map = JSON.parse(readFileSync(path, "utf8"));
++      // Newer compilers omit an empty sourceRoot. In that case the source-map
++      // format resolves sources relative to the map's directory.
 +      if (
 +        !map.sources.every((source) =>
-+          programPaths.has(resolve(dirname(path), map.sourceRoot, source)),
++          programPaths.has(
++            resolve(dirname(path), map.sourceRoot ?? "", source),
++          ),
 +        )
 +      ) {
 +        rmSync(path);
@@ -695,7 +798,7 @@ index 0000000000000000000000000000000000000000..8b0361332bee6a51c9432f52d33e8287
 +}
 diff --git a/scripts/run-tsrs.test.mjs b/scripts/run-tsrs.test.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..3a6e6a05dbe43a622e535d1b2637559b6e8698f7
+index 0000000000000000000000000000000000000000..1b15b22c35fae80376770246c246c27563b14a38
 --- /dev/null
 +++ b/scripts/run-tsrs.test.mjs
 @@ -0,0 +1,451 @@
@@ -813,7 +916,7 @@ index 0000000000000000000000000000000000000000..3a6e6a05dbe43a622e535d1b2637559b
 +  const mapPath = join(two, "tmpDistTwo/esm-types/index.d.ts.map");
 +  const map = JSON.parse(await readFile(mapPath, "utf8"));
 +  assert.equal(
-+    resolve(dirname(mapPath), map.sourceRoot, map.sources[0]),
++    resolve(dirname(mapPath), map.sourceRoot ?? "", map.sources[0]),
 +    join(two, "src/index.ts"),
 +  );
 +

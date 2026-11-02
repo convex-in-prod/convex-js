@@ -8,15 +8,20 @@ Route standalone codegen through evaluate_push with an explicit analysis request
 Keep dev and deploy on start_push, omit the analysis request from deployment preflight, and preserve compatibility with legacy evaluation responses for a precise version error. Generate API, data-model, component, and environment types from a narrow shared analysis contract and fail clearly when component analysis is incomplete.
 
 Add response-decoder coverage, operator patch guidance, and an Unreleased changelog entry.
+
+Preserve upstream environment-value redaction in verbose deployment output.
+Preflight analysis can also contain environment-derived values, but does not
+return the environment map required for scrubbing. Log only its component
+count instead of serializing the complete codegen analysis.
 ---
- src/cli/codegen_templates/component_api.ts |  28 ++--
+ src/cli/codegen_templates/component_api.ts |  28 +--
  src/cli/codegen_templates/dataModel.ts     |  16 +-
  src/cli/lib/codegen.ts                     |  38 +++--
- src/cli/lib/components.ts                  | 182 ++++++++++++---------
+ src/cli/lib/components.ts                  | 189 ++++++++++++---------
  src/cli/lib/deploy2.ts                     |  10 +-
  src/cli/lib/deployApi/startPush.test.ts    |  22 +++
  src/cli/lib/deployApi/startPush.ts         |  14 +-
- 7 files changed, 194 insertions(+), 116 deletions(-)
+ 7 files changed, 199 insertions(+), 118 deletions(-)
  create mode 100644 src/cli/lib/deployApi/startPush.test.ts
 
 diff --git a/src/cli/codegen_templates/component_api.ts b/src/cli/codegen_templates/component_api.ts
@@ -314,7 +319,7 @@ index a8eb621e779b0596084497b64ad16f7a6af7135b..3c2336850a6bda90716ebef90d84fca0
        componentDirectory,
        componentsMap,
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee71345b91bcf 100644
+index 6c6a917f9048dd849ea067a657a258ec4f102fcc..8c4e276cd6fb33555838b14a6edbd1fa88934a60 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
 @@ -15,6 +15,7 @@ import {
@@ -325,20 +330,15 @@ index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee713
    finishPush,
    reportPushCompleted,
    startPush,
-@@ -43,7 +44,11 @@ import { typeCheckFunctionsInMode, TypeCheckMode } from "./typecheck.js";
- import { withTmpDir } from "../../bundler/fs.js";
- import { handleDebugBundlePath } from "./debugBundlePath.js";
- import { chalkStderr } from "chalk";
--import { StartPushRequest, StartPushResponse } from "./deployApi/startPush.js";
-+import {
+@@ -46,6 +47,7 @@ import { chalkStderr } from "chalk";
+ import {
+   startPushResponseForLogging,
+   redactEnvironmentVariableValues,
 +  PushAnalysis,
-+  StartPushRequest,
-+  StartPushResponse,
-+} from "./deployApi/startPush.js";
- import { DetailedDeploymentCredentials } from "./api.js";
- import { FinishPushDiff } from "./deployApi/finishPush.js";
- import { Reporter, Span } from "./tracing.js";
-@@ -128,6 +133,7 @@ export async function runCodegen(
+   StartPushRequest,
+   StartPushResponse,
+ } from "./deployApi/startPush.js";
+@@ -133,6 +135,7 @@ export async function runCodegen(
        configPath,
        {
          ...options,
@@ -346,7 +346,7 @@ index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee713
          deploymentName: credentials.deploymentFields?.deploymentName ?? null,
          ...(credentials.deploymentFields?.deploymentType !== undefined
            ? { deploymentType: credentials.deploymentFields.deploymentType }
-@@ -261,6 +267,7 @@ async function startComponentsPushAndCodegen(
+@@ -266,6 +269,7 @@ async function startComponentsPushAndCodegen(
      warnOnSlowSchemaValidation: boolean;
      codegenOnlyThisComponent?: string | undefined;
      forceNodeCutover?: boolean | undefined;
@@ -354,7 +354,7 @@ index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee713
    },
  ): Promise<StartPushResponse | null> {
    const convexDir = await getFunctionsDirectoryPath(ctx);
-@@ -471,6 +478,7 @@ async function startComponentsPushAndCodegen(
+@@ -476,6 +480,7 @@ async function startComponentsPushAndCodegen(
      nodeDependencies: appImplementation.externalNodeDependencies,
      nodeVersion: projectConfig.node.nodeVersion,
      forCodegen: !!options.codegenOnlyThisComponent,
@@ -362,7 +362,7 @@ index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee713
    };
    if (options.writePushRequest) {
      const pushRequestPath = path.resolve(options.writePushRequest);
-@@ -501,80 +509,105 @@ async function startComponentsPushAndCodegen(
+@@ -506,83 +511,114 @@ async function startComponentsPushAndCodegen(
      );
    }
  
@@ -395,14 +395,7 @@ index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee713
 -          dryRun: options.dryRun,
 -        });
 -      },
-+  let pushAnalysis: PushAnalysis;
-+  let startPushResponse: StartPushResponse | null = null;
-+  if (options.pushMode === "codegen") {
-+    changeSpinner("Analyzing functions for code generation...");
-+    const evaluatePushResponse = await parentSpan.enterAsync(
-+      "evaluatePush",
-+      (span) => evaluatePush(ctx, span, startPushRequest, options),
-     );
+-    );
 -  }
 -
 -  // A real push evaluates the schema only when the evaluation is already
@@ -421,7 +414,14 @@ index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee713
 -        schemaEvaluation,
 -        dryRun: options.dryRun,
 -      }),
--    );
++  let pushAnalysis: PushAnalysis;
++  let startPushResponse: StartPushResponse | null = null;
++  if (options.pushMode === "codegen") {
++    changeSpinner("Analyzing functions for code generation...");
++    const evaluatePushResponse = await parentSpan.enterAsync(
++      "evaluatePush",
++      (span) => evaluatePush(ctx, span, startPushRequest, options),
+     );
 -  }
 -
 -  changeSpinner("Uploading functions to Convex...");
@@ -445,10 +445,14 @@ index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee713
 -      chalkStderr.yellow(
 -        "Warning: forced Node cutover can interrupt actions whose external effects may already have completed. Read authoritative state before retrying an interrupted action.",
 -      ),
+-    );
+-  }
 +    pushAnalysis = { analysis: evaluatePushResponse.analysis };
 +    if (options.verbose) {
++      // Analysis can contain environment-derived values, but preflight does not
++      // return the environment map needed to redact them. Log only the count.
 +      logMessage(
-+        "evaluatePush: " + JSON.stringify(evaluatePushResponse, null, 2),
++        `evaluatePush: received analysis for ${Object.keys(pushAnalysis.analysis).length} components`,
 +      );
 +    }
 +  } else {
@@ -465,7 +469,11 @@ index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee713
 +        }),
 +      );
 +    }
-+
+ 
+-  if (options.verbose) {
+-    logMessage(
+-      "startPush: " +
+-        JSON.stringify(startPushResponseForLogging(startPushResponse), null, 2),
 +    const stagedValidatorDeletionCheck = options.stagedValidatorDeletionCheck;
 +    if (stagedValidatorDeletionCheck !== "no verification") {
 +      await parentSpan.enterAsync(
@@ -507,7 +515,6 @@ index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee713
 +    startPushResponse = await parentSpan.enterAsync("startPush", (span) =>
 +      startPush(ctx, span, startPushRequest, options),
      );
--  }
 +    pushAnalysis = startPushResponse;
 +
 +    if (options.forceNodeCutover && !options.dryRun) {
@@ -525,16 +532,21 @@ index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee713
 +        ),
 +      );
 +    }
- 
--  if (options.verbose) {
--    logMessage("startPush: " + JSON.stringify(startPushResponse, null, 2));
++
 +    if (options.verbose) {
-+      logMessage("startPush: " + JSON.stringify(startPushResponse, null, 2));
++      logMessage(
++        "startPush: " +
++          JSON.stringify(
++            startPushResponseForLogging(startPushResponse),
++            null,
++            2,
++          ),
++      );
 +    }
    }
  
    if (options.codegen) {
-@@ -590,7 +623,7 @@ async function startComponentsPushAndCodegen(
+@@ -598,7 +634,7 @@ async function startComponentsPushAndCodegen(
              tmpDir,
              rootComponent,
              rootComponent,
@@ -543,7 +555,7 @@ index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee713
              components,
              options,
            );
-@@ -611,7 +644,7 @@ async function startComponentsPushAndCodegen(
+@@ -619,7 +655,7 @@ async function startComponentsPushAndCodegen(
              tmpDir,
              rootComponent,
              directory,
@@ -552,7 +564,7 @@ index 72a189707d210f7986d1ed3666d7b67daa48398b..82fc218af24070af8667692ad3dee713
              components,
              options,
            );
-@@ -699,13 +732,10 @@ export async function runComponentsPush(
+@@ -707,13 +743,10 @@ export async function runComponentsPush(
    const startPushResponse = await pushSpan.enterAsync(
      "startComponentsPushAndCodegen",
      (span) =>
@@ -630,7 +642,7 @@ index 0000000000000000000000000000000000000000..3f64c0ab1b8be5d30772393c778e7c36
 +  expect(parsed.analysis).toEqual({});
 +});
 diff --git a/src/cli/lib/deployApi/startPush.ts b/src/cli/lib/deployApi/startPush.ts
-index 7e9a9e4c7b69eca4a581e57b5bf294c4711aa550..6764902cf4f8b8312ad885e3c1c846454f2a39d1 100644
+index 4ffc53184228e561abf1df3d04fc290be9c282a1..d5ecb632c5fca231d2a780196e2d956ad0060b96 100644
 --- a/src/cli/lib/deployApi/startPush.ts
 +++ b/src/cli/lib/deployApi/startPush.ts
 @@ -23,6 +23,8 @@ export const startPushRequest = looseObject({
@@ -666,8 +678,8 @@ index 7e9a9e4c7b69eca4a581e57b5bf294c4711aa550..6764902cf4f8b8312ad885e3c1c84645
  
    app: checkedComponent,
  
-@@ -50,6 +60,8 @@ export const startPushResponse = looseObject({
- export type StartPushResponse = z.infer<typeof startPushResponse>;
+@@ -114,6 +124,8 @@ export function startPushResponseForLogging(
+ }
  
  export const evaluatePushResponse = looseObject({
 +  // Older backends only returned schemaChange from this endpoint.

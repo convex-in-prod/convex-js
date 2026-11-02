@@ -1035,7 +1035,7 @@ index c62f1ee5115e8d16e1a4c69c56ecfe0a4f2f0762..5546234c0ce849c0279716cb4323a383
  
  /**
 diff --git a/src/server/impl/actions_impl.ts b/src/server/impl/actions_impl.ts
-index 620d85752aedcca42dee737f565bb30eb80a38a0..e83bb9db47b8e63e7a88ea8101baf696ebcabd25 100644
+index 1499213ae6daa30c63ce275592148ee60bc326d8..ec8af3702f209a0497761ad316fc365b779f7793 100644
 --- a/src/server/impl/actions_impl.ts
 +++ b/src/server/impl/actions_impl.ts
 @@ -8,6 +8,12 @@ import {
@@ -1074,7 +1074,7 @@ index 620d85752aedcca42dee737f565bb30eb80a38a0..e83bb9db47b8e63e7a88ea8101baf696
        return jsonToConvex(result);
      },
 diff --git a/src/server/impl/registration_impl.ts b/src/server/impl/registration_impl.ts
-index 5c7adc0e17a457281cc83510d24fb72d90d0986b..b033c40d905663f20e104a5c1e248648f4e5f9a3 100644
+index ceeafc38db057313721d5b538f8545552c0ea38f..fbed4feee2a35afa48f7e719b0d7cce7ee7e3d39 100644
 --- a/src/server/impl/registration_impl.ts
 +++ b/src/server/impl/registration_impl.ts
 @@ -46,6 +46,18 @@ import {
@@ -1111,10 +1111,10 @@ index 5c7adc0e17a457281cc83510d24fb72d90d0986b..b033c40d905663f20e104a5c1e248648
    const result = await invokeFunction(func, mutationCtx, args as any);
    validateReturnValue(result);
 diff --git a/src/server/registration.ts b/src/server/registration.ts
-index e9bd6ffd0d54160702ab093c0b152f338dd02bfe..1ede4cb3ad5ec96f559f2b67987c0ac9f955bdef 100644
+index 0fa7a14d302bfa43194a03f1d223c86d7a1218a5..33ab8643ba2b50982daeebe964df3f2820ebeaac 100644
 --- a/src/server/registration.ts
 +++ b/src/server/registration.ts
-@@ -28,6 +28,7 @@ import {
+@@ -29,6 +29,7 @@ import {
    ObjectType,
    PropertyValidators,
  } from "../values/validator.js";
@@ -1122,7 +1122,7 @@ index e9bd6ffd0d54160702ab093c0b152f338dd02bfe..1ede4cb3ad5ec96f559f2b67987c0ac9
  import { Id } from "../values/value.js";
  import {
    GenericDataModel,
-@@ -351,6 +352,9 @@ export interface GenericActionCtx<DataModel extends GenericDataModel> {
+@@ -354,6 +355,9 @@ export interface GenericActionCtx<DataModel extends GenericDataModel> {
     *
     * Each `runMutation` call is a separate write transaction. Consider using
     * an {@link internalMutation} to prevent users from calling it directly.
@@ -1132,7 +1132,7 @@ index e9bd6ffd0d54160702ab093c0b152f338dd02bfe..1ede4cb3ad5ec96f559f2b67987c0ac9
     *
     * @example
     * ```typescript
-@@ -367,7 +371,7 @@ export interface GenericActionCtx<DataModel extends GenericDataModel> {
+@@ -370,7 +374,7 @@ export interface GenericActionCtx<DataModel extends GenericDataModel> {
        | FunctionReference_future<"mutation", "public" | "internal">,
    >(
      mutation: Mutation,

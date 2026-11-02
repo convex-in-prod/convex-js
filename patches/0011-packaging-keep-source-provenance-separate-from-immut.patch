@@ -8,18 +8,21 @@ Record the reviewed upstream source and retain the peer-compatible SHA-derived p
 
 Provision uv in the package workflow for the upstream Python prepack builder.
 
-Refresh the source train to upstream 1.47.0. Retain staged-validator warnings
-and removal confirmation for actual deployments while code generation uses
-non-committing analysis. Preserve explicit native resident selection and add
-the upstream mutation file-read adapter beside typed runtime value syscalls.
+Refresh the source train to upstream 1.49.0 and run CI on Node.js 22.
+Retain staged-validator checks for actual deployments while codegen uses
+non-committing analysis. Preserve native resident selection and upstream
+mutation file access beside typed runtime value syscalls.
+
+Install with ordinary npm peer dependency resolution.
 ---
  .convex-in-prod-upstream                   |   1 +
- .github/workflows/build-convex-in-prod.yml | 159 +++++++++++++++++
- CHANGELOG.md                               |  11 ++
+ .github/workflows/build-convex-in-prod.yml | 156 +++++++++++++++++
+ .github/workflows/test-and-lint.yml        |   2 +-
+ CHANGELOG.md                               |  19 +-
  package.json                               |   2 +-
  packages/README.md                         |  18 ++
- patches/README.md                          | 189 +++++++++++++++++++++
- 6 files changed, 379 insertions(+), 1 deletion(-)
+ patches/README.md                          | 191 +++++++++++++++++++++
+ 7 files changed, 383 insertions(+), 6 deletions(-)
  create mode 100644 .convex-in-prod-upstream
  create mode 100644 .github/workflows/build-convex-in-prod.yml
  create mode 100644 packages/README.md
@@ -27,17 +30,17 @@ the upstream mutation file-read adapter beside typed runtime value syscalls.
 
 diff --git a/.convex-in-prod-upstream b/.convex-in-prod-upstream
 new file mode 100644
-index 0000000000000000000000000000000000000000..f68676f22e7ca1ac8c6c4da7651cee33ce3edc97
+index 0000000000000000000000000000000000000000..bfab88c52e03292d0566a78658a92deece33a336
 --- /dev/null
 +++ b/.convex-in-prod-upstream
 @@ -0,0 +1 @@
-+11b0a4a47ab40f966e6fd61b8b7880633bac3570
++d54e497d3a86d220f993b77e4b59b6f3947fb8d9
 diff --git a/.github/workflows/build-convex-in-prod.yml b/.github/workflows/build-convex-in-prod.yml
 new file mode 100644
-index 0000000000000000000000000000000000000000..161560bc579dca1c281c4f3c059640697efd7fd0
+index 0000000000000000000000000000000000000000..1a237e40e1246bde25062191ed6541d17f9b53ef
 --- /dev/null
 +++ b/.github/workflows/build-convex-in-prod.yml
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,156 @@
 +name: Build convex-in-prod package
 +
 +on:
@@ -64,7 +67,7 @@ index 0000000000000000000000000000000000000000..161560bc579dca1c281c4f3c05964069
 +      - name: Node setup
 +        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
 +        with:
-+          node-version: "20.20.2"
++          node-version: "22"
 +
 +      - name: NPM v10
 +        run: npm install -g npm@10 --registry=https://registry.npmjs.org
@@ -74,10 +77,7 @@ index 0000000000000000000000000000000000000000..161560bc579dca1c281c4f3c05964069
 +        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
 +
 +      - name: Install
-+        # Upstream has no lockfile and intentionally retains @types/node 18 while
-+        # current Vitest 4 declares an optional Node-types 20+ peer. Keep the
-+        # source type baseline and verify it below instead of changing it here.
-+        run: npm install --legacy-peer-deps
++        run: npm install
 +
 +      - name: Test
 +        run: npm test -- --run
@@ -197,11 +197,46 @@ index 0000000000000000000000000000000000000000..161560bc579dca1c281c4f3c05964069
 +          process.stdout.write(`Package: \`${packageJson.name}@${packageJson.version}\`\n\n`);
 +          process.stdout.write(`Integrity: \`${integrity}\`\n`);
 +          NODE
+diff --git a/.github/workflows/test-and-lint.yml b/.github/workflows/test-and-lint.yml
+index 92d3da140f6c8d70c37285b3abc73aef05b5f573..851f014135eab3bf662ccd964ffc1d73804c9690 100644
+--- a/.github/workflows/test-and-lint.yml
++++ b/.github/workflows/test-and-lint.yml
+@@ -21,7 +21,7 @@ jobs:
+       - name: Node setup
+         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+         with:
+-          node-version: "20.20.2"
++          node-version: "22"
+ 
+       - name: NPM v10
+         run: npm install -g npm@10 --registry=https://registry.npmjs.org
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index f845a401ecaf096db7acdfbd0cbcd8b7e0af98a8..9f7ff9731118f0b504959caa6a894c6e705fa268 100644
+index d4e50576c0ec247981e09275b2825df29b24bb9b..f06668eb4d0075eb50c49bf8fcb089b9cebcec14 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -107,6 +107,17 @@
+@@ -21,8 +21,8 @@
+ ## 1.48.0
+ 
+ - Convex deployments can now sign their own JWTs with an internally managed
+-  key-pair. The `ctx.auth.signJwt` API is available in mutations. The JWTs
+-  can be verified with the public key in the JWKS hosted at
++  key-pair. The `ctx.auth.signJwt` API is available in mutations. The JWTs can
++  be verified with the public key in the JWKS hosted at
+   `${CONVEX_CLOUD_URL}/.well-known/jwks.json`.
+ - `npx convex dev --verbose` and `npx convex deploy --verbose` no longer print
+   environment variable values. The logged list of environment variables shows
+@@ -35,8 +35,8 @@
+   `--include-values` to print the values.
+ 
+ - Fixed `npx convex ai-files install` and `npx convex ai-files update` reporting
+-  success and exiting 0 when the guidelines download or the agent skills
+-  install failed. They now exit with code 1.
++  success and exiting 0 when the guidelines download or the agent skills install
++  failed. They now exit with code 1.
+ 
+ - `ctx.storage.store()` and `ctx.storage.get()` are now available in mutations,
+   not just actions. Files stored and read in a mutation count toward its
+@@ -149,6 +149,17 @@
    gateway.
  - Improved the error message when `npx convex export` fails because a snapshot
    export is already in progress.
@@ -220,10 +255,10 @@ index f845a401ecaf096db7acdfbd0cbcd8b7e0af98a8..9f7ff9731118f0b504959caa6a894c6e
  ## 1.44.0
  
 diff --git a/package.json b/package.json
-index cfb086cf10d0b10e9e8d4a2423483f2087733fce..2fc25ec0b3bb7036e2c1eba2431113527d0e8e7d 100644
+index de3fee760c9b7c6e6996afb73656aaefe5b3ec2a..967b882fc3c824281eec39862d99714dd63b0f08 100644
 --- a/package.json
 +++ b/package.json
-@@ -336,7 +336,7 @@
+@@ -337,7 +337,7 @@
      "semver": "^7.6.0",
      "serve-handler": "~6.1.6",
      "shx": "~0.4.0",
@@ -258,10 +293,10 @@ index 0000000000000000000000000000000000000000..e9b0902b93eda3a4fc907dcab6dbf197
 +[the release procedure](../patches/README.md#rebase-and-release).
 diff --git a/patches/README.md b/patches/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..c403b2184f75333bc63ea61de79aa19f49862b04
+index 0000000000000000000000000000000000000000..97b3647168184b92954d6a160c8d62df62225e66
 --- /dev/null
 +++ b/patches/README.md
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,191 @@
 +# Convex-In-Prod Patch Stack
 +
 +The fork's `main` branch carries a short generic patch stack over the exact
@@ -279,6 +314,8 @@ index 0000000000000000000000000000000000000000..c403b2184f75333bc63ea61de79aa19f
 +Backend patches and the backend sides of cross-repository contracts are indexed
 +in the
 +[`convex-backend` maintained patch set](https://github.com/convex-in-prod/convex-backend/blob/main/patches/README.md).
++
++The SDK and CLI require Node.js 22 or newer, following upstream 1.49.0.
 +
 +## Maintained changes
 +
@@ -313,8 +350,8 @@ index 0000000000000000000000000000000000000000..c403b2184f75333bc63ea61de79aa19f
 +their existing internal/public terminal-conflict message classifier.
 +
 +This change is derived from
-+[get-convex/convex-js PR 170](https://github.com/get-convex/convex-js/pull/170).
-+Remove the local commit when upstream contains equivalent behavior.
++[convex/convex-js PR 170](https://github.com/convex/convex-js/pull/170). Remove
++the local commit when upstream contains equivalent behavior.
 +
 +### Degradable reactive-query pressure
 +

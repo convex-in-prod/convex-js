@@ -93,7 +93,7 @@ index 3fa4d89459f376376a7a99537beddb642b4ad57d..ebf8822f3e9a9572b38928f261bda473
  ) {
    const deploymentToActOn = await loadSelectedDeploymentCredentials(
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index 82fc218af24070af8667692ad3dee71345b91bcf..3b3663aff0f5c666de6ddc1bc68496cc42dbfcb5 100644
+index 8c4e276cd6fb33555838b14a6edbd1fa88934a60..2d85ed16530b9dd82297e998c5954ec123eeeda1 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
 @@ -1,3 +1,4 @@
@@ -101,7 +101,7 @@ index 82fc218af24070af8667692ad3dee71345b91bcf..3b3663aff0f5c666de6ddc1bc68496cc
  import path from "path";
  import { Context } from "../../bundler/context.js";
  import {
-@@ -101,6 +102,7 @@ export type PushOptions = {
+@@ -103,6 +104,7 @@ export type PushOptions = {
    warnOnSlowSchemaValidation: boolean;
    message: string | null;
    forceNodeCutover: boolean;
@@ -430,10 +430,10 @@ index b02da7b88db793e8663e1d574ab3f8cac781f530..5980bb6b8e150a577b99942fef0fa937
  }
  
 diff --git a/src/server/meta.ts b/src/server/meta.ts
-index e9018205c525480c4655a55766a943a8460fc169..774882b47358a3028b7e882bda2d018a931161eb 100644
+index 6a2525484e8deadcd5e77ba9513540e595a71ab7..bb49044ff4309a2c3cc100a58cb564eed562a3a6 100644
 --- a/src/server/meta.ts
 +++ b/src/server/meta.ts
-@@ -103,6 +103,17 @@ export type DeploymentMetadata = {
+@@ -95,6 +95,17 @@ export type DeploymentMetadata = {
     * The deployment class, e.g. `"s16"`, `"s256"`, `"d1024"`, or `"d2048"`.
     */
    class: "s16" | "s256" | "d1024" | "d2048";
