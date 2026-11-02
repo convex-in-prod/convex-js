@@ -59,7 +59,15 @@ describe("payload-free mutation tracing", () => {
           "send_attempt",
           "response_received",
         ]);
-        send(transition);
+        expect(events.at(-1)).toMatchObject({ alreadyApplied: false });
+        const beforeCommit = {
+          ...transition,
+          endVersion: { ...transition.endVersion, ts: Long.fromNumber(9) },
+        };
+        send(beforeCommit);
+        await vi.waitFor(() => expect(listenerFinishedAt).toBeGreaterThan(0));
+        expect(client.connectionState().inflightMutations).toBe(1);
+        send({ ...transition, startVersion: beforeCommit.endVersion });
         await expect(result).resolves.toBe("private result");
         expect(events.map((event) => event.phase)).toEqual([
           "enqueued",
@@ -530,8 +538,78 @@ describe("payload-free mutation tracing", () => {
     });
   });
 
-  test("a transition before the response does not invent settlement or covering markers", async () => {
-    await withInMemoryWebSocket(async ({ address, receive, send }) => {
+  test.each([10, 20])(
+    "an earlier transition at %s settles the response without new transition markers",
+    async (appliedTimestamp) => {
+      await withInMemoryWebSocket(async ({ address, receive, send }) => {
+        const events: MutationTraceEvent[] = [];
+        const reflected: number[] = [];
+        const client = new BaseConvexClient(address, () => {}, {
+          ...options,
+          onMutationTrace: (event) => {
+            events.push(event);
+          },
+        });
+        client.addOnTransitionHandler(({ reflectedMutations }) => {
+          reflected.push(
+            ...reflectedMutations.map(({ requestId }) => requestId),
+          );
+        });
+        try {
+          await receive();
+          await receive();
+          const result = client.mutation("messages:create", {});
+          const request = await receive();
+          if (request.type !== "Mutation") throw new Error("Expected mutation");
+          send({
+            ...transition,
+            endVersion: {
+              ...transition.endVersion,
+              ts: Long.fromNumber(appliedTimestamp),
+            },
+          });
+          const response = {
+            type: "MutationResponse" as const,
+            requestId: request.requestId,
+            success: true as const,
+            ts: Long.fromNumber(10),
+            result: "created",
+            logLines: [],
+          };
+          send(response);
+          await expect(result).resolves.toBe("created");
+          expect(client.connectionState().inflightMutations).toBe(0);
+          expect(reflected).toEqual([request.requestId]);
+          expect(events.map((event) => event.phase)).toEqual([
+            "enqueued",
+            "send_attempt",
+            "response_received",
+            "request_promise_resolved",
+          ]);
+          expect(events[2]).toMatchObject({ alreadyApplied: true });
+
+          send(response);
+          await vi.waitFor(() =>
+            expect(events.at(-1)).toMatchObject({
+              phase: "response_received",
+              alreadyApplied: false,
+            }),
+          );
+          expect(reflected).toEqual([request.requestId]);
+          expect(
+            events.filter(
+              (event) => event.phase === "request_promise_resolved",
+            ),
+          ).toHaveLength(1);
+        } finally {
+          await client.close();
+        }
+      });
+    },
+  );
+
+  test("a previous connection's timestamp cannot settle a replayed response", async () => {
+    await withInMemoryWebSocket(async ({ address, receive, send, close }) => {
       const events: MutationTraceEvent[] = [];
       const client = new BaseConvexClient(address, () => {}, {
         ...options,
@@ -545,7 +623,20 @@ describe("payload-free mutation tracing", () => {
         const result = client.mutation("messages:create", {});
         const request = await receive();
         if (request.type !== "Mutation") throw new Error("Expected mutation");
-        send(transition);
+        send({
+          ...transition,
+          endVersion: { ...transition.endVersion, ts: Long.fromNumber(20) },
+        });
+        await vi.waitFor(() =>
+          expect(client.getMaxObservedTimestamp()?.toString()).toBe("20"),
+        );
+        close();
+        await receive();
+        await receive();
+        expect(await receive()).toMatchObject({
+          type: "Mutation",
+          requestId: request.requestId,
+        });
         send({
           type: "MutationResponse",
           requestId: request.requestId,
@@ -555,21 +646,17 @@ describe("payload-free mutation tracing", () => {
           logLines: [],
         });
         await vi.waitFor(() =>
-          expect(events.at(-1)?.phase).toBe("response_received"),
+          expect(events.at(-1)).toMatchObject({
+            phase: "response_received",
+            alreadyApplied: false,
+          }),
         );
         expect(client.connectionState().inflightMutations).toBe(1);
         expect(
-          events.some((event) => event.phase === "transition_received"),
+          events.some((event) => event.phase === "request_promise_resolved"),
         ).toBe(false);
-        send({
-          ...transition,
-          startVersion: transition.endVersion,
-          endVersion: { ...transition.endVersion, ts: Long.fromNumber(20) },
-        });
+        send(transition);
         await expect(result).resolves.toBe("created");
-        expect(
-          events.filter((event) => event.phase === "transition_received"),
-        ).toHaveLength(1);
       } finally {
         await client.close();
       }
@@ -686,9 +773,9 @@ describe("payload-free mutation tracing", () => {
     });
   });
 
-  test.each([true, false])(
-    "listener errors preserve request settlement and receipt evidence (success: %s)",
-    async (success) => {
+  test.each(["transition", "already_applied", "failure"] as const)(
+    "listener errors preserve request settlement and receipt evidence (%s)",
+    async (completion) => {
       await withInMemoryWebSocket(async ({ address, receive, send }) => {
         let transport: WebSocket | undefined;
         class CapturedWebSocket extends nodeWebSocket {
@@ -698,11 +785,13 @@ describe("payload-free mutation tracing", () => {
           }
         }
         const failure = new Error("existing listener failure");
+        const success = completion !== "failure";
+        let throwOnTransition = false;
         const events: MutationTraceEvent[] = [];
         const client = new BaseConvexClient(
           address,
           () => {
-            throw failure;
+            if (throwOnTransition) throw failure;
           },
           {
             ...options,
@@ -718,7 +807,12 @@ describe("payload-free mutation tracing", () => {
           const result = client.mutation("messages:create", {});
           const request = await receive();
           if (request.type !== "Mutation") throw new Error("Expected mutation");
-          if (success) {
+          if (completion === "already_applied") {
+            send(transition);
+            await vi.waitFor(() =>
+              expect(client.getMaxObservedTimestamp()?.toString()).toBe("10"),
+            );
+          } else if (success) {
             send({
               type: "MutationResponse",
               requestId: request.requestId,
@@ -738,6 +832,7 @@ describe("payload-free mutation tracing", () => {
             throw new Error("Expected active transport");
           const socket = transport;
           const onMessage = transport.onmessage;
+          throwOnTransition = true;
           // Invoke the installed receive handler directly only to capture its existing
           // thrown listener error; request/transition processing remains real SDK code.
           expect(() =>
@@ -745,15 +840,24 @@ describe("payload-free mutation tracing", () => {
               socket,
               new MessageEvent("message", {
                 data: encodeServerMessage(
-                  success
+                  completion === "transition"
                     ? transition
-                    : {
-                        type: "MutationResponse",
-                        requestId: request.requestId,
-                        success: false,
-                        result: "application failed",
-                        logLines: [],
-                      },
+                    : success
+                      ? {
+                          type: "MutationResponse",
+                          requestId: request.requestId,
+                          success: true,
+                          ts: Long.fromNumber(10),
+                          result: "created",
+                          logLines: [],
+                        }
+                      : {
+                          type: "MutationResponse",
+                          requestId: request.requestId,
+                          success: false,
+                          result: "application failed",
+                          logLines: [],
+                        },
                 ),
               }),
             ),
@@ -766,6 +870,9 @@ describe("payload-free mutation tracing", () => {
             "response_received",
             "request_promise_resolved",
           ]);
+          expect(events[2]).toMatchObject({
+            alreadyApplied: completion === "already_applied",
+          });
         } finally {
           await client.close();
         }
