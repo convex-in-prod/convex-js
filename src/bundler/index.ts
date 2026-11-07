@@ -17,6 +17,10 @@ import {
 } from "./external.js";
 import { innerEsbuild, isEsbuildBuildError } from "./debugBundle.js";
 import { contextReuseGroups } from "./contextReuseGroups.js";
+import {
+  DEFINITION_FILENAME_JS,
+  DEFINITION_FILENAME_TS,
+} from "../cli/lib/components/constants.js";
 export { nodeFs, RecordingFs } from "./fs.js";
 export type { Filesystem } from "./fs.js";
 
@@ -689,8 +693,9 @@ export async function entryPoints(
   // Don't deploy directories in convex/ that define components
   // as this leads to double-deploying.
   const looksLikeNestedComponent = (dirPath: string): boolean => {
-    const config = path.join(dirPath, "convex.config.ts");
-    const isComponentDefinition = ctx.fs.exists(config);
+    const isComponentDefinition =
+      ctx.fs.exists(path.join(dirPath, DEFINITION_FILENAME_TS)) ||
+      ctx.fs.exists(path.join(dirPath, DEFINITION_FILENAME_JS));
     if (isComponentDefinition) {
       logVerbose(chalkStderr.yellow(`Skipping component directory ${dirPath}`));
     }
