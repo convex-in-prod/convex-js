@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Tue, 27 Oct 2026 03:31:36 +0800
-Subject: [PATCH 14/15] browser: expose payload-free mutation phase
+Subject: [PATCH 14/16] browser: expose payload-free mutation phase
  observations
 
 Add an opt-in observer for mutation enqueue, possible send, response,

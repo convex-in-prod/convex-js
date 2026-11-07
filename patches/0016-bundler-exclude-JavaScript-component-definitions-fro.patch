@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Sat, 7 Nov 2026 23:22:13 +0800
+Subject: [PATCH 16/16] bundler: exclude JavaScript component definitions from
+ root entries
+
+Treat convex.config.js as a component boundary alongside convex.config.ts.
+Otherwise root entry discovery descends into JavaScript-defined component
+directories and deploys their functions again as root routes.
+
+Use the shared definition filenames and cover both extensions, including
+component-generated files and root configuration files.
+---
+ src/bundler/index.test.ts | 35 +++++++++++++++++++++++++++++++++++
+ src/bundler/index.ts      |  9 +++++++--
+ 2 files changed, 42 insertions(+), 2 deletions(-)
+
+diff --git a/src/bundler/index.test.ts b/src/bundler/index.test.ts
+index 5506beb91a83daf7d34c9dd7baa25a20af80d6d5..0257e29d80dcc38b2b452882a053a07df3bbb6bd 100644
+--- a/src/bundler/index.test.ts
++++ b/src/bundler/index.test.ts
+@@ -6,6 +6,7 @@ import {
+   Bundle,
+   BundleHash,
+   bundle,
++  entryPoints,
+   entryPointsByEnvironment,
+ } from "./index.js";
+ import { hash, partitionModulesByChanges } from "../cli/lib/components.js";
+@@ -24,6 +25,40 @@ function testContext(): Context {
+   };
+ }
+ 
++test.each(["ts", "js"])(
++  "root entry points exclude components defined by convex.config.%s",
++  async (extension) => {
++    await withTmpDir(async (tmpDir) => {
++      const rootModulePath = path.join(tmpDir.path, "queries.ts");
++      nodeFs.writeUtf8File(rootModulePath, "export const read = 1;\n");
++      nodeFs.writeUtf8File(
++        path.join(tmpDir.path, `convex.config.${extension}`),
++        "export default {};\n",
++      );
++      const componentDir = path.join(tmpDir.path, "child");
++      nodeFs.mkdir(componentDir);
++      nodeFs.writeUtf8File(
++        path.join(componentDir, `convex.config.${extension}`),
++        "export default {};\n",
++      );
++      nodeFs.writeUtf8File(
++        path.join(componentDir, "queries.ts"),
++        "export const read = 2;\n",
++      );
++      const generatedDir = path.join(componentDir, "_generated");
++      nodeFs.mkdir(generatedDir);
++      nodeFs.writeUtf8File(
++        path.join(generatedDir, "api.js"),
++        "export const api = {};\n",
++      );
++
++      expect(await entryPoints(testContext(), tmpDir.path)).toEqual([
++        rootModulePath,
++      ]);
++    });
++  },
++);
++
+ test("Node pool directives require Node and a valid non-default name", async () => {
+   await withTmpDir(async (tmpDir) => {
+     const modulePath = path.join(tmpDir.path, "consumer.ts");
+diff --git a/src/bundler/index.ts b/src/bundler/index.ts
+index 086505b8ea1af2c6828215d32f1979a48be6a03a..8e3ff29f05b771605c0c0a2043edeb985eadc6c3 100644
+--- a/src/bundler/index.ts
++++ b/src/bundler/index.ts
+@@ -17,6 +17,10 @@ import {
+ } from "./external.js";
+ import { innerEsbuild, isEsbuildBuildError } from "./debugBundle.js";
+ import { contextReuseGroups } from "./contextReuseGroups.js";
++import {
++  DEFINITION_FILENAME_JS,
++  DEFINITION_FILENAME_TS,
++} from "../cli/lib/components/constants.js";
+ export { nodeFs, RecordingFs } from "./fs.js";
+ export type { Filesystem } from "./fs.js";
+ 
+@@ -689,8 +693,9 @@ export async function entryPoints(
+   // Don't deploy directories in convex/ that define components
+   // as this leads to double-deploying.
+   const looksLikeNestedComponent = (dirPath: string): boolean => {
+-    const config = path.join(dirPath, "convex.config.ts");
+-    const isComponentDefinition = ctx.fs.exists(config);
++    const isComponentDefinition =
++      ctx.fs.exists(path.join(dirPath, DEFINITION_FILENAME_TS)) ||
++      ctx.fs.exists(path.join(dirPath, DEFINITION_FILENAME_JS));
+     if (isComponentDefinition) {
+       logVerbose(chalkStderr.yellow(`Skipping component directory ${dirPath}`));
+     }

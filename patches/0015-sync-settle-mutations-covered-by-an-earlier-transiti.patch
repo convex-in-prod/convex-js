@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Tue, 3 Nov 2026 01:32:15 +0800
-Subject: [PATCH 15/15] sync: settle mutations covered by an earlier transition
+Subject: [PATCH 15/16] sync: settle mutations covered by an earlier transition
 
 A covering query transition can arrive before its mutation response. The
 request manager previously waited for another transition even when the
@@ -34,10 +34,10 @@ focused ESLint, and the full package build also pass.
  create mode 100644 src/browser/sync/mutation_settlement.test.ts
 
 diff --git a/patches/README.md b/patches/README.md
-index fd5f7dc3c6fe853f47dd7f1ca4f83318be7436d4..f402b673f444516d09736c906d8a84e4eff31b5c 100644
+index ed18f43af3506ebd9e563d9ef0bf7eb411a36c42..3e78086cf41298363c1b4b99f0096e8cc3968451 100644
 --- a/patches/README.md
 +++ b/patches/README.md
-@@ -123,6 +123,20 @@ This change is derived from
+@@ -124,6 +124,20 @@ This change is derived from
  [convex/convex-js PR 170](https://github.com/convex/convex-js/pull/170). Remove
  the local commit when upstream contains equivalent behavior.
  

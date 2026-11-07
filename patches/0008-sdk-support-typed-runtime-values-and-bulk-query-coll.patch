@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 30 Sep 2026 01:02:07 +0800
-Subject: [PATCH 08/15] sdk: support typed runtime values and bulk query
+Subject: [PATCH 08/16] sdk: support typed runtime values and bulk query
  collection
 
 Use the runtime capability boundary for bulk collection, owned JSON values and typed syscall arguments and results. Keep ordinary serialized syscalls when capabilities are absent and preserve value ownership across query, database, storage, metadata, scheduler and registration adapters. Include focused owned-value regressions.
@@ -18,13 +18,19 @@ Retain mutation-specific auth in both serialized and typed invocation entry
 points. JWT signing keeps its ordinary JSON syscall even when identity reads
 use the typed boundary, which has no signing opcode. Cover this combination
 through both mutation entry points and both identity transports.
+
+Preserve the original async syscall rejection as a non-enumerable cause when
+adding SDK stack context. Keep structured error data and class reconstruction
+unchanged so runtimes can trace terminal rejections back to their host
+operation. Cover typed, value, object and JSON transports through both SDK
+registration entry points.
 ---
  src/server/components/index.ts                |  12 +-
  src/server/impl/actions_impl.ts               |   9 +-
  src/server/impl/authentication_impl.ts        |  17 +-
- src/server/impl/database_impl.ts              |  94 ++++----
- src/server/impl/filter_builder_impl.ts        | 167 ++++++++++----
- src/server/impl/index_range_builder_impl.ts   | 105 ++++-----
+ src/server/impl/database_impl.ts              |  94 +++----
+ src/server/impl/filter_builder_impl.ts        | 167 +++++++++----
+ src/server/impl/index_range_builder_impl.ts   | 105 ++++----
  src/server/impl/meta_impl.ts                  |  48 ++--
  src/server/impl/query_builder.test.ts         | 141 +++++++++++
  src/server/impl/query_impl.ts                 | 126 +++++++---
@@ -33,15 +39,17 @@ through both mutation entry points and both identity transports.
  src/server/impl/scheduler_impl.ts             |  62 ++++-
  src/server/impl/search_filter_builder_impl.ts |  51 ++--
  src/server/impl/storage_impl.ts               |  50 ++--
- src/server/impl/syscall.ts                    | 218 +++++++++++++++++-
+ src/server/impl/syscall.test.ts               |  69 ++++++
+ src/server/impl/syscall.ts                    | 232 +++++++++++++++++-
  src/server/impl/value_syscall.test.ts         | 151 ++++++++++++
  src/server/registration.ts                    |   6 +
  src/values/validators.ts                      |   7 +-
  src/values/value.ts                           |  51 +++-
  src/values/value_owned.test.ts                |  47 ++++
- 20 files changed, 1185 insertions(+), 277 deletions(-)
+ 21 files changed, 1267 insertions(+), 278 deletions(-)
  create mode 100644 src/server/impl/query_builder.test.ts
  create mode 100644 src/server/impl/query_value.ts
+ create mode 100644 src/server/impl/syscall.test.ts
  create mode 100644 src/server/impl/value_syscall.test.ts
  create mode 100644 src/values/value_owned.test.ts
 
@@ -1696,8 +1704,83 @@ index 28fa6b724ba92a70fd0bed8aec0753d9ef421387..82381f4a1e1a515d28cb9621a3afe2ad
      },
      store: async (blob: Blob, options?: { sha256?: string }) => {
        if (!(blob instanceof Blob)) {
+diff --git a/src/server/impl/syscall.test.ts b/src/server/impl/syscall.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e39c8fcaa9239052a3218822db7faa7a57e6342a
+--- /dev/null
++++ b/src/server/impl/syscall.test.ts
+@@ -0,0 +1,69 @@
++import { afterEach, expect, test, vi } from "vitest";
++import { ConvexError, convexToJson } from "../../values/index.js";
++import { makeFunctionReference } from "../api.js";
++import { mutationGeneric } from "./registration_impl.js";
++
++afterEach(() => vi.unstubAllGlobals());
++
++for (const mode of ["typed", "value", "object", "json"] as const) {
++  test.each([undefined, null, false, { count: 7n }])(
++    `${mode} syscall errors retain their cause through registration (data: %s)`,
++    async (data) => {
++      const original = Object.assign(new Error("nested function failed"), {
++        data:
++          data === undefined || mode === "typed" || mode === "value"
++            ? data
++            : convexToJson(data),
++      });
++      const reject = vi.fn(() => Promise.reject(original));
++      vi.stubGlobal("Convex", {
++        asyncSyscall: reject,
++        ...(mode === "typed" ? { asyncSyscallTyped: reject } : {}),
++        ...(mode === "value" ? { asyncSyscallValueArgs: reject } : {}),
++        ...(mode === "object" ? { asyncSyscallObjectArgs: reject } : {}),
++      });
++      const mutation = mutationGeneric(async (ctx) => {
++        try {
++          return await ctx.runQuery(
++            makeFunctionReference<"query">("child:read"),
++            {},
++          );
++        } catch (error) {
++          if (data !== undefined) {
++            expect(error).toBeInstanceOf(ConvexError);
++            expect(error).toHaveProperty("data", data);
++          }
++          throw error;
++        }
++      });
++      for (const invocation of [
++        () => mutation.invokeMutationValue({}),
++        () => mutation.invokeMutation("[{}]"),
++      ]) {
++        await expect(invocation()).rejects.toSatisfy((error: Error) => {
++          expect(error).toBeInstanceOf(Error);
++          expect(error).not.toBe(original);
++          expect(error.message).toBe(original.message);
++          expect(error.cause).toBe(original);
++          expect(Object.getOwnPropertyDescriptor(error, "cause")).toEqual({
++            value: original,
++            configurable: true,
++            enumerable: false,
++            writable: true,
++          });
++          if (data !== undefined) {
++            expect(error).toBeInstanceOf(ConvexError);
++            expect(error).toHaveProperty(
++              "data",
++              JSON.stringify(convexToJson(data)),
++            );
++          } else {
++            expect(error).not.toBeInstanceOf(ConvexError);
++          }
++          return true;
++        });
++      }
++      expect(reject).toHaveBeenCalledTimes(2);
++    },
++  );
++}
 diff --git a/src/server/impl/syscall.ts b/src/server/impl/syscall.ts
-index f3d23278a5f7eda002e9dcbb4a3645067506b6ad..7bbb64fbe8144dbfce26b297d431f2dad3745dbf 100644
+index f3d23278a5f7eda002e9dcbb4a3645067506b6ad..46f4facb2e1d7864d0d22eb26aa697dbbf148951 100644
 --- a/src/server/impl/syscall.ts
 +++ b/src/server/impl/syscall.ts
 @@ -4,12 +4,26 @@ import { jsonToConvex } from "../../values/value.js";
@@ -1742,7 +1825,7 @@ index f3d23278a5f7eda002e9dcbb4a3645067506b6ad..7bbb64fbe8144dbfce26b297d431f2da
    return JSON.parse(resultStr);
  }
  
-@@ -37,7 +54,10 @@ export async function performAsyncSyscall(
+@@ -37,23 +54,226 @@ export async function performAsyncSyscall(
    }
    let resultStr;
    try {
@@ -1754,7 +1837,23 @@ index f3d23278a5f7eda002e9dcbb4a3645067506b6ad..7bbb64fbe8144dbfce26b297d431f2da
    } catch (e: any) {
      // Rethrow the exception to attach stack trace starting from here.
      // If the error came from JS it will include its own stack trace in the message.
-@@ -54,6 +74,194 @@ export async function performAsyncSyscall(
+     // If it came from Rust it won't.
++    // Preserve the cause so the runtime can associate it with its host operation.
+ 
+     // This only happens if we're propagating ConvexErrors
+     if (e.data !== undefined) {
+       const rethrown = new ConvexError(e.message);
+       rethrown.data = jsonToConvex(e.data);
++      Object.defineProperty(rethrown, "cause", {
++        value: e,
++        configurable: true,
++        writable: true,
++      });
+       throw rethrown;
+     }
+-    throw new Error(e.message);
++    throw new Error(e.message, { cause: e });
+   }
    return JSON.parse(resultStr);
  }
  
@@ -1923,9 +2022,15 @@ index f3d23278a5f7eda002e9dcbb4a3645067506b6ad..7bbb64fbe8144dbfce26b297d431f2da
 +        ConstructorParameters<typeof ConvexError>[0]
 +      >(e.message);
 +      rethrown.data = e.data as ConstructorParameters<typeof ConvexError>[0];
++      // Retain host-operation identity across SDK error reconstruction.
++      Object.defineProperty(rethrown, "cause", {
++        value: e,
++        configurable: true,
++        writable: true,
++      });
 +      throw rethrown;
 +    }
-+    throw new Error(e.message);
++    throw new Error(e.message, { cause: e });
 +  }
 +}
 +
