@@ -6,6 +6,7 @@ import {
   Bundle,
   BundleHash,
   bundle,
+  entryPoints,
   entryPointsByEnvironment,
 } from "./index.js";
 import { hash, partitionModulesByChanges } from "../cli/lib/components.js";
@@ -23,6 +24,40 @@ function testContext(): Context {
     _updateBigBrainAuth: () => {},
   };
 }
+
+test.each(["ts", "js"])(
+  "root entry points exclude components defined by convex.config.%s",
+  async (extension) => {
+    await withTmpDir(async (tmpDir) => {
+      const rootModulePath = path.join(tmpDir.path, "queries.ts");
+      nodeFs.writeUtf8File(rootModulePath, "export const read = 1;\n");
+      nodeFs.writeUtf8File(
+        path.join(tmpDir.path, `convex.config.${extension}`),
+        "export default {};\n",
+      );
+      const componentDir = path.join(tmpDir.path, "child");
+      nodeFs.mkdir(componentDir);
+      nodeFs.writeUtf8File(
+        path.join(componentDir, `convex.config.${extension}`),
+        "export default {};\n",
+      );
+      nodeFs.writeUtf8File(
+        path.join(componentDir, "queries.ts"),
+        "export const read = 2;\n",
+      );
+      const generatedDir = path.join(componentDir, "_generated");
+      nodeFs.mkdir(generatedDir);
+      nodeFs.writeUtf8File(
+        path.join(generatedDir, "api.js"),
+        "export const api = {};\n",
+      );
+
+      expect(await entryPoints(testContext(), tmpDir.path)).toEqual([
+        rootModulePath,
+      ]);
+    });
+  },
+);
 
 test("Node pool directives require Node and a valid non-default name", async () => {
   await withTmpDir(async (tmpDir) => {
