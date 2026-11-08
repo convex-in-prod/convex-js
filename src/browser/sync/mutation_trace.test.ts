@@ -106,10 +106,16 @@ describe("payload-free mutation tracing", () => {
           phase: "send_attempt",
           mightBeSent: false,
         });
-        await receive();
+        const connect = await receive();
+        if (connect.type !== "Connect") throw new Error("Expected connect");
         await receive();
         const request = await receive();
         if (request.type !== "Mutation") throw new Error("Expected mutation");
+        expect(events[0]).toMatchObject({
+          phase: "enqueued",
+          webSocketSessionId: connect.sessionId,
+          requestId: request.requestId,
+        });
         send({
           type: "MutationResponse",
           requestId: request.requestId,
@@ -122,7 +128,10 @@ describe("payload-free mutation tracing", () => {
           expect(events.at(-1)?.phase).toBe("response_received"),
         );
         close();
-        await receive();
+        expect(await receive()).toMatchObject({
+          type: "Connect",
+          sessionId: connect.sessionId,
+        });
         await receive();
         expect(await receive()).toMatchObject({
           type: "Mutation",
@@ -193,6 +202,86 @@ describe("payload-free mutation tracing", () => {
         ]);
         expect(events.at(-1)).toMatchObject({ success: false });
         expect(JSON.stringify(events)).not.toContain("private");
+      } finally {
+        await client.close();
+      }
+    });
+  });
+
+  test("separates socket callback, JSON decode, and response handling clocks", async () => {
+    await withInMemoryWebSocket(async ({ address, receive, send }) => {
+      let transport: WebSocket | undefined;
+      class CapturedWebSocket extends nodeWebSocket {
+        constructor(...args: ConstructorParameters<typeof nodeWebSocket>) {
+          super(...args);
+          transport = this;
+        }
+      }
+      const events: MutationTraceEvent[] = [];
+      const client = new BaseConvexClient(address, () => {}, {
+        ...options,
+        webSocketConstructor: CapturedWebSocket,
+        onMutationTrace: (event) => {
+          events.push(event);
+        },
+      });
+      try {
+        await receive();
+        await receive();
+        // Applying the commit before the response makes response handling run
+        // the existing settlement/listener path, without a new transition.
+        send(transition);
+        await vi.waitFor(() =>
+          expect(client.getMaxObservedTimestamp()?.toString()).toBe("10"),
+        );
+        const result = client.mutation("messages:create", {});
+        const request = await receive();
+        if (request.type !== "Mutation") throw new Error("Expected mutation");
+        const data = encodeServerMessage({
+          type: "MutationResponse",
+          requestId: request.requestId,
+          success: true,
+          ts: Long.fromNumber(10),
+          result: "created",
+          logLines: [],
+        });
+        let now = performance.now();
+        const callbackAt = now;
+        const originalParse = JSON.parse;
+        const clock = vi
+          .spyOn(performance, "now")
+          .mockImplementation(() => now);
+        const parse = vi
+          .spyOn(JSON, "parse")
+          .mockImplementation((text, reviver) => {
+            const value = originalParse(text, reviver);
+            if (text === data) now += 25;
+            return value;
+          });
+        client.addOnTransitionHandler(() => {
+          now += 45;
+        });
+        try {
+          if (transport?.onmessage === null || transport === undefined)
+            throw new Error("Expected active transport");
+          transport.onmessage.call(
+            transport,
+            new MessageEvent("message", { data }),
+          );
+          await expect(result).resolves.toBe("created");
+          expect(
+            events.find((event) => event.phase === "response_received"),
+          ).toMatchObject({
+            socketCallbackStartedAt: callbackAt,
+            socketMessageDecodedAt: callbackAt + 25,
+            monotonicTime: callbackAt + 25,
+            responseHandledAt: callbackAt + 70,
+            alreadyApplied: true,
+          });
+        } finally {
+          parse.mockRestore();
+          clock.mockRestore();
+        }
       } finally {
         await client.close();
       }
@@ -773,9 +862,15 @@ describe("payload-free mutation tracing", () => {
     });
   });
 
-  test.each(["transition", "already_applied", "failure"] as const)(
-    "listener errors preserve request settlement and receipt evidence (%s)",
-    async (completion) => {
+  test.each([
+    ["transition", false],
+    ["already_applied", false],
+    ["failure", false],
+    ["already_applied", true],
+    ["failure", true],
+  ] as const)(
+    "listener errors preserve request settlement (%s, handling clock fails: %s)",
+    async (completion, failHandlingClock) => {
       await withInMemoryWebSocket(async ({ address, receive, send }) => {
         let transport: WebSocket | undefined;
         class CapturedWebSocket extends nodeWebSocket {
@@ -788,10 +883,20 @@ describe("payload-free mutation tracing", () => {
         const success = completion !== "failure";
         let throwOnTransition = false;
         const events: MutationTraceEvent[] = [];
+        const clock = vi.spyOn(performance, "now");
         const client = new BaseConvexClient(
           address,
           () => {
-            if (throwOnTransition) throw failure;
+            if (throwOnTransition) {
+              if (failHandlingClock) {
+                // The next read runs in the response's finally block, while
+                // the original listener exception is already unwinding.
+                clock.mockImplementationOnce(() => {
+                  throw new Error("diagnostic handling clock failed");
+                });
+              }
+              throw failure;
+            }
           },
           {
             ...options,
@@ -864,16 +969,24 @@ describe("payload-free mutation tracing", () => {
           ).toThrow(failure);
           await settlement;
           expect(client.connectionState().inflightMutations).toBe(0);
-          expect(events.map((event) => event.phase)).toEqual([
-            "enqueued",
-            "send_attempt",
-            "response_received",
-            "request_promise_resolved",
-          ]);
-          expect(events[2]).toMatchObject({
-            alreadyApplied: completion === "already_applied",
-          });
+          expect(events.map((event) => event.phase)).toEqual(
+            failHandlingClock
+              ? ["enqueued", "send_attempt", "tracing_disabled"]
+              : [
+                  "enqueued",
+                  "send_attempt",
+                  "response_received",
+                  "request_promise_resolved",
+                ],
+          );
+          if (!failHandlingClock) {
+            expect(events[2]).toMatchObject({
+              alreadyApplied: completion === "already_applied",
+              responseHandledAt: expect.any(Number),
+            });
+          }
         } finally {
+          clock.mockRestore();
           await client.close();
         }
       });

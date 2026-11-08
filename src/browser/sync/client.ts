@@ -89,7 +89,8 @@ export type ServerPressureHandler = (
 /**
  * Payload-free mutation lifecycle observations. Times use the monotonic
  * `performance.now()` clock of this client process. Request IDs are local to
- * this client and are not backend execution request IDs.
+ * this client. The protocol session ID on enqueue allows observers to derive
+ * the backend request ID without including arguments or authentication state.
  *
  * @public
  */
@@ -100,6 +101,10 @@ type MutationTracePhase =
       functionName: string;
       mutationId: number;
       attempt: number;
+      // The client-generated sync-protocol UUID, not an authentication session.
+      // Backend request ID: first 16 hex digits of SHA256(`${sessionId}|${requestId}`).
+      // Optional so observers can also accept events emitted by older SDKs.
+      webSocketSessionId?: string;
     }
   | {
       phase: "send_attempt";
@@ -114,6 +119,11 @@ type MutationTracePhase =
       // This response settled a success against query state already applied on
       // this connection. No new transition_received/transition_applied is emitted.
       alreadyApplied: boolean;
+      // Optional for observers consuming older SDK events. All clocks use
+      // performance.now(); callback entry does not measure network arrival.
+      socketCallbackStartedAt?: number;
+      socketMessageDecodedAt?: number;
+      responseHandledAt?: number;
     }
   | { phase: "transition_received" | "transition_applied"; requestId: number }
   | {
@@ -574,7 +584,11 @@ export class BaseConvexClient {
           }
           this.sendPendingRequests(this.requestManager.resume(), "resume");
         },
-        onMessage: (serverMessage: ServerMessage) => {
+        mutationTraceTime:
+          this.onMutationTrace === undefined
+            ? undefined
+            : () => this.mutationTraceTime(),
+        onMessage: (serverMessage: ServerMessage, timing) => {
           // Metrics events grow linearly with reconnection attempts so this
           // conditional prevents n^2 metrics reporting.
           if (!this.firstMessageReceived) {
@@ -691,6 +705,7 @@ export class BaseConvexClient {
                   );
                 }
               } finally {
+                const responseHandledAt = this.mutationTraceTime();
                 // A pre-existing logger/listener error does not erase receipt evidence
                 // or get replaced by an optional diagnostic callback failure.
                 this.traceMutation(
@@ -699,6 +714,10 @@ export class BaseConvexClient {
                     requestId: serverMessage.requestId,
                     success: serverMessage.success,
                     alreadyApplied,
+                    ...timing,
+                    ...(responseHandledAt === undefined
+                      ? {}
+                      : { responseHandledAt }),
                   },
                   receivedAt,
                 );
@@ -1368,6 +1387,7 @@ export class BaseConvexClient {
         functionName: udfPath,
         mutationId: traceContext?.mutationId ?? requestId,
         attempt: traceContext?.attempt ?? 1,
+        webSocketSessionId: this._sessionId,
       },
       enqueuedAt,
     );

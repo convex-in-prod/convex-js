@@ -11,6 +11,12 @@ import {
 const CLOSE_NORMAL = 1000;
 const CLOSE_GOING_AWAY = 1001;
 const CLOSE_NO_STATUS = 1005;
+
+/** Diagnostic clocks for an unchunked mutation response, before client handling. */
+export type MutationResponseTiming = {
+  socketCallbackStartedAt: number;
+  socketMessageDecodedAt: number;
+};
 /** Convex-specific close code representing a "404 Not Found".
  * The edge Onramp accepts websocket upgrades before confirming that the
  * intended destination exists, so this code is sent once we've discovered that
@@ -202,7 +208,11 @@ export class WebSocketManager {
   private readonly uri: string;
   private readonly onOpen: (reconnectMetadata: ReconnectMetadata) => void;
   private readonly onResume: () => void;
-  private readonly onMessage: (message: ServerMessage) => OnMessageResponse;
+  private readonly onMessage: (
+    message: ServerMessage,
+    timing?: MutationResponseTiming,
+  ) => OnMessageResponse;
+  private readonly mutationTraceTime: (() => number | undefined) | undefined;
   private readonly webSocketConstructor: typeof WebSocket;
   private readonly logger: Logger;
   private readonly onServerDisconnectError:
@@ -214,7 +224,11 @@ export class WebSocketManager {
     callbacks: {
       onOpen: (reconnectMetadata: ReconnectMetadata) => void;
       onResume: () => void;
-      onMessage: (message: ServerMessage) => OnMessageResponse;
+      onMessage: (
+        message: ServerMessage,
+        timing?: MutationResponseTiming,
+      ) => OnMessageResponse;
+      mutationTraceTime?: (() => number | undefined) | undefined;
       onServerDisconnectError?: ((message: string) => void) | undefined;
     },
     webSocketConstructor: typeof WebSocket,
@@ -223,6 +237,7 @@ export class WebSocketManager {
     private readonly debug: boolean,
   ) {
     this.webSocketConstructor = webSocketConstructor;
+    this.mutationTraceTime = callbacks.mutationTraceTime;
     this.socket = { state: "disconnected" };
     this.connectionCount = 0;
     this.lastCloseReason = "InitialConnect";
@@ -432,9 +447,17 @@ export class WebSocketManager {
       }
     };
     ws.onmessage = (message) => {
+      // This is JS callback entry, not network arrival: a busy page or native
+      // dialog may already have delayed delivery. Use the client's guarded
+      // performance.now clock so optional diagnostics cannot break reception.
+      const socketCallbackStartedAt = this.mutationTraceTime?.();
       this.resetServerInactivityTimeout();
       const messageLength = message.data.length;
       let serverMessage = parseServerMessage(JSON.parse(message.data));
+      const socketMessageDecodedAt =
+        serverMessage.type === "MutationResponse"
+          ? this.mutationTraceTime?.()
+          : undefined;
       this._logVerbose(`received ws message with type ${serverMessage.type}`);
 
       // Ping's only purpose is to reset the server inactivity timer.
@@ -467,7 +490,13 @@ export class WebSocketManager {
           transition: serverMessage,
         });
       }
-      const response = this.onMessage(serverMessage);
+      const response = this.onMessage(
+        serverMessage,
+        socketCallbackStartedAt !== undefined &&
+          socketMessageDecodedAt !== undefined
+          ? { socketCallbackStartedAt, socketMessageDecodedAt }
+          : undefined,
+      );
       if (response.hasSyncedPastLastReconnect) {
         // Reset backoff to 0 once all outstanding requests are complete.
         this.retries = 0;
