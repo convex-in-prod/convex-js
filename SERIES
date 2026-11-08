@@ -15,3 +15,5 @@
 0014-browser-expose-payload-free-mutation-phase-observati.patch eab10d42f00a805bbc62459914dd7fb182c9b852
 0015-sync-settle-mutations-covered-by-an-earlier-transiti.patch c1d7c8040b980d36966699298c808a41332247c7
 0016-bundler-exclude-JavaScript-component-definitions-fro.patch 5f01b77b5f8b121b994fa53888b5c6cb78effcc4
+0017-browser-trace-mutation-socket-decoding-and-response-.patch 5346f9f94a0bd41926cc44d90421d079032cdb42
+0018-cli-accept-initialization-log-records.patch 817f40d57779e74deec18bc3caa1ad73743a8f8c

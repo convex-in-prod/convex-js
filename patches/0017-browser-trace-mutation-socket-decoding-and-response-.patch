@@ -1,0 +1,372 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Sun, 8 Nov 2026 16:04:04 +0800
+Subject: [PATCH 17/18] browser: trace mutation socket decoding and response
+ handling
+
+Include the sync-protocol session ID in enqueue observations so callers can correlate payload-free mutation traces with backend request IDs. Keep this identifier distinct from authentication state and preserve it across reconnects.
+
+Record socket callback entry, decoded mutation response, and completed response handling on the guarded monotonic clock. Preserve listener exceptions and mutation settlement if optional tracing fails. Cover the timing boundaries, reconnect identity, and failed-clock handling in mutation tracing tests.
+---
+ src/browser/sync/client.ts              |  24 +++-
+ src/browser/sync/mutation_trace.test.ts | 143 +++++++++++++++++++++---
+ src/browser/sync/web_socket_manager.ts  |  35 +++++-
+ 3 files changed, 182 insertions(+), 20 deletions(-)
+
+diff --git a/src/browser/sync/client.ts b/src/browser/sync/client.ts
+index 50ec103bd7538dde08bf78ae38fe437c2f2b2d8c..30016a845883f92b6a7e8e2dfa43ff9045628886 100644
+--- a/src/browser/sync/client.ts
++++ b/src/browser/sync/client.ts
+@@ -89,7 +89,8 @@ export type ServerPressureHandler = (
+ /**
+  * Payload-free mutation lifecycle observations. Times use the monotonic
+  * `performance.now()` clock of this client process. Request IDs are local to
+- * this client and are not backend execution request IDs.
++ * this client. The protocol session ID on enqueue allows observers to derive
++ * the backend request ID without including arguments or authentication state.
+  *
+  * @public
+  */
+@@ -100,6 +101,10 @@ type MutationTracePhase =
+       functionName: string;
+       mutationId: number;
+       attempt: number;
++      // The client-generated sync-protocol UUID, not an authentication session.
++      // Backend request ID: first 16 hex digits of SHA256(`${sessionId}|${requestId}`).
++      // Optional so observers can also accept events emitted by older SDKs.
++      webSocketSessionId?: string;
+     }
+   | {
+       phase: "send_attempt";
+@@ -114,6 +119,11 @@ type MutationTracePhase =
+       // This response settled a success against query state already applied on
+       // this connection. No new transition_received/transition_applied is emitted.
+       alreadyApplied: boolean;
++      // Optional for observers consuming older SDK events. All clocks use
++      // performance.now(); callback entry does not measure network arrival.
++      socketCallbackStartedAt?: number;
++      socketMessageDecodedAt?: number;
++      responseHandledAt?: number;
+     }
+   | { phase: "transition_received" | "transition_applied"; requestId: number }
+   | {
+@@ -574,7 +584,11 @@ export class BaseConvexClient {
+           }
+           this.sendPendingRequests(this.requestManager.resume(), "resume");
+         },
+-        onMessage: (serverMessage: ServerMessage) => {
++        mutationTraceTime:
++          this.onMutationTrace === undefined
++            ? undefined
++            : () => this.mutationTraceTime(),
++        onMessage: (serverMessage: ServerMessage, timing) => {
+           // Metrics events grow linearly with reconnection attempts so this
+           // conditional prevents n^2 metrics reporting.
+           if (!this.firstMessageReceived) {
+@@ -691,6 +705,7 @@ export class BaseConvexClient {
+                   );
+                 }
+               } finally {
++                const responseHandledAt = this.mutationTraceTime();
+                 // A pre-existing logger/listener error does not erase receipt evidence
+                 // or get replaced by an optional diagnostic callback failure.
+                 this.traceMutation(
+@@ -699,6 +714,10 @@ export class BaseConvexClient {
+                     requestId: serverMessage.requestId,
+                     success: serverMessage.success,
+                     alreadyApplied,
++                    ...timing,
++                    ...(responseHandledAt === undefined
++                      ? {}
++                      : { responseHandledAt }),
+                   },
+                   receivedAt,
+                 );
+@@ -1368,6 +1387,7 @@ export class BaseConvexClient {
+         functionName: udfPath,
+         mutationId: traceContext?.mutationId ?? requestId,
+         attempt: traceContext?.attempt ?? 1,
++        webSocketSessionId: this._sessionId,
+       },
+       enqueuedAt,
+     );
+diff --git a/src/browser/sync/mutation_trace.test.ts b/src/browser/sync/mutation_trace.test.ts
+index f0cb01ff72d26e58d788100bafccb453eff94283..b9fd9660080df3855c00701b40af47fe5fc10bf2 100644
+--- a/src/browser/sync/mutation_trace.test.ts
++++ b/src/browser/sync/mutation_trace.test.ts
+@@ -106,10 +106,16 @@ describe("payload-free mutation tracing", () => {
+           phase: "send_attempt",
+           mightBeSent: false,
+         });
+-        await receive();
++        const connect = await receive();
++        if (connect.type !== "Connect") throw new Error("Expected connect");
+         await receive();
+         const request = await receive();
+         if (request.type !== "Mutation") throw new Error("Expected mutation");
++        expect(events[0]).toMatchObject({
++          phase: "enqueued",
++          webSocketSessionId: connect.sessionId,
++          requestId: request.requestId,
++        });
+         send({
+           type: "MutationResponse",
+           requestId: request.requestId,
+@@ -122,7 +128,10 @@ describe("payload-free mutation tracing", () => {
+           expect(events.at(-1)?.phase).toBe("response_received"),
+         );
+         close();
+-        await receive();
++        expect(await receive()).toMatchObject({
++          type: "Connect",
++          sessionId: connect.sessionId,
++        });
+         await receive();
+         expect(await receive()).toMatchObject({
+           type: "Mutation",
+@@ -199,6 +208,86 @@ describe("payload-free mutation tracing", () => {
+     });
+   });
+ 
++  test("separates socket callback, JSON decode, and response handling clocks", async () => {
++    await withInMemoryWebSocket(async ({ address, receive, send }) => {
++      let transport: WebSocket | undefined;
++      class CapturedWebSocket extends nodeWebSocket {
++        constructor(...args: ConstructorParameters<typeof nodeWebSocket>) {
++          super(...args);
++          transport = this;
++        }
++      }
++      const events: MutationTraceEvent[] = [];
++      const client = new BaseConvexClient(address, () => {}, {
++        ...options,
++        webSocketConstructor: CapturedWebSocket,
++        onMutationTrace: (event) => {
++          events.push(event);
++        },
++      });
++      try {
++        await receive();
++        await receive();
++        // Applying the commit before the response makes response handling run
++        // the existing settlement/listener path, without a new transition.
++        send(transition);
++        await vi.waitFor(() =>
++          expect(client.getMaxObservedTimestamp()?.toString()).toBe("10"),
++        );
++        const result = client.mutation("messages:create", {});
++        const request = await receive();
++        if (request.type !== "Mutation") throw new Error("Expected mutation");
++        const data = encodeServerMessage({
++          type: "MutationResponse",
++          requestId: request.requestId,
++          success: true,
++          ts: Long.fromNumber(10),
++          result: "created",
++          logLines: [],
++        });
++        let now = performance.now();
++        const callbackAt = now;
++        const originalParse = JSON.parse;
++        const clock = vi
++          .spyOn(performance, "now")
++          .mockImplementation(() => now);
++        const parse = vi
++          .spyOn(JSON, "parse")
++          .mockImplementation((text, reviver) => {
++            const value = originalParse(text, reviver);
++            if (text === data) now += 25;
++            return value;
++          });
++        client.addOnTransitionHandler(() => {
++          now += 45;
++        });
++        try {
++          if (transport?.onmessage === null || transport === undefined)
++            throw new Error("Expected active transport");
++          transport.onmessage.call(
++            transport,
++            new MessageEvent("message", { data }),
++          );
++          await expect(result).resolves.toBe("created");
++          expect(
++            events.find((event) => event.phase === "response_received"),
++          ).toMatchObject({
++            socketCallbackStartedAt: callbackAt,
++            socketMessageDecodedAt: callbackAt + 25,
++            monotonicTime: callbackAt + 25,
++            responseHandledAt: callbackAt + 70,
++            alreadyApplied: true,
++          });
++        } finally {
++          parse.mockRestore();
++          clock.mockRestore();
++        }
++      } finally {
++        await client.close();
++      }
++    });
++  });
++
+   test.each(["throw", "reject"] as const)(
+     "observer %s cannot change mutation completion",
+     async (mode) => {
+@@ -773,9 +862,15 @@ describe("payload-free mutation tracing", () => {
+     });
+   });
+ 
+-  test.each(["transition", "already_applied", "failure"] as const)(
+-    "listener errors preserve request settlement and receipt evidence (%s)",
+-    async (completion) => {
++  test.each([
++    ["transition", false],
++    ["already_applied", false],
++    ["failure", false],
++    ["already_applied", true],
++    ["failure", true],
++  ] as const)(
++    "listener errors preserve request settlement (%s, handling clock fails: %s)",
++    async (completion, failHandlingClock) => {
+       await withInMemoryWebSocket(async ({ address, receive, send }) => {
+         let transport: WebSocket | undefined;
+         class CapturedWebSocket extends nodeWebSocket {
+@@ -788,10 +883,20 @@ describe("payload-free mutation tracing", () => {
+         const success = completion !== "failure";
+         let throwOnTransition = false;
+         const events: MutationTraceEvent[] = [];
++        const clock = vi.spyOn(performance, "now");
+         const client = new BaseConvexClient(
+           address,
+           () => {
+-            if (throwOnTransition) throw failure;
++            if (throwOnTransition) {
++              if (failHandlingClock) {
++                // The next read runs in the response's finally block, while
++                // the original listener exception is already unwinding.
++                clock.mockImplementationOnce(() => {
++                  throw new Error("diagnostic handling clock failed");
++                });
++              }
++              throw failure;
++            }
+           },
+           {
+             ...options,
+@@ -864,16 +969,24 @@ describe("payload-free mutation tracing", () => {
+           ).toThrow(failure);
+           await settlement;
+           expect(client.connectionState().inflightMutations).toBe(0);
+-          expect(events.map((event) => event.phase)).toEqual([
+-            "enqueued",
+-            "send_attempt",
+-            "response_received",
+-            "request_promise_resolved",
+-          ]);
+-          expect(events[2]).toMatchObject({
+-            alreadyApplied: completion === "already_applied",
+-          });
++          expect(events.map((event) => event.phase)).toEqual(
++            failHandlingClock
++              ? ["enqueued", "send_attempt", "tracing_disabled"]
++              : [
++                  "enqueued",
++                  "send_attempt",
++                  "response_received",
++                  "request_promise_resolved",
++                ],
++          );
++          if (!failHandlingClock) {
++            expect(events[2]).toMatchObject({
++              alreadyApplied: completion === "already_applied",
++              responseHandledAt: expect.any(Number),
++            });
++          }
+         } finally {
++          clock.mockRestore();
+           await client.close();
+         }
+       });
+diff --git a/src/browser/sync/web_socket_manager.ts b/src/browser/sync/web_socket_manager.ts
+index ce3f48cad845a5852b4408118f7770e8db034581..ac9950b33d2a1605f4af5969e20b4a195ef67e8e 100644
+--- a/src/browser/sync/web_socket_manager.ts
++++ b/src/browser/sync/web_socket_manager.ts
+@@ -11,6 +11,12 @@ import {
+ const CLOSE_NORMAL = 1000;
+ const CLOSE_GOING_AWAY = 1001;
+ const CLOSE_NO_STATUS = 1005;
++
++/** Diagnostic clocks for an unchunked mutation response, before client handling. */
++export type MutationResponseTiming = {
++  socketCallbackStartedAt: number;
++  socketMessageDecodedAt: number;
++};
+ /** Convex-specific close code representing a "404 Not Found".
+  * The edge Onramp accepts websocket upgrades before confirming that the
+  * intended destination exists, so this code is sent once we've discovered that
+@@ -202,7 +208,11 @@ export class WebSocketManager {
+   private readonly uri: string;
+   private readonly onOpen: (reconnectMetadata: ReconnectMetadata) => void;
+   private readonly onResume: () => void;
+-  private readonly onMessage: (message: ServerMessage) => OnMessageResponse;
++  private readonly onMessage: (
++    message: ServerMessage,
++    timing?: MutationResponseTiming,
++  ) => OnMessageResponse;
++  private readonly mutationTraceTime: (() => number | undefined) | undefined;
+   private readonly webSocketConstructor: typeof WebSocket;
+   private readonly logger: Logger;
+   private readonly onServerDisconnectError:
+@@ -214,7 +224,11 @@ export class WebSocketManager {
+     callbacks: {
+       onOpen: (reconnectMetadata: ReconnectMetadata) => void;
+       onResume: () => void;
+-      onMessage: (message: ServerMessage) => OnMessageResponse;
++      onMessage: (
++        message: ServerMessage,
++        timing?: MutationResponseTiming,
++      ) => OnMessageResponse;
++      mutationTraceTime?: (() => number | undefined) | undefined;
+       onServerDisconnectError?: ((message: string) => void) | undefined;
+     },
+     webSocketConstructor: typeof WebSocket,
+@@ -223,6 +237,7 @@ export class WebSocketManager {
+     private readonly debug: boolean,
+   ) {
+     this.webSocketConstructor = webSocketConstructor;
++    this.mutationTraceTime = callbacks.mutationTraceTime;
+     this.socket = { state: "disconnected" };
+     this.connectionCount = 0;
+     this.lastCloseReason = "InitialConnect";
+@@ -432,9 +447,17 @@ export class WebSocketManager {
+       }
+     };
+     ws.onmessage = (message) => {
++      // This is JS callback entry, not network arrival: a busy page or native
++      // dialog may already have delayed delivery. Use the client's guarded
++      // performance.now clock so optional diagnostics cannot break reception.
++      const socketCallbackStartedAt = this.mutationTraceTime?.();
+       this.resetServerInactivityTimeout();
+       const messageLength = message.data.length;
+       let serverMessage = parseServerMessage(JSON.parse(message.data));
++      const socketMessageDecodedAt =
++        serverMessage.type === "MutationResponse"
++          ? this.mutationTraceTime?.()
++          : undefined;
+       this._logVerbose(`received ws message with type ${serverMessage.type}`);
+ 
+       // Ping's only purpose is to reset the server inactivity timer.
+@@ -467,7 +490,13 @@ export class WebSocketManager {
+           transition: serverMessage,
+         });
+       }
+-      const response = this.onMessage(serverMessage);
++      const response = this.onMessage(
++        serverMessage,
++        socketCallbackStartedAt !== undefined &&
++          socketMessageDecodedAt !== undefined
++          ? { socketCallbackStartedAt, socketMessageDecodedAt }
++          : undefined,
++      );
+       if (response.hasSyncedPastLastReconnect) {
+         // Reset backoff to 0 once all outstanding requests are complete.
+         this.retries = 0;

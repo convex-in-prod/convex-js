@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Tue, 3 Nov 2026 01:32:15 +0800
-Subject: [PATCH 15/16] sync: settle mutations covered by an earlier transition
+Subject: [PATCH 15/18] sync: settle mutations covered by an earlier transition
 
 A covering query transition can arrive before its mutation response. The
 request manager previously waited for another transition even when the

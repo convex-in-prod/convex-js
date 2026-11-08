@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Roman Leventov <leventov.ru@gmail.com>
+Date: Sun, 8 Nov 2026 16:04:04 +0800
+Subject: [PATCH 18/18] cli: accept initialization log records
+
+Add Init to the function-log OpenAPI schema and generated client types, and recognize the same record type in the CLI log stream. This keeps initialization records compatible with the existing structured log formatter.
+
+Validated against the generated function-log API and SDK lint and type checks.
+---
+ function-logs-openapi.json              | 3 ++-
+ src/cli/lib/generatedFunctionLogsApi.ts | 2 +-
+ src/cli/lib/logs.ts                     | 2 +-
+ 3 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/function-logs-openapi.json b/function-logs-openapi.json
+index a24ac7c43463355f3e60f5cf01fea459dcaef1c6..92c32057a77f446ac561773abd90216415b42204 100644
+--- a/function-logs-openapi.json
++++ b/function-logs-openapi.json
+@@ -367,7 +367,8 @@
+           "Query",
+           "Mutation",
+           "Action",
+-          "HttpAction"
++          "HttpAction",
++          "Init"
+         ]
+       },
+       "UsageStatsJson": {
+diff --git a/src/cli/lib/generatedFunctionLogsApi.ts b/src/cli/lib/generatedFunctionLogsApi.ts
+index 6b5292d9371842a9f659d8ca79dd7cc141a0d12b..66794fc920801b134dd79fecd62523c75f725fac 100644
+--- a/src/cli/lib/generatedFunctionLogsApi.ts
++++ b/src/cli/lib/generatedFunctionLogsApi.ts
+@@ -88,7 +88,7 @@ export interface components {
+             code: string;
+         };
+         /** @enum {string} */
+-        UdfTypeJson: "Query" | "Mutation" | "Action" | "HttpAction";
++        UdfTypeJson: "Query" | "Mutation" | "Action" | "HttpAction" | "Init";
+         UsageStatsJson: {
+             /** Format: int64 */
+             databaseReadBytes: number;
+diff --git a/src/cli/lib/logs.ts b/src/cli/lib/logs.ts
+index 8420e02d0000b05d787aad6a7ff5fe23f9bdf634..8d02e3c5d2efc26fc2e6af5e8c84f9a5fb8bc611 100644
+--- a/src/cli/lib/logs.ts
++++ b/src/cli/lib/logs.ts
+@@ -147,7 +147,7 @@ export async function watchLogs(
+   }
+ }
+ 
+-type UdfType = "Query" | "Mutation" | "Action" | "HttpAction";
++type UdfType = "Query" | "Mutation" | "Action" | "HttpAction" | "Init";
+ 
+ type StructuredLogLine = {
+   messages: string[];

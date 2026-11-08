@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Sat, 7 Nov 2026 23:22:13 +0800
-Subject: [PATCH 16/16] bundler: exclude JavaScript component definitions from
+Subject: [PATCH 16/18] bundler: exclude JavaScript component definitions from
  root entries
 
 Treat convex.config.js as a component boundary alongside convex.config.ts.
