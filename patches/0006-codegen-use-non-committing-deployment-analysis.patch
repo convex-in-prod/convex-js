@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 30 Sep 2026 01:02:07 +0800
-Subject: [PATCH 06/18] codegen: use non-committing deployment analysis
+Subject: [PATCH 06/17] codegen: use non-committing deployment analysis
 
 Route standalone codegen through evaluate_push with an explicit analysis request instead of beginning the start_push deployment lifecycle. Refuse older backend responses without analysis rather than falling back to a request that can publish pending schema and index metadata.
 
@@ -25,7 +25,7 @@ count instead of serializing the complete codegen analysis.
  create mode 100644 src/cli/lib/deployApi/startPush.test.ts
 
 diff --git a/src/cli/codegen_templates/component_api.ts b/src/cli/codegen_templates/component_api.ts
-index 1734ef3c97bef9f4a63bdb4c0aa0f6678edd052b..ff06e5f6c66d7e479aaa4751c1197f66622fa7c2 100644
+index 5fc168d4ecb3f60fbcbc697f38c798670c4f5ce1..bceb7f8ea8f26f84dc4705e46cb45c8b18f54681 100644
 --- a/src/cli/codegen_templates/component_api.ts
 +++ b/src/cli/codegen_templates/component_api.ts
 @@ -7,7 +7,7 @@ import {
@@ -69,8 +69,8 @@ index 1734ef3c97bef9f4a63bdb4c0aa0f6678edd052b..ff06e5f6c66d7e479aaa4751c1197f66
 +      pushAnalysis,
        analysis,
        rootComponent,
-       componentsMap,
-@@ -133,7 +133,7 @@ export async function componentApiDTS(
+       componentDirectory,
+@@ -161,7 +161,7 @@ export function childComponentImportPath({
  
  async function componentApiLines(
    ctx: Context,
@@ -78,8 +78,8 @@ index 1734ef3c97bef9f4a63bdb4c0aa0f6678edd052b..ff06e5f6c66d7e479aaa4751c1197f66
 +  pushAnalysis: PushAnalysis,
    analysis: EvaluatedComponentDefinition,
    rootComponent: ComponentDirectory,
-   componentsMap: Map<string, ComponentDirectory>,
-@@ -173,7 +173,7 @@ async function componentApiLines(
+   componentDirectory: ComponentDirectory,
+@@ -194,7 +194,7 @@ async function componentApiLines(
          `  "${childComponent.name}": import("${importPath}/_generated/component.js").ComponentApi<"${childComponent.name}">,`,
        );
      } else {
@@ -88,7 +88,7 @@ index 1734ef3c97bef9f4a63bdb4c0aa0f6678edd052b..ff06e5f6c66d7e479aaa4751c1197f66
        if (!childComponentAnalysis) {
          return await ctx.crash({
            exitCode: 1,
-@@ -195,7 +195,7 @@ async function componentApiLines(
+@@ -216,7 +216,7 @@ async function componentApiLines(
  
  export async function componentTS(
    ctx: Context,
@@ -97,7 +97,7 @@ index 1734ef3c97bef9f4a63bdb4c0aa0f6678edd052b..ff06e5f6c66d7e479aaa4751c1197f66
    rootComponent: ComponentDirectory,
    componentDirectory: ComponentDirectory,
  ) {
-@@ -203,12 +203,12 @@ export async function componentTS(
+@@ -224,12 +224,12 @@ export async function componentTS(
      rootComponent,
      componentDirectory,
    );
@@ -112,7 +112,7 @@ index 1734ef3c97bef9f4a63bdb4c0aa0f6678edd052b..ff06e5f6c66d7e479aaa4751c1197f66
      });
    }
  
-@@ -245,7 +245,7 @@ export async function componentTS(
+@@ -266,7 +266,7 @@ export async function componentTS(
  
  export async function componentApiTSWithTypes(
    ctx: Context,
@@ -121,7 +121,7 @@ index 1734ef3c97bef9f4a63bdb4c0aa0f6678edd052b..ff06e5f6c66d7e479aaa4751c1197f66
    rootComponent: ComponentDirectory,
    componentDirectory: ComponentDirectory,
    componentsMap: Map<string, ComponentDirectory>,
-@@ -256,12 +256,12 @@ export async function componentApiTSWithTypes(
+@@ -277,12 +277,12 @@ export async function componentApiTSWithTypes(
      componentDirectory,
    );
  
@@ -136,7 +136,7 @@ index 1734ef3c97bef9f4a63bdb4c0aa0f6678edd052b..ff06e5f6c66d7e479aaa4751c1197f66
      });
    }
  
-@@ -283,7 +283,7 @@ export async function componentApiTSWithTypes(
+@@ -304,7 +304,7 @@ export async function componentApiTSWithTypes(
    lines.push(
      ...(await componentApiLines(
        ctx,
@@ -144,7 +144,7 @@ index 1734ef3c97bef9f4a63bdb4c0aa0f6678edd052b..ff06e5f6c66d7e479aaa4751c1197f66
 +      pushAnalysis,
        analysis,
        rootComponent,
-       componentsMap,
+       componentDirectory,
 diff --git a/src/cli/codegen_templates/dataModel.ts b/src/cli/codegen_templates/dataModel.ts
 index 4ec0f9724ce0a820abbe54a116c366309f3db745..cd8377ed780313ccdd7bb046e76c7598f03aa742 100644
 --- a/src/cli/codegen_templates/dataModel.ts
@@ -319,7 +319,7 @@ index a8eb621e779b0596084497b64ad16f7a6af7135b..3c2336850a6bda90716ebef90d84fca0
        componentDirectory,
        componentsMap,
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index 6c6a917f9048dd849ea067a657a258ec4f102fcc..8c4e276cd6fb33555838b14a6edbd1fa88934a60 100644
+index e83443360ff63c88180d0279d89afdf278f7ce45..0fbbdbcfc22648feb027660969b3ed30f9dec5bd 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
 @@ -15,6 +15,7 @@ import {
@@ -354,15 +354,15 @@ index 6c6a917f9048dd849ea067a657a258ec4f102fcc..8c4e276cd6fb33555838b14a6edbd1fa
    },
  ): Promise<StartPushResponse | null> {
    const convexDir = await getFunctionsDirectoryPath(ctx);
-@@ -476,6 +480,7 @@ async function startComponentsPushAndCodegen(
-     nodeDependencies: appImplementation.externalNodeDependencies,
+@@ -477,6 +481,7 @@ async function startComponentsPushAndCodegen(
      nodeVersion: projectConfig.node.nodeVersion,
+     nodeDefaultMemoryMb: projectConfig.node.defaultMemoryMb,
      forCodegen: !!options.codegenOnlyThisComponent,
 +    ...(options.pushMode === "codegen" ? { includeAnalysis: true } : {}),
    };
    if (options.writePushRequest) {
      const pushRequestPath = path.resolve(options.writePushRequest);
-@@ -506,83 +511,114 @@ async function startComponentsPushAndCodegen(
+@@ -507,83 +512,114 @@ async function startComponentsPushAndCodegen(
      );
    }
  
@@ -546,7 +546,7 @@ index 6c6a917f9048dd849ea067a657a258ec4f102fcc..8c4e276cd6fb33555838b14a6edbd1fa
    }
  
    if (options.codegen) {
-@@ -598,7 +634,7 @@ async function startComponentsPushAndCodegen(
+@@ -599,7 +635,7 @@ async function startComponentsPushAndCodegen(
              tmpDir,
              rootComponent,
              rootComponent,
@@ -555,7 +555,7 @@ index 6c6a917f9048dd849ea067a657a258ec4f102fcc..8c4e276cd6fb33555838b14a6edbd1fa
              components,
              options,
            );
-@@ -619,7 +655,7 @@ async function startComponentsPushAndCodegen(
+@@ -620,7 +656,7 @@ async function startComponentsPushAndCodegen(
              tmpDir,
              rootComponent,
              directory,
@@ -564,7 +564,7 @@ index 6c6a917f9048dd849ea067a657a258ec4f102fcc..8c4e276cd6fb33555838b14a6edbd1fa
              components,
              options,
            );
-@@ -707,13 +743,10 @@ export async function runComponentsPush(
+@@ -708,13 +744,10 @@ export async function runComponentsPush(
    const startPushResponse = await pushSpan.enterAsync(
      "startComponentsPushAndCodegen",
      (span) =>
@@ -642,19 +642,19 @@ index 0000000000000000000000000000000000000000..3f64c0ab1b8be5d30772393c778e7c36
 +  expect(parsed.analysis).toEqual({});
 +});
 diff --git a/src/cli/lib/deployApi/startPush.ts b/src/cli/lib/deployApi/startPush.ts
-index 4ffc53184228e561abf1df3d04fc290be9c282a1..d5ecb632c5fca231d2a780196e2d956ad0060b96 100644
+index 54ae380912bac1643f77ec431c42907acc099ecb..94f54ba955e0f192d8565c132cac8342a74c20c5 100644
 --- a/src/cli/lib/deployApi/startPush.ts
 +++ b/src/cli/lib/deployApi/startPush.ts
-@@ -23,6 +23,8 @@ export const startPushRequest = looseObject({
-   nodeDependencies: z.array(nodeDependency),
+@@ -24,6 +24,8 @@ export const startPushRequest = looseObject({
  
    nodeVersion: z.optional(z.string()),
+   nodeDefaultMemoryMb: z.optional(z.number()),
 +  forCodegen: z.boolean().optional(),
 +  includeAnalysis: z.boolean().optional(),
  });
  export type StartPushRequest = z.infer<typeof startPushRequest>;
  
-@@ -33,6 +35,14 @@ export const schemaChange = looseObject({
+@@ -34,6 +36,14 @@ export const schemaChange = looseObject({
  });
  export type SchemaChange = z.infer<typeof schemaChange>;
  
@@ -669,7 +669,7 @@ index 4ffc53184228e561abf1df3d04fc290be9c282a1..d5ecb632c5fca231d2a780196e2d956a
  export const startPushResponse = looseObject({
    environmentVariables: z.record(z.string(), z.string()),
  
-@@ -40,7 +50,7 @@ export const startPushResponse = looseObject({
+@@ -41,7 +51,7 @@ export const startPushResponse = looseObject({
    componentDefinitionPackages: z.record(componentDefinitionPath, sourcePackage),
  
    appAuth: z.array(authInfo),
@@ -678,7 +678,7 @@ index 4ffc53184228e561abf1df3d04fc290be9c282a1..d5ecb632c5fca231d2a780196e2d956a
  
    app: checkedComponent,
  
-@@ -114,6 +124,8 @@ export function startPushResponseForLogging(
+@@ -115,6 +125,8 @@ export function startPushResponseForLogging(
  }
  
  export const evaluatePushResponse = looseObject({

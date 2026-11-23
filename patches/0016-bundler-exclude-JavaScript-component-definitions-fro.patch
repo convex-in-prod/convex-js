@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Sat, 7 Nov 2026 23:22:13 +0800
-Subject: [PATCH 16/18] bundler: exclude JavaScript component definitions from
+Subject: [PATCH 16/17] bundler: exclude JavaScript component definitions from
  root entries
 
 Treat convex.config.js as a component boundary alongside convex.config.ts.
@@ -69,7 +69,7 @@ index 5506beb91a83daf7d34c9dd7baa25a20af80d6d5..0257e29d80dcc38b2b452882a053a07d
    await withTmpDir(async (tmpDir) => {
      const modulePath = path.join(tmpDir.path, "consumer.ts");
 diff --git a/src/bundler/index.ts b/src/bundler/index.ts
-index 086505b8ea1af2c6828215d32f1979a48be6a03a..8e3ff29f05b771605c0c0a2043edeb985eadc6c3 100644
+index ae37c395e0990f8d500275a754cef78111243c36..ef935f5d1e738ec1d08ebbfba00c6e23f6216c4d 100644
 --- a/src/bundler/index.ts
 +++ b/src/bundler/index.ts
 @@ -17,6 +17,10 @@ import {

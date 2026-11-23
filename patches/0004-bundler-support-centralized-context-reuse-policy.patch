@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 30 Sep 2026 01:02:07 +0800
-Subject: [PATCH 04/18] bundler: support centralized context reuse policy
+Subject: [PATCH 04/17] bundler: support centralized context reuse policy
 
 Add a disabled-by-default root-application bundling policy that emits
 Convex's existing boolean experimental_reuseContext marker for isolate
@@ -47,8 +47,8 @@ independent action grouping, and class-specific initializer identities.
  src/bundler/index.ts                          | 243 +++++++-
  src/cli/lib/components.ts                     |   6 +
  src/cli/lib/components/definition/bundle.ts   |  19 +
- src/cli/lib/config.ts                         |  87 +++
- 8 files changed, 1223 insertions(+), 1 deletion(-)
+ src/cli/lib/config.ts                         |  89 +++
+ 8 files changed, 1225 insertions(+), 1 deletion(-)
  create mode 100644 patches/default_database_context_reuse/README.md
  create mode 100644 src/bundler/contextReuse.test.ts
  create mode 100644 src/bundler/contextReuseGroups.ts
@@ -217,10 +217,10 @@ index 0000000000000000000000000000000000000000..2f8b0d652829a431a2e41c74e3aa5fd8
 +contexts immediately, not to make the policy change effective. See the backend's
 +[adoption and rollback guide](https://github.com/convex-in-prod/convex-backend/tree/main/patches/context_reuse#adoption-and-rollback).
 diff --git a/schemas/convex.schema.json b/schemas/convex.schema.json
-index e4ff3024eb5c21dccf90b027a417e9797f032a94..96a3f4609d40fc7c1056548fb99acc127dad402b 100644
+index 150b2720b7b10d00f3eee09a1a45af68d592606b..7e2fab00f9f47e66c3f433358d82569a7a4aba48 100644
 --- a/schemas/convex.schema.json
 +++ b/schemas/convex.schema.json
-@@ -173,6 +173,51 @@
+@@ -178,6 +178,51 @@
            "description": "Whether to include original source code in source maps. Set to false to reduce bundle size.",
            "default": false,
            "deprecated": true
@@ -952,7 +952,7 @@ index 0000000000000000000000000000000000000000..f9278f6fefcb0a9aaca225fa106c42fe
 +  return { initializers, initializerByOutput };
 +}
 diff --git a/src/bundler/index.ts b/src/bundler/index.ts
-index 9539009986ab382504b4e7bed027cc109f3d77ad..3a71e40fd9fbcf8d90b60fd195ae68efc5698d6f 100644
+index 25a86e90779aa03daaaa8ae93069cd00db12b750..16382c9de445d0fb50da375dd27cd5812c5e68e3 100644
 --- a/src/bundler/index.ts
 +++ b/src/bundler/index.ts
 @@ -16,6 +16,7 @@ import {
@@ -1241,7 +1241,7 @@ index 9539009986ab382504b4e7bed027cc109f3d77ad..3a71e40fd9fbcf8d90b60fd195ae68ef
    for (const module of modules) {
      const sourceMapPath = module.path + ".map";
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index c10105dbc2d8031db452a8dfcab7e6cfc9b82629..701528591ebd28df368bd595df67322dea9bf895 100644
+index 01b896fc178a5736d9deb4b71a31acee7fd8ce0d..3924b8eed8590e813f744bfa779383d008b3fca8 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
 @@ -398,6 +398,12 @@ async function startComponentsPushAndCodegen(
@@ -1258,7 +1258,7 @@ index c10105dbc2d8031db452a8dfcab7e6cfc9b82629..701528591ebd28df368bd595df67322d
      );
    if (options.debugBundlePath) {
 diff --git a/src/cli/lib/components/definition/bundle.ts b/src/cli/lib/components/definition/bundle.ts
-index 7fd31848703f709398990a48d564d5635d79cf80..5efe8a8bb4785d71b20672a219383b06992ae9c1 100644
+index 7fd31848703f709398990a48d564d5635d79cf80..580fbea7ddc693d5f1b64a4ed2f14a7d3c60c7a2 100644
 --- a/src/cli/lib/components/definition/bundle.ts
 +++ b/src/cli/lib/components/definition/bundle.ts
 @@ -626,6 +626,7 @@ export async function bundleImplementations({
@@ -1277,7 +1277,7 @@ index 7fd31848703f709398990a48d564d5635d79cf80..5efe8a8bb4785d71b20672a219383b06
 +    default: true;
 +    exclusions: Record<string, string>;
 +    httpActions: boolean;
-+    actions?: { entries: string[]; grouping: boolean };
++    actions?: { entries: string[]; grouping: boolean } | undefined;
 +  };
  }): Promise<{
    appImplementation: {
@@ -1302,23 +1302,25 @@ index 7fd31848703f709398990a48d564d5635d79cf80..5efe8a8bb4785d71b20672a219383b06
  
      if (convexResult.externalDependencies.size !== 0) {
 diff --git a/src/cli/lib/config.ts b/src/cli/lib/config.ts
-index 8ee4a743fe287f008c919e2f24784fa62aed2609..6f9e256e5ea10d2e1698c2af718d363234c1d358 100644
+index f0e1946044320fd4b83e116a3a6c40fc4e8dbfb6..dfb6c2c40f89a7637f540160fa1839ef9e853176 100644
 --- a/src/cli/lib/config.ts
 +++ b/src/cli/lib/config.ts
-@@ -96,6 +96,12 @@ export interface ProjectConfig {
+@@ -99,6 +99,14 @@ export interface ProjectConfig {
+   bundler?:
+     | {
+         includeSourcesContent?: boolean;
++        experimentalContextReuse?:
++          | {
++              default: true;
++              exclusions: Record<string, string>;
++              httpActions: boolean;
++              actions?: { entries: string[]; grouping: boolean } | undefined;
++            }
++          | undefined;
+       }
+     | undefined;
  
-   bundler?: {
-     includeSourcesContent?: boolean;
-+    experimentalContextReuse?: {
-+      default: true;
-+      exclusions: Record<string, string>;
-+      httpActions: boolean;
-+      actions?: { entries: string[]; grouping: boolean };
-+    };
-   };
- 
-   typescriptCompiler?: TypescriptCompiler;
-@@ -297,6 +303,69 @@ const BundlerSchema = z.object({
+@@ -311,6 +319,69 @@ const BundlerSchema = z.object({
      .describe(
        "Whether to include original source code in source maps. Set to false to reduce bundle size.",
      ),
@@ -1388,7 +1390,7 @@ index 8ee4a743fe287f008c919e2f24784fa62aed2609..6f9e256e5ea10d2e1698c2af718d3632
  });
  
  const AiFilesSchema = z.object({
-@@ -636,6 +705,24 @@ export async function configFromProjectConfig(
+@@ -650,6 +721,24 @@ export async function configFromProjectConfig(
      entryPoints: entryPoints.isolate,
      generateSourceMaps: true,
      platform: "browser",

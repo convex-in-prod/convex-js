@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 30 Sep 2026 01:02:07 +0800
-Subject: [PATCH 10/18] deployment: publish native resident selection and
+Subject: [PATCH 10/17] deployment: publish native resident selection and
  metadata
 
 Validate and freeze an explicit nullable native-resident activation envelope before build commands, require protocol support, and transmit it through finish-push. Expose committed native selection through deployment metadata with null semantics for ordinary execution and older backends. Keep process lifecycle and transactional publication authority with the backend.
@@ -93,7 +93,7 @@ index 3fa4d89459f376376a7a99537beddb642b4ad57d..ebf8822f3e9a9572b38928f261bda473
  ) {
    const deploymentToActOn = await loadSelectedDeploymentCredentials(
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index 8c4e276cd6fb33555838b14a6edbd1fa88934a60..2d85ed16530b9dd82297e998c5954ec123eeeda1 100644
+index 0fbbdbcfc22648feb027660969b3ed30f9dec5bd..dcf3989786f35ef58d974a840aec1b8ec148ce8c 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
 @@ -1,3 +1,4 @@
@@ -430,13 +430,13 @@ index b02da7b88db793e8663e1d574ab3f8cac781f530..5980bb6b8e150a577b99942fef0fa937
  }
  
 diff --git a/src/server/meta.ts b/src/server/meta.ts
-index 6a2525484e8deadcd5e77ba9513540e595a71ab7..bb49044ff4309a2c3cc100a58cb564eed562a3a6 100644
+index 4543f73759f11a942ab2e8ec0e7a834a4909e052..504a05b3b927a32890acd2509d0fda3cb4af971c 100644
 --- a/src/server/meta.ts
 +++ b/src/server/meta.ts
-@@ -95,6 +95,17 @@ export type DeploymentMetadata = {
-    * The deployment class, e.g. `"s16"`, `"s256"`, `"d1024"`, or `"d2048"`.
+@@ -96,6 +96,17 @@ export type DeploymentMetadata = {
+    * `"p256"`.
     */
-   class: "s16" | "s256" | "d1024" | "d2048";
+   class: "s16" | "s256" | "d1024" | "d2048" | "p256";
 +  /**
 +   * Committed native resident selection in a query or mutation's transaction.
 +   * `null` selects ordinary execution. Omitted for actions and backends without

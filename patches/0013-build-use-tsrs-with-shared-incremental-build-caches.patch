@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Fri, 23 Oct 2026 04:29:22 +0800
-Subject: [PATCH 13/18] build: use tsrs with shared incremental build caches
+Subject: [PATCH 13/17] build: use tsrs with shared incremental build caches
 
 Ship pinned tsrs with the CLI and use it for every configured application
 check. Resolve its launcher relative to the installed SDK, including bundled
@@ -71,7 +71,7 @@ remains an explicit environment opt-in because it can change diagnostics.
  api-extractor-configs/README.md            |     8 +-
  dprint.json                                |     1 +
  eslint.config.mjs                          |    10 -
- package-lock.json                          | 13054 +++++++++++++++++++
+ package-lock.json                          | 13004 +++++++++++++++++++
  package.json                               |    37 +-
  patches/README.md                          |    31 +
  schemas/convex.schema.json                 |     6 -
@@ -101,7 +101,7 @@ remains an explicit environment opt-in because it can change diagnostics.
  src/cli/typecheck.ts                       |    40 +-
  src/values/base64.ts                       |     4 +-
  vitest.config.js                           |     8 +-
- 39 files changed, 14551 insertions(+), 296 deletions(-)
+ 39 files changed, 14501 insertions(+), 296 deletions(-)
  create mode 100644 .oxlintrc.json
  create mode 100644 package-lock.json
  create mode 100644 scripts/maintain-tsrs-cache.mjs
@@ -114,7 +114,7 @@ remains an explicit environment opt-in because it can change diagnostics.
  create mode 100644 src/cli/lib/typecheck.test.ts
 
 diff --git a/.github/workflows/build-convex-in-prod.yml b/.github/workflows/build-convex-in-prod.yml
-index 61aa5f8eef61abbf8bf527114456648ddab57aaa..3a1f9608e5bdd7c86669638685762a68e3849475 100644
+index 1260520cd0118c587e96aa682cb3b47e46aa9d89..451c01863f93e27b4a0d99ae9e3aa97d3ed86090 100644
 --- a/.github/workflows/build-convex-in-prod.yml
 +++ b/.github/workflows/build-convex-in-prod.yml
 @@ -35,13 +35,15 @@ jobs:
@@ -138,7 +138,7 @@ index 61aa5f8eef61abbf8bf527114456648ddab57aaa..3a1f9608e5bdd7c86669638685762a68
        - name: Reject validation side effects
          # Package the exact reviewed commit rather than silently restoring
 @@ -62,18 +64,7 @@ jobs:
-               '*.tsx' '*.yaml' '*.yml' ':(exclude)packages/convex/**'
+               '*.tsx' '*.yaml' '*.yml' ':(exclude)CHANGELOG.md' ':(exclude)packages/convex/**'
            )
            if (( ${#format_files[@]} > 0 )); then
 -            # Upstream has no lockfile, so keep formatter upgrades from changing
@@ -158,12 +158,12 @@ index 61aa5f8eef61abbf8bf527114456648ddab57aaa..3a1f9608e5bdd7c86669638685762a68
  
        - name: Set package provenance
 diff --git a/.github/workflows/test-and-lint.yml b/.github/workflows/test-and-lint.yml
-index 851f014135eab3bf662ccd964ffc1d73804c9690..287063dbf67c1acb2b0ccc04efcee6ecadb98a08 100644
+index 987fce4f8738a27b3216ba0c2c742b7db5d2bc6b..2b7ccf52f36d116df72538ea524a3f659c068446 100644
 --- a/.github/workflows/test-and-lint.yml
 +++ b/.github/workflows/test-and-lint.yml
 @@ -23,8 +23,8 @@ jobs:
          with:
-           node-version: "22"
+           node-version: "24.22.3"
  
 -      - name: NPM v10
 -        run: npm install -g npm@10 --registry=https://registry.npmjs.org
@@ -376,19 +376,19 @@ index 799995dd3d00d44b396694ac7286f27b6916e73d..4597fb0dd4e1c5d194836d3ed03da9bb
        "@typescript-eslint/consistent-type-assertions": [
 diff --git a/package-lock.json b/package-lock.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..81ce32d982458dac71e9699b1d3d2daae0b9b644
+index 0000000000000000000000000000000000000000..469a8d71e62ae6ceeab053034837ae1b6badf05b
 --- /dev/null
 +++ b/package-lock.json
-@@ -0,0 +1,13054 @@
+@@ -0,0 +1,13004 @@
 +{
 +  "name": "convex",
-+  "version": "1.49.0",
++  "version": "1.51.0",
 +  "lockfileVersion": 3,
 +  "requires": true,
 +  "packages": {
 +    "": {
 +      "name": "convex",
-+      "version": "1.49.0",
++      "version": "1.51.0",
 +      "license": "Apache-2.0",
 +      "workspaces": [
 +        "scripts/openapi"
@@ -405,7 +405,6 @@ index 0000000000000000000000000000000000000000..81ce32d982458dac71e9699b1d3d2daa
 +      },
 +      "devDependencies": {
 +        "@auth0/auth0-react": "2.15.1",
-+        "@babel/code-frame": "^7.27.1",
 +        "@babel/parser": "^7.27.1",
 +        "@babel/types": "^7.27.1",
 +        "@clerk/react": "^6.4.3",
@@ -424,7 +423,6 @@ index 0000000000000000000000000000000000000000..81ce32d982458dac71e9699b1d3d2daa
 +        "@sentry/node": "^10.76.2",
 +        "@swc/core": "1.15.8",
 +        "@testing-library/react": "~16.3.0",
-+        "@types/babel__code-frame": "^7.0.6",
 +        "@types/deep-equal": "1.0.4",
 +        "@types/node": "^22.0.0",
 +        "@types/react": "^19.2.4",
@@ -453,7 +451,7 @@ index 0000000000000000000000000000000000000000..81ce32d982458dac71e9699b1d3d2daa
 +        "fetch-retry": "~6.0.0",
 +        "find-up": "^8.0.0",
 +        "globals": "~17.4.0",
-+        "happy-dom": "~20.10.0",
++        "happy-dom": "~21.0.0",
 +        "jsdom": "~28.1.0",
 +        "json5": "~2.2.3",
 +        "knip": "~5.86.0",
@@ -475,11 +473,10 @@ index 0000000000000000000000000000000000000000..81ce32d982458dac71e9699b1d3d2daa
 +        "tsx": "^4.19.4",
 +        "typescript": "~6.0.3",
 +        "typescript-eslint": "~8.72.1",
-+        "undici": "7.29.1",
++        "undici": "7.30.1",
 +        "vitest": "^4.1.0",
 +        "wait-for-expect": "~4.0.0",
-+        "zod": "^3.24.0",
-+        "zod-to-json-schema": "^3.24.0"
++        "zod": "^4.6.6"
 +      },
 +      "engines": {
 +        "node": ">=22.0.0",
@@ -2034,16 +2031,6 @@ index 0000000000000000000000000000000000000000..81ce32d982458dac71e9699b1d3d2daa
 +        "node": ">=20"
 +      }
 +    },
-+    "node_modules/@modelcontextprotocol/core/node_modules/zod": {
-+      "version": "4.6.7",
-+      "resolved": "https://registry.npmjs.org/zod/-/zod-4.6.7.tgz",
-+      "integrity": "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==",
-+      "dev": true,
-+      "license": "MIT",
-+      "funding": {
-+        "url": "https://github.com/sponsors/colinhacks"
-+      }
-+    },
 +    "node_modules/@modelcontextprotocol/server": {
 +      "version": "2.4.0",
 +      "resolved": "https://registry.npmjs.org/@modelcontextprotocol/server/-/server-2.4.0.tgz",
@@ -2056,16 +2043,6 @@ index 0000000000000000000000000000000000000000..81ce32d982458dac71e9699b1d3d2daa
 +      },
 +      "engines": {
 +        "node": ">=20"
-+      }
-+    },
-+    "node_modules/@modelcontextprotocol/server/node_modules/zod": {
-+      "version": "4.6.7",
-+      "resolved": "https://registry.npmjs.org/zod/-/zod-4.6.7.tgz",
-+      "integrity": "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==",
-+      "dev": true,
-+      "license": "MIT",
-+      "funding": {
-+        "url": "https://github.com/sponsors/colinhacks"
 +      }
 +    },
 +    "node_modules/@napi-rs/wasm-runtime": {
@@ -4148,13 +4125,6 @@ index 0000000000000000000000000000000000000000..81ce32d982458dac71e9699b1d3d2daa
 +      "dev": true,
 +      "license": "MIT",
 +      "peer": true
-+    },
-+    "node_modules/@types/babel__code-frame": {
-+      "version": "7.27.0",
-+      "resolved": "https://registry.npmjs.org/@types/babel__code-frame/-/babel__code-frame-7.27.0.tgz",
-+      "integrity": "sha512-Dwlo+LrxDx/0SpfmJ/BKveHf7QXWvLBLc+x03l5sbzykj3oB9nHygCpSECF1a+s+QIxbghe+KHqC90vGtxLRAA==",
-+      "dev": true,
-+      "license": "MIT"
 +    },
 +    "node_modules/@types/chai": {
 +      "version": "5.2.3",
@@ -7630,9 +7600,9 @@ index 0000000000000000000000000000000000000000..81ce32d982458dac71e9699b1d3d2daa
 +      }
 +    },
 +    "node_modules/happy-dom": {
-+      "version": "20.10.6",
-+      "resolved": "https://registry.npmjs.org/happy-dom/-/happy-dom-20.10.6.tgz",
-+      "integrity": "sha512-6QD0ilzDDt93tX44y8tbmZdAcdTRYDhUP+Asgi6pC8Pp5IA3cvaZGyoVN/EGtlq9ziT65iPuBBn3ASLr6hCgVw==",
++      "version": "21.0.4",
++      "resolved": "https://registry.npmjs.org/happy-dom/-/happy-dom-21.0.4.tgz",
++      "integrity": "sha512-tFm+GaLBgo6o0awHnvHaNoraVo27qJ+2tZEtZ+cIa08hXbeitrxAJajLI05hsUy/2/YTKcUjQYzHe5mCcraLBw==",
 +      "dev": true,
 +      "license": "MIT",
 +      "dependencies": {
@@ -8870,16 +8840,6 @@ index 0000000000000000000000000000000000000000..81ce32d982458dac71e9699b1d3d2daa
 +      },
 +      "funding": {
 +        "url": "https://github.com/sponsors/eemeli"
-+      }
-+    },
-+    "node_modules/knip/node_modules/zod": {
-+      "version": "4.6.7",
-+      "resolved": "https://registry.npmjs.org/zod/-/zod-4.6.7.tgz",
-+      "integrity": "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==",
-+      "dev": true,
-+      "license": "MIT",
-+      "funding": {
-+        "url": "https://github.com/sponsors/colinhacks"
 +      }
 +    },
 +    "node_modules/levn": {
@@ -12609,9 +12569,9 @@ index 0000000000000000000000000000000000000000..81ce32d982458dac71e9699b1d3d2daa
 +      }
 +    },
 +    "node_modules/undici": {
-+      "version": "7.29.1",
-+      "resolved": "https://registry.npmjs.org/undici/-/undici-7.29.1.tgz",
-+      "integrity": "sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==",
++      "version": "7.30.1",
++      "resolved": "https://registry.npmjs.org/undici/-/undici-7.30.1.tgz",
++      "integrity": "sha512-03KrMbjIFDWQR5RNPrSw3bd1r12JpyFQl9/yxjUbJtqkjmllqC5lFjZh6ujeuJCKr8EOQvRW872Oy/az+nLYxg==",
 +      "dev": true,
 +      "license": "MIT",
 +      "engines": {
@@ -13347,23 +13307,13 @@ index 0000000000000000000000000000000000000000..81ce32d982458dac71e9699b1d3d2daa
 +      }
 +    },
 +    "node_modules/zod": {
-+      "version": "3.25.76",
-+      "resolved": "https://registry.npmjs.org/zod/-/zod-3.25.76.tgz",
-+      "integrity": "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==",
++      "version": "4.6.7",
++      "resolved": "https://registry.npmjs.org/zod/-/zod-4.6.7.tgz",
++      "integrity": "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==",
 +      "dev": true,
 +      "license": "MIT",
 +      "funding": {
 +        "url": "https://github.com/sponsors/colinhacks"
-+      }
-+    },
-+    "node_modules/zod-to-json-schema": {
-+      "version": "3.25.2",
-+      "resolved": "https://registry.npmjs.org/zod-to-json-schema/-/zod-to-json-schema-3.25.2.tgz",
-+      "integrity": "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA==",
-+      "dev": true,
-+      "license": "ISC",
-+      "peerDependencies": {
-+        "zod": "^3.25.28 || ^4"
 +      }
 +    },
 +    "scripts/openapi": {
@@ -13435,15 +13385,16 @@ index 0000000000000000000000000000000000000000..81ce32d982458dac71e9699b1d3d2daa
 +  }
 +}
 diff --git a/package.json b/package.json
-index 967b882fc3c824281eec39862d99714dd63b0f08..6d41e51f0a8cd2388a26d6b3034313ae684d1a00 100644
+index d8320df4709b27203ca803864eb322b9c8a05829..d983d7e33fe9917decf7b71628806b9655d32286 100644
 --- a/package.json
 +++ b/package.json
-@@ -190,22 +190,25 @@
+@@ -190,23 +190,26 @@
      "build": "npm run generateApiSpec && uv run --script scripts/build.py 2>&1",
      "bundle-server": "node scripts/bundle-server.mjs",
      "clean": "shx rm -rf dist tmpDist*",
 -    "lint": "eslint . --cache",
 +    "lint": "npm run lint:typed && eslint . --cache",
+     "lint:ci": "npm run lint -- --max-warnings=-1",
 +    "lint:typed": "node scripts/run-typed-lint.mjs",
      "format": "prettier -w . '!CHANGELOG.md' && eslint --fix .",
 -    "format-check": "prettier -c . '!CHANGELOG.md' && eslint . --cache",
@@ -13471,7 +13422,7 @@ index 967b882fc3c824281eec39862d99714dd63b0f08..6d41e51f0a8cd2388a26d6b3034313ae
    },
    "files": [
      "bin",
-@@ -243,7 +246,8 @@
+@@ -244,7 +247,8 @@
    ],
    "dependencies": {
      "esbuild": "0.27.0",
@@ -13481,7 +13432,7 @@ index 967b882fc3c824281eec39862d99714dd63b0f08..6d41e51f0a8cd2388a26d6b3034313ae
      "ws": "8.21.0"
    },
    "peerDependencies": {
-@@ -268,7 +272,10 @@
+@@ -269,7 +273,10 @@
    },
    "@comment devDependencies": [
      "The dependencies of the CLI are also in devDependencies, built into",
@@ -13493,7 +13444,7 @@ index 967b882fc3c824281eec39862d99714dd63b0f08..6d41e51f0a8cd2388a26d6b3034313ae
    ],
    "devDependencies": {
      "@auth0/auth0-react": "2.15.1",
-@@ -300,7 +307,7 @@
+@@ -299,7 +306,7 @@
      "@types/serve-handler": "~6.1.4",
      "@types/ws": "^8.5.13",
      "@vercel/detect-agent": "^1.2.5",
@@ -13502,7 +13453,7 @@ index 967b882fc3c824281eec39862d99714dd63b0f08..6d41e51f0a8cd2388a26d6b3034313ae
      "adm-zip": "^0.6.1",
      "bufferutil": "^4.0.7",
      "chalk": "5",
-@@ -327,8 +334,8 @@
+@@ -326,8 +333,8 @@
      "napi-wasm": "1.1.3",
      "open": "^11.0.0",
      "openapi-fetch": "~0.17.0",
@@ -13512,7 +13463,7 @@ index 967b882fc3c824281eec39862d99714dd63b0f08..6d41e51f0a8cd2388a26d6b3034313ae
      "openid-client": "^5.3.1",
      "ora": "^9.0.0",
      "pkg-pr-new": "0.0.91",
-@@ -340,15 +347,17 @@
+@@ -339,14 +346,16 @@
      "skott": "0.35.4",
      "tar": "^7.5.21",
      "tsx": "^4.19.4",
@@ -13521,11 +13472,10 @@ index 967b882fc3c824281eec39862d99714dd63b0f08..6d41e51f0a8cd2388a26d6b3034313ae
 -    "typescript-eslint": "~8.57.0",
 +    "typescript": "~6.0.3",
 +    "typescript-eslint": "~8.72.1",
-     "undici": "7.29.1",
+     "undici": "7.30.1",
      "vitest": "^4.1.0",
      "wait-for-expect": "~4.0.0",
-     "zod": "^3.24.0",
-     "zod-to-json-schema": "^3.24.0"
+     "zod": "^4.6.6"
    },
 +  "workspaces": [
 +    "scripts/openapi"
@@ -13534,10 +13484,10 @@ index 967b882fc3c824281eec39862d99714dd63b0f08..6d41e51f0a8cd2388a26d6b3034313ae
      "npm": ">=7.0.0",
      "node": ">=22.0.0"
 diff --git a/patches/README.md b/patches/README.md
-index c90a0ceb5ef71a71227c2a92b760a3d756d4cde8..ed18f43af3506ebd9e563d9ef0bf7eb411a36c42 100644
+index b2c3078e886b056da76cc907b4d89e6a345baca2..78a7e76dc27629189daf27130b52c4d105228f3a 100644
 --- a/patches/README.md
 +++ b/patches/README.md
-@@ -20,6 +20,37 @@ The SDK and CLI require Node.js 22 or newer, following upstream 1.49.0.
+@@ -20,6 +20,37 @@ The SDK and CLI require Node.js 22 or newer.
  
  ## Maintained changes
  
@@ -13576,10 +13526,10 @@ index c90a0ceb5ef71a71227c2a92b760a3d756d4cde8..ed18f43af3506ebd9e563d9ef0bf7eb4
  
  `convex runtime-mode` reads the backend's durable runtime policy. On a
 diff --git a/schemas/convex.schema.json b/schemas/convex.schema.json
-index 96a3f4609d40fc7c1056548fb99acc127dad402b..be6a582e73a87b2c4ed5042536db699f8885b5db 100644
+index 7e2fab00f9f47e66c3f433358d82569a7a4aba48..6d38e839359fe9d1b6b976bd903c4afc90f19d5f 100644
 --- a/schemas/convex.schema.json
 +++ b/schemas/convex.schema.json
-@@ -221,12 +221,6 @@
+@@ -226,12 +226,6 @@
          }
        }
      },
@@ -14898,7 +14848,7 @@ index 1f21a77689142fb505219664cd91e2c760251e6a..69ad17bd0cfc1376e06d2b9f0622dc56
        .choices(["enable", "try", "disable"] as const)
        .default("try" as const),
 diff --git a/src/cli/dev.ts b/src/cli/dev.ts
-index 090c10ceb396c8bb501904aad7e9821c510cea0e..6bd8524f40e75fb428784722453759b37ec52f35 100644
+index 5488511042d057a5d5ad4ed083d782c4aaa087a1..06b3e0e7e2c41263f4efce5feac795df750891c8 100644
 --- a/src/cli/dev.ts
 +++ b/src/cli/dev.ts
 @@ -31,14 +31,14 @@ export const dev = new Command("dev")
@@ -14919,7 +14869,7 @@ index 090c10ceb396c8bb501904aad7e9821c510cea0e..6bd8524f40e75fb428784722453759b3
    )
    .addOption(
 diff --git a/src/cli/lib/command.ts b/src/cli/lib/command.ts
-index 18cf2da83e52cf19a90a2af091ce3a64f8a36d09..76635264d97f0aafbc8fe36894f5d4409adaefde 100644
+index 51ee7f84e6daf538afdb637c2987cf8b118e05e7..558ef44fcf970d28f9571a5acacbe42b6bd5a81d 100644
 --- a/src/cli/lib/command.ts
 +++ b/src/cli/lib/command.ts
 @@ -349,14 +349,14 @@ Command.prototype.addDeployOptions = function () {
@@ -14957,7 +14907,7 @@ index 18cf2da83e52cf19a90a2af091ce3a64f8a36d09..76635264d97f0aafbc8fe36894f5d440
        )
        .addOption(
 diff --git a/src/cli/lib/config.ts b/src/cli/lib/config.ts
-index 6efc7f6f6b10ea792077e44d47ee8bbff1341922..4c8310f801a205f8e3c45291d2d7d18a7c038fe7 100644
+index d55dda38bbb52de9166143990fee2beaeb3575a2..f750398abf985dd50673471b7491abd43474204a 100644
 --- a/src/cli/lib/config.ts
 +++ b/src/cli/lib/config.ts
 @@ -4,7 +4,6 @@ import path from "path";
@@ -14968,18 +14918,18 @@ index 6efc7f6f6b10ea792077e44d47ee8bbff1341922..4c8310f801a205f8e3c45291d2d7d18a
  import {
    changeSpinner,
    logError,
-@@ -104,8 +103,6 @@ export interface ProjectConfig {
-     };
-   };
+@@ -110,8 +109,6 @@ export interface ProjectConfig {
+       }
+     | undefined;
  
--  typescriptCompiler?: TypescriptCompiler;
+-  typescriptCompiler?: TypescriptCompiler | undefined;
 -
    // WorkOS AuthKit integration configuration
    authKit?: AuthKitConfig | undefined;
  
-@@ -405,13 +402,6 @@ const createProjectConfigSchema = (strict: boolean) => {
+@@ -421,13 +418,6 @@ const createProjectConfigSchema = (strict: boolean) => {
      }),
-     bundler: bundlerSchema.default({ includeSourcesContent: false }).optional(),
+     bundler: bundlerSchema.optional(),
      generateCommonJSApi: z.boolean().default(false),
 -    typescriptCompiler: z
 -      .enum(["tsc", "tsgo"])
@@ -15510,10 +15460,10 @@ index 06ed6f369f9ef879d76a4c098637ae73a3d7bc95..f7f6642b8dc462741845003d4be27d63
            stdio: "inherit",
          },
 diff --git a/src/cli/lib/utils/utils.ts b/src/cli/lib/utils/utils.ts
-index 5355377460ef4a92382e912f5b878c6f0e5e5052..267cda0ec54f28bf23164f252d16fe0e2c58d89f 100644
+index 26bc170c6c841a04f0a7a93dbd2cf3b58e0ac57e..50f0ab0b254e785930d2532af0d0233aac2456fd 100644
 --- a/src/cli/lib/utils/utils.ts
 +++ b/src/cli/lib/utils/utils.ts
-@@ -1165,22 +1165,22 @@ export function spawnAsync(
+@@ -1169,22 +1169,22 @@ export function spawnAsync(
      let stdout = "";
      let stderr = "";
  
@@ -15546,7 +15496,7 @@ index 5355377460ef4a92382e912f5b878c6f0e5e5052..267cda0ec54f28bf23164f252d16fe0e
        });
      }
  
-@@ -1206,7 +1206,6 @@ export function spawnAsync(
+@@ -1210,7 +1210,6 @@ export function spawnAsync(
      };
  
      const errorListener = (error: Error) => {
@@ -15554,7 +15504,7 @@ index 5355377460ef4a92382e912f5b878c6f0e5e5052..267cda0ec54f28bf23164f252d16fe0e
        child.removeListener("close", completionListener);
        if (pipeOutput) {
          reject({ error, status: null });
-@@ -1215,11 +1214,9 @@ export function spawnAsync(
+@@ -1219,11 +1218,9 @@ export function spawnAsync(
        }
      };
  

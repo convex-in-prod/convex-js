@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 30 Sep 2026 01:02:07 +0800
-Subject: [PATCH 08/18] sdk: support typed runtime values and bulk query
+Subject: [PATCH 08/17] sdk: support typed runtime values and bulk query
  collection
 
 Use the runtime capability boundary for bulk collection, owned JSON values and typed syscall arguments and results. Keep ordinary serialized syscalls when capabilities are absent and preserve value ownership across query, database, storage, metadata, scheduler and registration adapters. Include focused owned-value regressions.
@@ -41,12 +41,12 @@ registration entry points.
  src/server/impl/storage_impl.ts               |  50 ++--
  src/server/impl/syscall.test.ts               |  69 ++++++
  src/server/impl/syscall.ts                    | 232 +++++++++++++++++-
- src/server/impl/value_syscall.test.ts         | 151 ++++++++++++
+ src/server/impl/value_syscall.test.ts         | 154 ++++++++++++
  src/server/registration.ts                    |   6 +
  src/values/validators.ts                      |   7 +-
  src/values/value.ts                           |  51 +++-
  src/values/value_owned.test.ts                |  47 ++++
- 21 files changed, 1267 insertions(+), 278 deletions(-)
+ 21 files changed, 1270 insertions(+), 278 deletions(-)
  create mode 100644 src/server/impl/query_builder.test.ts
  create mode 100644 src/server/impl/query_value.ts
  create mode 100644 src/server/impl/syscall.test.ts
@@ -54,19 +54,19 @@ registration entry points.
  create mode 100644 src/values/value_owned.test.ts
 
 diff --git a/src/server/components/index.ts b/src/server/components/index.ts
-index 9e74964b6c4e23e8cf3cfc7d364660b80ba613f5..4ede471b9472ab9f02180194c83423bd26837e2c 100644
+index b4b29794f7266116eac4117b0796fed8380cd1f6..8708ebc76366080e68840053d30eafdc3be482fc 100644
 --- a/src/server/components/index.ts
 +++ b/src/server/components/index.ts
-@@ -6,7 +6,7 @@ import {
+@@ -7,7 +7,7 @@ import {
    FunctionReference_future,
    FunctionType,
  } from "../api.js";
 -import { performAsyncSyscall } from "../impl/syscall.js";
 +import { ValueSyscall, performAsyncValueSyscall } from "../impl/syscall.js";
- import { DefaultFunctionArgs } from "../registration.js";
+ import { DefaultFunctionArgs, FunctionVisibility } from "../registration.js";
  import {
    AppDefinitionAnalysis,
-@@ -83,10 +83,12 @@ export async function createFunctionHandle<
+@@ -89,10 +89,12 @@ export async function createFunctionHandle<
      | FunctionReference_future<Type, "public" | "internal", Args, ReturnType>,
  ): Promise<FunctionHandle<Type, Args, ReturnType>> {
    const address = getFunctionAddress(functionReference);
@@ -2056,10 +2056,10 @@ index f3d23278a5f7eda002e9dcbb4a3645067506b6ad..46f4facb2e1d7864d0d22eb26aa697db
   * function set up in the Convex function execution. Unlike `performSyscall`, the
 diff --git a/src/server/impl/value_syscall.test.ts b/src/server/impl/value_syscall.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2bfd6334e20848d06ba39d6a8cc12fdca379e478
+index 0000000000000000000000000000000000000000..a98d6f40ab7ef44aa431921f60682ce9981976be
 --- /dev/null
 +++ b/src/server/impl/value_syscall.test.ts
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,154 @@
 +import { afterEach, expect, test, vi } from "vitest";
 +import { setupWriter } from "./database_impl.js";
 +import { mutationGeneric } from "./registration_impl.js";
@@ -2178,7 +2178,10 @@ index 0000000000000000000000000000000000000000..2bfd6334e20848d06ba39d6a8cc12fdc
 +test.each(["json", "typed"] as const)(
 +  "both mutation entry points retain JWT signing with %s identity transport",
 +  async (mode) => {
-+    const options = { claims: { scope: "test" }, expiresInSeconds: 60 };
++    const options = {
++      claims: { aud: "test-service", scope: "test" },
++      expiresInSeconds: 60,
++    };
 +    const signingRequests: unknown[] = [];
 +    vi.stubGlobal("Convex", {
 +      asyncSyscall: async (op: string, args: string) => {

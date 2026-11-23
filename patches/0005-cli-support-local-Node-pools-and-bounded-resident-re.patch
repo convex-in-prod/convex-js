@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 30 Sep 2026 01:02:07 +0800
-Subject: [PATCH 05/18] cli: support local Node pools and bounded resident
+Subject: [PATCH 05/17] cli: support local Node pools and bounded resident
  retirement
 
 Validate module-scoped local executor pool declarations during bundling and carry them through deployment metadata. Expose the matching server retirement callback so residents can drain under the backend-owned deadline without weakening forced termination or memory-pressure authority.
@@ -179,7 +179,7 @@ index 0000000000000000000000000000000000000000..5506beb91a83daf7d34c9dd7baa25a20
 +  });
 +});
 diff --git a/src/bundler/index.ts b/src/bundler/index.ts
-index 3a71e40fd9fbcf8d90b60fd195ae68efc5698d6f..086505b8ea1af2c6828215d32f1979a48be6a03a 100644
+index 16382c9de445d0fb50da375dd27cd5812c5e68e3..ae37c395e0990f8d500275a754cef78111243c36 100644
 --- a/src/bundler/index.ts
 +++ b/src/bundler/index.ts
 @@ -47,19 +47,21 @@ export function* walkDir(
@@ -189,13 +189,13 @@ index 3a71e40fd9fbcf8d90b60fd195ae68efc5698d6f..086505b8ea1af2c6828215d32f1979a4
 -type ModuleEnvironment = "node" | "isolate";
 +type ModuleEnvironment = "node" | "isolate" | `node:pool:${string}`;
  
- export interface Bundle {
+ export type Bundle = {
    path: string;
    source: string;
    sourceMap?: string | undefined;
    environment: ModuleEnvironment;
 +  nodePool?: string | undefined;
- }
+ };
  
  export interface BundleHash {
    path: string;
@@ -428,7 +428,7 @@ index 3c13bd528ff0ade2ffc79aad5da757633902949e..3fa4d89459f376376a7a99537beddb64
  ) {
    const deploymentToActOn = await loadSelectedDeploymentCredentials(
 diff --git a/src/cli/lib/command.ts b/src/cli/lib/command.ts
-index 56ab2e5812767341a839da3fe32ccaf8000de2b1..3f8b8a727f101c47ad6247ecb70d5f46fd58e98d 100644
+index 787bb07d076d3493ed464ba36a6b8bdfe69bfc31..edfbf7fb3ec951a6fe91c3fc142160f90b030a4d 100644
 --- a/src/cli/lib/command.ts
 +++ b/src/cli/lib/command.ts
 @@ -55,6 +55,7 @@ declare module "@commander-js/extra-typings" {
@@ -451,7 +451,7 @@ index 56ab2e5812767341a839da3fe32ccaf8000de2b1..3f8b8a727f101c47ad6247ecb70d5f46
        new Option(
          "-y, --yes",
 diff --git a/src/cli/lib/components.ts b/src/cli/lib/components.ts
-index 701528591ebd28df368bd595df67322dea9bf895..6c6a917f9048dd849ea067a657a258ec4f102fcc 100644
+index 3924b8eed8590e813f744bfa779383d008b3fca8..e83443360ff63c88180d0279d89afdf278f7ce45 100644
 --- a/src/cli/lib/components.ts
 +++ b/src/cli/lib/components.ts
 @@ -100,6 +100,7 @@ export type PushOptions = {
@@ -486,7 +486,7 @@ index 701528591ebd28df368bd595df67322dea9bf895..6c6a917f9048dd849ea067a657a258ec
    },
  ): Promise<StartPushResponse | null> {
    const convexDir = await getFunctionsDirectoryPath(ctx);
-@@ -558,6 +562,22 @@ async function startComponentsPushAndCodegen(
+@@ -559,6 +563,22 @@ async function startComponentsPushAndCodegen(
      startPush(ctx, span, startPushRequest, options),
    );
  
@@ -509,7 +509,7 @@ index 701528591ebd28df368bd595df67322dea9bf895..6c6a917f9048dd849ea067a657a258ec
    if (options.verbose) {
      logMessage(
        "startPush: " +
-@@ -656,7 +676,10 @@ function logStartPushSizes(span: Span, startPushRequest: StartPushRequest) {
+@@ -657,7 +677,10 @@ function logStartPushSizes(span: Span, startPushRequest: StartPushRequest) {
        if (module.environment === "isolate") {
          v8Size += module.source.length + (module.sourceMap ?? "").length;
          v8Count += 1;
@@ -522,7 +522,7 @@ index 701528591ebd28df368bd595df67322dea9bf895..6c6a917f9048dd849ea067a657a258ec
          nodeCount += 1;
        }
 diff --git a/src/cli/lib/components/definition/bundle.ts b/src/cli/lib/components/definition/bundle.ts
-index 5efe8a8bb4785d71b20672a219383b06992ae9c1..f6a9d18feed58856d17d4bc55e33a337dea9e5e7 100644
+index 580fbea7ddc693d5f1b64a4ed2f14a7d3c60c7a2..c803943a70b13bcadacf2e6473c22faf7da52bd0 100644
 --- a/src/cli/lib/components/definition/bundle.ts
 +++ b/src/cli/lib/components/definition/bundle.ts
 @@ -744,6 +744,7 @@ export async function bundleImplementations({
@@ -542,10 +542,10 @@ index 5efe8a8bb4785d71b20672a219383b06992ae9c1..f6a9d18feed58856d17d4bc55e33a337
            platform: "node",
            chunksFolder: path.join("_deps", "node"),
 diff --git a/src/cli/lib/config.ts b/src/cli/lib/config.ts
-index 6f9e256e5ea10d2e1698c2af718d363234c1d358..6efc7f6f6b10ea792077e44d47ee8bbff1341922 100644
+index dfb6c2c40f89a7637f540160fa1839ef9e853176..d55dda38bbb52de9166143990fee2beaeb3575a2 100644
 --- a/src/cli/lib/config.ts
 +++ b/src/cli/lib/config.ts
-@@ -739,6 +739,7 @@ export async function configFromProjectConfig(
+@@ -755,6 +755,7 @@ export async function configFromProjectConfig(
      ctx,
      dir: baseDir,
      entryPoints: entryPoints.node,
@@ -661,7 +661,7 @@ index 0000000000000000000000000000000000000000..34540fbda7869d1a70a65a6e1b4816f0
 +  ).toBe(false);
 +});
 diff --git a/src/cli/lib/deployApi/modules.ts b/src/cli/lib/deployApi/modules.ts
-index e8ea18e8d88a822ba4b3ac5abdbec8ad9ec8cc38..b7860b91e21e6acc6988a348fce2c838a5f36536 100644
+index 7e9904da97c88180b65be8ab7ed063acc3737841..0110a787454aa118336b0a618e13eee2b989f669 100644
 --- a/src/cli/lib/deployApi/modules.ts
 +++ b/src/cli/lib/deployApi/modules.ts
 @@ -4,22 +4,42 @@ import { looseObject } from "./utils.js";
@@ -710,10 +710,10 @@ index e8ea18e8d88a822ba4b3ac5abdbec8ad9ec8cc38..b7860b91e21e6acc6988a348fce2c838
  
  export const nodeDependency = looseObject({
 diff --git a/src/cli/lib/deployApi/startPush.ts b/src/cli/lib/deployApi/startPush.ts
-index eeb9d224888fc2cea6202f65e98507503b45d092..4ffc53184228e561abf1df3d04fc290be9c282a1 100644
+index 783855a74b17a446ba2eb622cafad8922c0f61d1..54ae380912bac1643f77ec431c42907acc099ecb 100644
 --- a/src/cli/lib/deployApi/startPush.ts
 +++ b/src/cli/lib/deployApi/startPush.ts
-@@ -45,6 +45,7 @@ export const startPushResponse = looseObject({
+@@ -46,6 +46,7 @@ export const startPushResponse = looseObject({
    app: checkedComponent,
  
    schemaChange,
@@ -722,7 +722,7 @@ index eeb9d224888fc2cea6202f65e98507503b45d092..4ffc53184228e561abf1df3d04fc290b
  export type StartPushResponse = z.infer<typeof startPushResponse>;
  
 diff --git a/src/cli/lib/dev.ts b/src/cli/lib/dev.ts
-index b23df8370043329d58aef7f696a34ea12ec1717b..6f2a8a3f1bc76d284c57d8012a1ff34800a166fa 100644
+index e042237e6526fd5fa077b8356dac2612c1f3fb70..3b6268c037a2b4d19c825332202e91d0c76d2c0d 100644
 --- a/src/cli/lib/dev.ts
 +++ b/src/cli/lib/dev.ts
 @@ -139,6 +139,7 @@ export async function devAgainstDeployment(
@@ -734,10 +734,10 @@ index b23df8370043329d58aef7f696a34ea12ec1717b..6f2a8a3f1bc76d284c57d8012a1ff348
          typecheckComponents: devOptions.typecheckComponents,
          debug: false,
 diff --git a/src/cli/lib/run.ts b/src/cli/lib/run.ts
-index 13dbf6520ebf952dbe8b557aab50e0cccb4f24eb..598cddb186c140f3db6b322c5d3d4c9989f69898 100644
+index 2491867935eeabc48050a80a4412ec90ce04dec8..b1c8cfe9e25c77dfdcf31107636bce9e7887292d 100644
 --- a/src/cli/lib/run.ts
 +++ b/src/cli/lib/run.ts
-@@ -527,6 +527,7 @@ export async function pushToDeployment(
+@@ -530,6 +530,7 @@ export async function pushToDeployment(
        deploymentName: args.deploymentName,
        verbose: false,
        dryRun: false,

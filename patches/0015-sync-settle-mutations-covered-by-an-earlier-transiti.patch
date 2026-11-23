@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Tue, 3 Nov 2026 01:32:15 +0800
-Subject: [PATCH 15/18] sync: settle mutations covered by an earlier transition
+Subject: [PATCH 15/17] sync: settle mutations covered by an earlier transition
 
 A covering query transition can arrive before its mutation response. The
 request manager previously waited for another transition even when the
@@ -34,7 +34,7 @@ focused ESLint, and the full package build also pass.
  create mode 100644 src/browser/sync/mutation_settlement.test.ts
 
 diff --git a/patches/README.md b/patches/README.md
-index ed18f43af3506ebd9e563d9ef0bf7eb411a36c42..3e78086cf41298363c1b4b99f0096e8cc3968451 100644
+index 78a7e76dc27629189daf27130b52c4d105228f3a..53b92ec527e99b42c22d74314d68e1894f960177 100644
 --- a/patches/README.md
 +++ b/patches/README.md
 @@ -124,6 +124,20 @@ This change is derived from

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Sun, 8 Nov 2026 16:04:04 +0800
-Subject: [PATCH 17/18] browser: trace mutation socket decoding and response
+Subject: [PATCH 17/17] browser: trace mutation socket decoding and response
  handling
 
 Include the sync-protocol session ID in enqueue observations so callers can correlate payload-free mutation traces with backend request IDs. Keep this identifier distinct from authentication state and preserve it across reconnects.

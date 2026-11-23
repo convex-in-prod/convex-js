@@ -1,14 +1,14 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Roman Leventov <leventov.ru@gmail.com>
 Date: Wed, 30 Sep 2026 01:02:07 +0800
-Subject: [PATCH 11/18] packaging: keep source provenance separate from
+Subject: [PATCH 11/17] packaging: keep source provenance separate from
  immutable archives
 
 Record the reviewed upstream source and retain the peer-compatible SHA-derived package build workflow. Pin the published dependency set needed by the source build. Publish verified archives directly in the distribution repository, preserving existing URLs and manifest bytes while keeping package data out of the semantic source train. Document the maintained adoption contracts and source/history reconstruction workflow.
 
 Provision uv in the package workflow for the upstream Python prepack builder.
 
-Refresh the source train to upstream 1.49.0 and run CI on Node.js 22.
+Record the reviewed upstream 1.51.0 source. Keep the upstream Node 24 CI job and verify package publication on Node 22.
 Retain staged-validator checks for actual deployments while codegen uses
 non-committing analysis. Preserve native resident selection and upstream
 mutation file access beside typed runtime value syscalls.
@@ -21,12 +21,11 @@ manifest set without peer overrides.
 ---
  .convex-in-prod-upstream                   |   1 +
  .github/workflows/build-convex-in-prod.yml | 157 +++++++++++++++++
- .github/workflows/test-and-lint.yml        |   2 +-
- CHANGELOG.md                               |  19 +-
+ CHANGELOG.md                               |  11 ++
  package.json                               |   2 +-
  packages/README.md                         |  18 ++
  patches/README.md                          | 191 +++++++++++++++++++++
- 7 files changed, 384 insertions(+), 6 deletions(-)
+ 6 files changed, 379 insertions(+), 1 deletion(-)
  create mode 100644 .convex-in-prod-upstream
  create mode 100644 .github/workflows/build-convex-in-prod.yml
  create mode 100644 packages/README.md
@@ -34,14 +33,14 @@ manifest set without peer overrides.
 
 diff --git a/.convex-in-prod-upstream b/.convex-in-prod-upstream
 new file mode 100644
-index 0000000000000000000000000000000000000000..bfab88c52e03292d0566a78658a92deece33a336
+index 0000000000000000000000000000000000000000..bd98d2793433971f24d6dfe16b2d2e5cc1dd5086
 --- /dev/null
 +++ b/.convex-in-prod-upstream
 @@ -0,0 +1 @@
-+d54e497d3a86d220f993b77e4b59b6f3947fb8d9
++2db9ec6496a0c48fa8bcea3c3069633ec56ba7fe
 diff --git a/.github/workflows/build-convex-in-prod.yml b/.github/workflows/build-convex-in-prod.yml
 new file mode 100644
-index 0000000000000000000000000000000000000000..61aa5f8eef61abbf8bf527114456648ddab57aaa
+index 0000000000000000000000000000000000000000..1260520cd0118c587e96aa682cb3b47e46aa9d89
 --- /dev/null
 +++ b/.github/workflows/build-convex-in-prod.yml
 @@ -0,0 +1,157 @@
@@ -100,13 +99,13 @@ index 0000000000000000000000000000000000000000..61aa5f8eef61abbf8bf527114456648d
 +          upstream_base_sha="$(tr -d '\n' < .convex-in-prod-upstream)"
 +          git merge-base --is-ancestor "$upstream_base_sha" HEAD
 +
-+          # Published package manifests are immutable artifact records, not formatted source.
++          # Match the package format-check exclusion for the upstream changelog.
 +
 +          mapfile -t format_files < <(
 +            git diff --name-only --diff-filter=ACMR "$upstream_base_sha" HEAD -- \
 +              '*.cjs' '*.css' '*.gql' '*.graphql' '*.html' '*.js' '*.json' \
 +              '*.json5' '*.jsx' '*.md' '*.mdx' '*.mjs' '*.scss' '*.ts' \
-+              '*.tsx' '*.yaml' '*.yml' ':(exclude)packages/convex/**'
++              '*.tsx' '*.yaml' '*.yml' ':(exclude)CHANGELOG.md' ':(exclude)packages/convex/**'
 +          )
 +          if (( ${#format_files[@]} > 0 )); then
 +            # Upstream has no lockfile, so keep formatter upgrades from changing
@@ -202,46 +201,11 @@ index 0000000000000000000000000000000000000000..61aa5f8eef61abbf8bf527114456648d
 +          process.stdout.write(`Package: \`${packageJson.name}@${packageJson.version}\`\n\n`);
 +          process.stdout.write(`Integrity: \`${integrity}\`\n`);
 +          NODE
-diff --git a/.github/workflows/test-and-lint.yml b/.github/workflows/test-and-lint.yml
-index 92d3da140f6c8d70c37285b3abc73aef05b5f573..851f014135eab3bf662ccd964ffc1d73804c9690 100644
---- a/.github/workflows/test-and-lint.yml
-+++ b/.github/workflows/test-and-lint.yml
-@@ -21,7 +21,7 @@ jobs:
-       - name: Node setup
-         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-         with:
--          node-version: "20.20.2"
-+          node-version: "22"
- 
-       - name: NPM v10
-         run: npm install -g npm@10 --registry=https://registry.npmjs.org
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index d4e50576c0ec247981e09275b2825df29b24bb9b..f06668eb4d0075eb50c49bf8fcb089b9cebcec14 100644
+index 801d5d995ae418066e7ef9db7752b6584a9ed928..9d612f1e3a4601925dd00c33173164f936f02da9 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -21,8 +21,8 @@
- ## 1.48.0
- 
- - Convex deployments can now sign their own JWTs with an internally managed
--  key-pair. The `ctx.auth.signJwt` API is available in mutations. The JWTs
--  can be verified with the public key in the JWKS hosted at
-+  key-pair. The `ctx.auth.signJwt` API is available in mutations. The JWTs can
-+  be verified with the public key in the JWKS hosted at
-   `${CONVEX_CLOUD_URL}/.well-known/jwks.json`.
- - `npx convex dev --verbose` and `npx convex deploy --verbose` no longer print
-   environment variable values. The logged list of environment variables shows
-@@ -35,8 +35,8 @@
-   `--include-values` to print the values.
- 
- - Fixed `npx convex ai-files install` and `npx convex ai-files update` reporting
--  success and exiting 0 when the guidelines download or the agent skills
--  install failed. They now exit with code 1.
-+  success and exiting 0 when the guidelines download or the agent skills install
-+  failed. They now exit with code 1.
- 
- - `ctx.storage.store()` and `ctx.storage.get()` are now available in mutations,
-   not just actions. Files stored and read in a mutation count toward its
-@@ -149,6 +149,17 @@
+@@ -200,6 +200,17 @@
    gateway.
  - Improved the error message when `npx convex export` fails because a snapshot
    export is already in progress.
@@ -260,10 +224,10 @@ index d4e50576c0ec247981e09275b2825df29b24bb9b..f06668eb4d0075eb50c49bf8fcb089b9
  ## 1.44.0
  
 diff --git a/package.json b/package.json
-index de3fee760c9b7c6e6996afb73656aaefe5b3ec2a..967b882fc3c824281eec39862d99714dd63b0f08 100644
+index b6411a239ef6ed972af10948e6d7201bee6cb2d4..d8320df4709b27203ca803864eb322b9c8a05829 100644
 --- a/package.json
 +++ b/package.json
-@@ -337,7 +337,7 @@
+@@ -336,7 +336,7 @@
      "semver": "^7.6.0",
      "serve-handler": "~6.1.6",
      "shx": "~0.4.0",
@@ -298,7 +262,7 @@ index 0000000000000000000000000000000000000000..e9b0902b93eda3a4fc907dcab6dbf197
 +[the release procedure](../patches/README.md#rebase-and-release).
 diff --git a/patches/README.md b/patches/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..97b3647168184b92954d6a160c8d62df62225e66
+index 0000000000000000000000000000000000000000..c74f18c836859ea94d402abee66e0789d7b76f63
 --- /dev/null
 +++ b/patches/README.md
 @@ -0,0 +1,191 @@
@@ -320,7 +284,7 @@ index 0000000000000000000000000000000000000000..97b3647168184b92954d6a160c8d62df
 +in the
 +[`convex-backend` maintained patch set](https://github.com/convex-in-prod/convex-backend/blob/main/patches/README.md).
 +
-+The SDK and CLI require Node.js 22 or newer, following upstream 1.49.0.
++The SDK and CLI require Node.js 22 or newer.
 +
 +## Maintained changes
 +
